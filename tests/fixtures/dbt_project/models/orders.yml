@@ -1,0 +1,33 @@
+version: 2
+
+models:
+  - name: time_spine
+    description: 包装服务 parse 测试使用的最小日粒度时间脊柱。
+    time_spine:
+      standard_granularity_column: date_day
+    columns:
+      - name: date_day
+        description: 测试时间脊柱中的日期。
+        granularity: day
+  - name: orders
+    description: 包装服务 parse 测试使用的单行订单模型。
+    semantic_model:
+      enabled: true
+    agg_time_dimension: ordered_at
+    columns:
+      - name: order_id
+        description: 测试订单的唯一标识。
+        entity: {name: order, type: primary}
+      - name: ordered_at
+        description: 测试订单所属日期。
+        granularity: day
+        dimension: {type: time}
+      - name: revenue
+        description: 测试订单收入金额。
+    metrics:
+      - name: revenue
+        label: 收入
+        description: 包装服务 parse 测试使用的收入合计。
+        type: simple
+        agg: sum
+        expr: revenue

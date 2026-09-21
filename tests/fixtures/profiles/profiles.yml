@@ -1,0 +1,10 @@
+wrapper_fixture:
+  target: test
+  outputs:
+    test:
+      type: starrocks
+      host: 127.0.0.1
+      port: 9030
+      schema: wrapper_fixture
+      username: fixture
+      password: fixture
