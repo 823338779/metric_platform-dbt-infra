@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Mapping
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,14 @@ class DbtJobRequest(BaseModel):
     variables: dict[str, object] = Field(default_factory=dict, description="传递给 dbt --vars 的值。")
     full_refresh: bool = Field(default=False, description="是否执行 dbt full refresh。")
 
+    @field_validator("select", "exclude")
+    @classmethod
+    def reject_cli_options(cls, values: list[str]) -> list[str]:
+        """Keep variadic dbt selection arguments from becoming Click options."""
+        if any(value.startswith("-") for value in values):
+            raise ValueError("dbt selection values cannot start with '-'")
+        return values
+
 
 class MetricFlowJobRequest(BaseModel):
     """Structured MetricFlow invocation accepted by the HTTP boundary."""
@@ -72,6 +80,18 @@ class MetricFlowJobRequest(BaseModel):
     start_time: datetime | None = Field(default=None, description="查询起始时间。")
     end_time: datetime | None = Field(default=None, description="查询结束时间。")
     limit: int | None = Field(default=None, ge=1, description="最大返回行数。")
+
+    @model_validator(mode="after")
+    def require_metrics_for_metric_commands(self) -> MetricFlowJobRequest:
+        """Reject command-specific omissions at the stable HTTP validation boundary."""
+        commands_requiring_metrics = {
+            MetricFlowCommand.LIST_DIMENSIONS,
+            MetricFlowCommand.EXPLAIN,
+            MetricFlowCommand.QUERY,
+        }
+        if self.command in commands_requiring_metrics and not self.metrics:
+            raise ValueError(f"metrics are required for {self.command.value}")
+        return self
 
 
 class JobRecord(BaseModel):

@@ -85,7 +85,7 @@ def _write_e2e_project(projects_root: Path, profiles_dir: Path, values: dict[str
                 f"      port: {int(values['DBT_STARROCKS_PORT'])}",
                 f"      schema: {values['DBT_STARROCKS_SCHEMA']}",
                 f"      username: {values['DBT_STARROCKS_USER']}",
-                f"      password: {values['DBT_ENV_SECRET_STARROCKS_PASSWORD']}",
+                "      password: \"{{ env_var('DBT_ENV_SECRET_STARROCKS_PASSWORD') }}\"",
             )
         )
         + "\n",
@@ -135,3 +135,24 @@ def test_real_starrocks_debug_seed_build_and_test(tmp_path: Path) -> None:
         for command in ("debug", "seed", "build", "test"):
             record = _submit_and_wait(client, command)
             assert record["status"] == "succeeded", record
+
+
+def test_e2e_profile_references_secret_environment_without_copying_value(
+    tmp_path: Path,
+) -> None:
+    """The disposable profile must not persist a real password in pytest temp data."""
+    values = {
+        "DBT_STARROCKS_HOST": "127.0.0.1",
+        "DBT_STARROCKS_PORT": "9030",
+        "DBT_STARROCKS_USER": "fixture",
+        "DBT_ENV_SECRET_STARROCKS_PASSWORD": "complex: password # value",
+        "DBT_STARROCKS_SCHEMA": "fixture",
+    }
+    projects_root = tmp_path / "projects"
+    profiles_dir = tmp_path / "profiles"
+
+    _write_e2e_project(projects_root, profiles_dir, values)
+
+    profile = (profiles_dir / "profiles.yml").read_text(encoding="utf-8")
+    assert values["DBT_ENV_SECRET_STARROCKS_PASSWORD"] not in profile
+    assert "env_var('DBT_ENV_SECRET_STARROCKS_PASSWORD')" in profile

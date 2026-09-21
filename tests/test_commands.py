@@ -105,6 +105,19 @@ def test_unknown_dbt_command_is_rejected_by_request_model() -> None:
         DbtJobRequest.model_validate({"project": "sales", "command": "run-operation"})
 
 
+@pytest.mark.parametrize("field", ["select", "exclude"])
+def test_dbt_selection_cannot_inject_cli_options(field: str) -> None:
+    """Selection values must not override service-controlled dbt paths or options."""
+    with pytest.raises(ValidationError):
+        DbtJobRequest.model_validate(
+            {
+                "project": "sales",
+                "command": "build",
+                field: ["orders", "--project-dir", "../outside"],
+            }
+        )
+
+
 def test_build_metricflow_list_metrics(project_dir: Path, profiles_dir: Path) -> None:
     """Metric discovery must request all dimensions without accepting paths."""
     request = MetricFlowJobRequest(project="sales", command=MetricFlowCommand.LIST_METRICS)
@@ -120,10 +133,8 @@ def test_build_metricflow_list_dimensions_requires_metrics(
     project_dir: Path, profiles_dir: Path
 ) -> None:
     """Dimension discovery without a metric set must fail before spawning mf."""
-    request = MetricFlowJobRequest(project="sales", command=MetricFlowCommand.LIST_DIMENSIONS)
-
-    with pytest.raises(ValueError, match="metrics"):
-        build_metricflow_command(request, project_dir, profiles_dir)
+    with pytest.raises(ValidationError, match="metrics"):
+        MetricFlowJobRequest(project="sales", command=MetricFlowCommand.LIST_DIMENSIONS)
 
 
 def test_build_metricflow_explain_serializes_query_options(
@@ -168,7 +179,5 @@ def test_build_metricflow_explain_serializes_query_options(
 
 def test_build_metricflow_query_requires_metrics(project_dir: Path, profiles_dir: Path) -> None:
     """A metric query without metrics or a saved query has no defined result."""
-    request = MetricFlowJobRequest(project="sales", command=MetricFlowCommand.QUERY)
-
-    with pytest.raises(ValueError, match="metrics"):
-        build_metricflow_command(request, project_dir, profiles_dir)
+    with pytest.raises(ValidationError, match="metrics"):
+        MetricFlowJobRequest(project="sales", command=MetricFlowCommand.QUERY)

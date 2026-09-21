@@ -68,3 +68,48 @@ def test_dbt_parse_generates_semantic_artifacts_without_database(
 
     assert (project_dir / "target" / "manifest.json").is_file()
     assert (project_dir / "target" / "semantic_manifest.json").is_file()
+
+
+def test_metricflow_cli_loads_a_real_supported_duckdb_adapter(tmp_path: Path) -> None:
+    """The deployable runtime must include at least one adapter MetricFlow supports."""
+    project_dir = tmp_path / "project"
+    profiles_dir = tmp_path / "profiles"
+    shutil.copytree(DBT_PROJECT_FIXTURE, project_dir)
+    profiles_dir.mkdir()
+    (profiles_dir / "profiles.yml").write_text(
+        "wrapper_fixture:\n  target: test\n  outputs:\n    test:\n"
+        "      type: duckdb\n      path: ':memory:'\n",
+        encoding="utf-8",
+    )
+    environment = dbt_environment()
+    environment["DBT_PROFILES_DIR"] = str(profiles_dir)
+    subprocess.run(
+        [
+            "dbt",
+            "parse",
+            "--project-dir",
+            str(project_dir),
+            "--profiles-dir",
+            str(profiles_dir),
+            "--no-partial-parse",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=environment,
+        timeout=DBT_TIMEOUT_SECONDS,
+    )
+
+    result = subprocess.run(
+        ["mf", "list", "metrics", "--show-all-dimensions"],
+        cwd=project_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=environment,
+        timeout=DBT_TIMEOUT_SECONDS,
+    )
+
+    assert "revenue" in result.stdout

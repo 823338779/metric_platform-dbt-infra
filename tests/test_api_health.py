@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 VERSION_DISTRIBUTIONS = (
     "dbt-core",
     "dbt-starrocks",
+    "dbt-duckdb",
     "dbt-metricflow",
     "metricflow",
 )
@@ -26,6 +27,16 @@ class EmptyJobRunner:
 
     async def get(self, job_id: object) -> None:
         return None
+
+
+class ClosingJobRunner(EmptyJobRunner):
+    """Record whether FastAPI lifespan cleanup reaches the runner."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 def build_client(tmp_path: Path) -> TestClient:
@@ -87,3 +98,18 @@ def test_versions_returns_service_and_pinned_package_versions(tmp_path: Path) ->
         "service": __version__,
         **{distribution: version(distribution) for distribution in VERSION_DISTRIBUTIONS},
     }
+
+
+def test_application_shutdown_closes_job_runner(tmp_path: Path) -> None:
+    """Leaving the application lifespan must terminate active job ownership."""
+    projects_root = tmp_path / "projects"
+    profiles_dir = tmp_path / "profiles"
+    projects_root.mkdir()
+    profiles_dir.mkdir()
+    settings = Settings(projects_root, profiles_dir, 30, 1024)
+    runner = ClosingJobRunner()
+
+    with TestClient(create_app(settings, ProjectRegistry(projects_root), runner)):
+        pass
+
+    assert runner.closed is True

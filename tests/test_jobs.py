@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -111,9 +112,16 @@ async def test_write_jobs_for_different_projects_run_concurrently(
     runner: JobRunner, tmp_path: Path
 ) -> None:
     """Project locking must not serialize independent project mutations."""
-    slow_write = command_spec(tmp_path, "sleep", "0.25", write_operation=True)
-    sales = await runner.submit("sales", slow_write)
-    finance = await runner.submit("finance", slow_write)
+    sales_dir = tmp_path / "sales"
+    finance_dir = tmp_path / "finance"
+    sales_dir.mkdir()
+    finance_dir.mkdir()
+    sales = await runner.submit(
+        "sales", command_spec(sales_dir, "sleep", "0.25", write_operation=True)
+    )
+    finance = await runner.submit(
+        "finance", command_spec(finance_dir, "sleep", "0.25", write_operation=True)
+    )
 
     await asyncio.sleep(0.1)
     sales_running = await runner.get(sales.id)
@@ -141,6 +149,102 @@ async def test_secret_environment_values_are_redacted(tmp_path: Path) -> None:
     assert SECRET_VALUE not in completed.stderr
     assert completed.stdout.strip() == "***"
     assert completed.stderr.strip() == "***"
+
+
+async def test_secret_is_redacted_before_output_tail_is_truncated(tmp_path: Path) -> None:
+    """A secret longer than the retained tail must not leak its suffix."""
+    environment = dict(os.environ)
+    environment[SECRET_ENVIRONMENT_KEY] = SECRET_VALUE
+    runner = JobRunner(timeout_seconds=2.0, max_output_bytes=10)
+    submitted = await runner.submit(
+        "sales",
+        command_spec(tmp_path, "echo", SECRET_VALUE, environment=environment),
+    )
+
+    completed = await runner.wait(submitted.id)
+
+    assert "SECRET" not in completed.stdout
+    assert completed.stdout.strip() == "***"
+
+
+async def test_secret_redaction_handles_stream_boundaries_and_overlaps(tmp_path: Path) -> None:
+    """Chunk boundaries and overlapping secret values must not weaken redaction."""
+    environment = dict(os.environ)
+    environment[SECRET_ENVIRONMENT_KEY] = SECRET_VALUE
+    environment["DBT_ENV_SECRET_TEST_SUFFIX"] = "secret"
+    runner = JobRunner(timeout_seconds=2.0, max_output_bytes=128)
+    submitted = await runner.submit(
+        "sales",
+        command_spec(
+            tmp_path,
+            "split-echo",
+            SECRET_VALUE,
+            "7",
+            environment=environment,
+        ),
+    )
+
+    completed = await runner.wait(submitted.id)
+
+    assert completed.stdout == "***"
+
+
+async def test_same_project_directory_alias_cannot_bypass_write_lock(
+    runner: JobRunner, tmp_path: Path
+) -> None:
+    """The canonical cwd, rather than the request spelling, must own the lock."""
+    slow_write = command_spec(tmp_path, "sleep", "0.25", write_operation=True)
+    first = await runner.submit("sales", slow_write)
+
+    with pytest.raises(ProjectBusyError):
+        await runner.submit("SALES_ALIAS", slow_write)
+
+    await runner.wait(first.id)
+
+
+async def test_timeout_terminates_descendants_that_hold_output_pipes(tmp_path: Path) -> None:
+    """A timed-out process tree must not keep readers and the project lock alive."""
+    runner = JobRunner(timeout_seconds=0.1, max_output_bytes=128)
+    started = time.monotonic()
+    submitted = await runner.submit(
+        "sales",
+        command_spec(tmp_path, "child-holds-pipe", "2", write_operation=True),
+    )
+
+    completed = await runner.wait(submitted.id)
+
+    assert completed.status is JobStatus.TIMED_OUT
+    assert time.monotonic() - started < 1.5
+
+
+async def test_close_cancels_and_terminates_active_process(tmp_path: Path) -> None:
+    """Application shutdown must bound active job cleanup."""
+    runner = JobRunner(timeout_seconds=30.0, max_output_bytes=128)
+    submitted = await runner.submit(
+        "sales",
+        command_spec(tmp_path, "sleep", "5", write_operation=True),
+    )
+    await asyncio.sleep(0.1)
+    started = time.monotonic()
+
+    await runner.close()
+
+    assert time.monotonic() - started < 1.5
+    completed = await runner.get(submitted.id)
+    assert completed is not None and completed.status is JobStatus.FAILED
+
+
+async def test_completed_job_retention_is_bounded(tmp_path: Path) -> None:
+    """Finished records and task objects must not grow without a fixed limit."""
+    runner = JobRunner(timeout_seconds=2.0, max_output_bytes=128, max_completed_jobs=2)
+    completed_ids = []
+    for project in ("one", "two", "three"):
+        submitted = await runner.submit(project, command_spec(tmp_path, "success"))
+        completed_ids.append((await runner.wait(submitted.id)).id)
+
+    assert await runner.get(completed_ids[0]) is None
+    assert await runner.get(completed_ids[1]) is not None
+    assert await runner.get(completed_ids[2]) is not None
 
 
 async def test_unknown_job_returns_none(runner: JobRunner) -> None:

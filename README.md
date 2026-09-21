@@ -7,6 +7,7 @@
 - Python `3.11` 至 `3.14`，容器使用 Python `3.12`
 - `dbt-core==1.12.5`
 - `dbt-starrocks==1.12.2`
+- `dbt-duckdb==1.11.0`（提供一个可直接运行的 MetricFlow 支持 adapter）
 - `dbt-metricflow==0.15.0`
 - `metricflow==0.213.0`
 - `uv==0.12.17`（容器构建工具）

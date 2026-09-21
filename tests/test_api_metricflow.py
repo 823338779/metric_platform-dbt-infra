@@ -159,3 +159,21 @@ def test_unknown_adapter_is_rejected(
     assert response.json()["detail"]["code"] == "metricflow_adapter_not_supported"
     assert "custom_adapter" in response.json()["detail"]["message"]
     assert runner.submissions == []
+
+
+@pytest.mark.parametrize("command", ["list_dimensions", "explain", "query"])
+def test_metricflow_command_without_metrics_returns_stable_422(
+    metricflow_api: tuple[TestClient, Path, StubJobRunner], command: str
+) -> None:
+    """Command-specific input errors must remain structured client failures."""
+    client, project_dir, runner = metricflow_api
+    write_manifest(project_dir, adapter_type="postgres")
+
+    response = client.post(
+        "/v1/metricflow/jobs",
+        json={"project": "sales", "command": command},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "validation_error"
+    assert runner.submissions == []

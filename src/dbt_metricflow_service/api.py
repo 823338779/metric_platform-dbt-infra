@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from importlib.metadata import version
 from uuid import UUID
 
@@ -40,6 +42,7 @@ JOB_PATH = "/v1/jobs/{job_id}"
 VERSION_DISTRIBUTIONS = (
     "dbt-core",
     "dbt-starrocks",
+    "dbt-duckdb",
     "dbt-metricflow",
     "metricflow",
 )
@@ -66,7 +69,14 @@ def _error_detail(code: str, message: str) -> dict[str, dict[str, str]]:
 
 def create_app(settings: Settings, registry: ProjectRegistry, runner: JobRunner) -> FastAPI:
     """Create one dependency-injected service application."""
-    app = FastAPI(title=SERVICE_TITLE, version=__version__)
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        yield
+        close = getattr(app.state.runner, "close", None)
+        if close is not None:
+            await close()
+
+    app = FastAPI(title=SERVICE_TITLE, version=__version__, lifespan=lifespan)
     app.state.settings = settings
     app.state.registry = registry
     app.state.runner = runner

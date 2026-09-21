@@ -8,6 +8,7 @@ logger = logging.getLogger(__name__)
 EXPECTED_VERSIONS = {
     "dbt-core": "1.12.5",
     "dbt-starrocks": "1.12.2",
+    "dbt-duckdb": "1.11.0",
     "dbt-metricflow": "0.15.0",
     "metricflow": "0.213.0",
 }
