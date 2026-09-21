@@ -6,6 +6,7 @@ from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Mapping
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -31,6 +32,16 @@ class MetricFlowCommand(StrEnum):
     LIST_DIMENSIONS = "list_dimensions"
     EXPLAIN = "explain"
     QUERY = "query"
+
+
+class JobStatus(StrEnum):
+    """Lifecycle states exposed while a subprocess job is retained."""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    TIMED_OUT = "timed_out"
 
 
 class DbtJobRequest(BaseModel):
@@ -61,6 +72,23 @@ class MetricFlowJobRequest(BaseModel):
     start_time: datetime | None = Field(default=None, description="查询起始时间。")
     end_time: datetime | None = Field(default=None, description="查询结束时间。")
     limit: int | None = Field(default=None, ge=1, description="最大返回行数。")
+
+
+class JobRecord(BaseModel):
+    """Immutable snapshot of one submitted CLI job."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: UUID = Field(description="服务进程内唯一的任务标识。")
+    project: str = Field(description="任务所属的安全项目标识。")
+    status: JobStatus = Field(description="任务当前生命周期状态。")
+    submitted_at: datetime = Field(description="任务进入内存队列的 UTC 时间。")
+    started_at: datetime | None = Field(default=None, description="子进程开始创建的 UTC 时间。")
+    finished_at: datetime | None = Field(default=None, description="子进程结束处理的 UTC 时间。")
+    exit_code: int | None = Field(default=None, description="子进程退出码；结束前或超时时为空。")
+    stdout: str = Field(default="", description="经过截断和凭据遮盖的标准输出尾部。")
+    stderr: str = Field(default="", description="经过截断和凭据遮盖的标准错误尾部。")
+    output_truncated: bool = Field(default=False, description="任一输出流是否超过保留上限。")
 
 
 @dataclass(frozen=True, slots=True)
