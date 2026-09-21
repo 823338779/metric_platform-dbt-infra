@@ -15,11 +15,14 @@ from dbt_metricflow_service.commands import (
     DBT_EXECUTABLE,
     METRICFLOW_EXECUTABLE,
     build_dbt_command,
+    build_metricflow_command,
 )
 from dbt_metricflow_service.jobs import JobRunner, ProjectBusyError
-from dbt_metricflow_service.models import DbtJobRequest, JobRecord
+from dbt_metricflow_service.models import DbtJobRequest, JobRecord, MetricFlowJobRequest
 from dbt_metricflow_service.projects import (
+    InvalidManifestError,
     InvalidProjectError,
+    ManifestNotFoundError,
     ProjectNotFoundError,
     ProjectRegistry,
 )
@@ -32,12 +35,27 @@ LIVE_PATH = "/health/live"
 READY_PATH = "/health/ready"
 VERSIONS_PATH = "/v1/versions"
 DBT_JOBS_PATH = "/v1/dbt/jobs"
+METRICFLOW_JOBS_PATH = "/v1/metricflow/jobs"
 JOB_PATH = "/v1/jobs/{job_id}"
 VERSION_DISTRIBUTIONS = (
     "dbt-core",
     "dbt-starrocks",
     "dbt-metricflow",
     "metricflow",
+)
+METRICFLOW_PACKAGE_VERSION = version("metricflow")
+METRICFLOW_SUPPORTED_ADAPTERS = frozenset(
+    {
+        "athena",
+        "bigquery",
+        "databricks",
+        "duckdb",
+        "postgres",
+        "redshift",
+        "snowflake",
+        "trino",
+        "vertica",
+    }
 )
 
 
@@ -98,6 +116,29 @@ def register_routes(app: FastAPI) -> None:
         command = build_dbt_command(payload, project_dir, settings.profiles_dir)
         return await runner.submit(payload.project, command)
 
+    @app.post(METRICFLOW_JOBS_PATH, status_code=status.HTTP_202_ACCEPTED)
+    async def submit_metricflow_job(
+        payload: MetricFlowJobRequest, request: Request
+    ) -> JobRecord:
+        settings: Settings = request.app.state.settings
+        registry: ProjectRegistry = request.app.state.registry
+        runner: JobRunner = request.app.state.runner
+        project_dir = registry.resolve(payload.project)
+        adapter_type = registry.adapter_type(project_dir)
+        if adapter_type not in METRICFLOW_SUPPORTED_ADAPTERS:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={
+                    "code": "metricflow_adapter_not_supported",
+                    "message": (
+                        f"adapter '{adapter_type}' is not supported by "
+                        f"MetricFlow {METRICFLOW_PACKAGE_VERSION}"
+                    ),
+                },
+            )
+        command = build_metricflow_command(payload, project_dir, settings.profiles_dir)
+        return await runner.submit(payload.project, command)
+
     @app.get(JOB_PATH)
     async def get_job(job_id: UUID, request: Request) -> JobRecord:
         runner: JobRunner = request.app.state.runner
@@ -147,4 +188,25 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,
             content=_error_detail("project_busy", "a write job is already active for this project"),
+        )
+
+    @app.exception_handler(ManifestNotFoundError)
+    async def manifest_not_found(
+        request: Request, error: ManifestNotFoundError
+    ) -> JSONResponse:
+        del request, error
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content=_error_detail(
+                "semantic_manifest_not_generated",
+                "run dbt parse before submitting a MetricFlow job",
+            ),
+        )
+
+    @app.exception_handler(InvalidManifestError)
+    async def invalid_manifest(request: Request, error: InvalidManifestError) -> JSONResponse:
+        del request, error
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content=_error_detail("invalid_dbt_manifest", "dbt manifest metadata is invalid"),
         )
