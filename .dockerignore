@@ -1,0 +1,16 @@
+.git
+.idea
+.superpowers
+.venv
+.pytest_cache
+.ruff_cache
+**/__pycache__
+*.py[cod]
+build
+dist
+docs
+logs
+profiles
+projects
+target
+tests

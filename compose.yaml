@@ -1,0 +1,16 @@
+services:
+  dbt-metricflow-service:
+    build:
+      context: .
+    image: dbt-metricflow-service:0.1.0
+    ports:
+      - "8000:8000"
+    environment:
+      - DBT_STARROCKS_HOST
+      - DBT_STARROCKS_PORT
+      - DBT_STARROCKS_USER
+      - DBT_ENV_SECRET_STARROCKS_PASSWORD
+      - DBT_STARROCKS_SCHEMA
+    volumes:
+      - "${PROJECTS_PATH}:/workspace/projects"
+      - "${PROFILES_PATH}:/workspace/profiles:ro"
