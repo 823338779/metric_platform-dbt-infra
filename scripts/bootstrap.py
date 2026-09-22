@@ -23,6 +23,37 @@ METRICFLOW_SUBMODULE_PATHS = (
     Path("vendor/metricflow"),
     Path("vendor/dbt-metricflow"),
 )
+DBT_METRICFLOW_EDITABLE_MISMATCH = (
+    "The package `dbt-metricflow` requires `metricflow==0.213.0`, "
+    "but `0.214.0.dev0` is installed"
+)
+ROOT_IMPORT_AND_SOURCE_CHECK = """
+import importlib.metadata as metadata
+import json
+from pathlib import Path
+from urllib.parse import urlparse
+from urllib.request import url2pathname
+import dbt, dbt_metricflow, fastapi, metricflow, pytest
+expected = {
+    "dbt-core": "vendor/dbt/core",
+    "dbt-metricflow": "vendor/dbt-metricflow/dbt-metricflow",
+    "metricflow": "vendor/metricflow",
+}
+for name, relative in expected.items():
+    direct_url_text = metadata.distribution(name).read_text("direct_url.json")
+    if direct_url_text is None:
+        raise SystemExit(f"{name} has no direct_url.json")
+    direct_url = json.loads(direct_url_text)
+    actual = Path(url2pathname(urlparse(direct_url["url"]).path)).resolve()
+    required = (Path.cwd() / relative).resolve()
+    if actual != required:
+        raise SystemExit(f"{name} source mismatch: {actual} != {required}")
+"""
+METRICFLOW_IMPORT_CHECK = (
+    "import duckdb, graphviz, metricflow, metricflow_semantic_interfaces, "
+    "metricflow_semantics, pytest, sqlalchemy"
+)
+DBT_METRICFLOW_IMPORT_CHECK = "import dbt, dbt_metricflow, metricflow, pytest"
 
 
 class BootstrapError(RuntimeError):
@@ -289,6 +320,255 @@ def prepare_submodules(context: BootstrapContext, runner: CommandRunner) -> None
         verify_windows_symlinks(context, runner)
 
 
+def find_uv_python(context: BootstrapContext, runner: CommandRunner) -> Path:
+    """Return the uv-managed CPython 3.12 executable."""
+    result = run_checked(
+        runner,
+        ("uv", "python", "find", PYTHON_VERSION),
+        cwd=context.root,
+    )
+    python = Path(result.stdout.strip())
+    if not python.is_file():
+        raise BootstrapError(f"uv returned a missing Python interpreter: {python}")
+    return python
+
+
+def require_environment_version(
+    context: BootstrapContext,
+    runner: CommandRunner,
+    environment: Path,
+) -> None:
+    """Reject an existing environment that is missing or not based on Python 3.12."""
+    if not environment.exists():
+        return
+    python = environment_python(environment, context.platform)
+    if not python.is_file():
+        raise BootstrapError(
+            f"Existing environment has no Python interpreter: {environment}"
+        )
+    result = run_checked(
+        runner,
+        (
+            str(python),
+            "-c",
+            "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+        ),
+        cwd=context.root,
+    )
+    if result.stdout.strip() != PYTHON_VERSION:
+        raise BootstrapError(
+            f"Existing environment must use Python 3.12: {environment}"
+        )
+
+
+def create_upstream_environment(
+    context: BootstrapContext,
+    runner: CommandRunner,
+    *,
+    project: Path,
+    environment: Path,
+    python: Path,
+    editable_overrides: tuple[Path, ...] = (),
+) -> None:
+    """Synchronize one upstream Hatch dev feature into a local environment."""
+    if not environment.exists():
+        run_checked(
+            runner,
+            ("uv", "venv", "--python", str(python), str(environment)),
+            cwd=project,
+        )
+    environment_interpreter = environment_python(environment, context.platform)
+    run_checked(
+        runner,
+        (
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            str(environment_interpreter),
+            "--editable",
+            f"{project}[dev-env-requirements]",
+        ),
+        cwd=project,
+    )
+    for editable in editable_overrides:
+        run_checked(
+            runner,
+            (
+                "uv",
+                "pip",
+                "install",
+                "--python",
+                str(environment_interpreter),
+                "--editable",
+                str(editable),
+            ),
+            cwd=project,
+        )
+
+
+def sync_environments(context: BootstrapContext, runner: CommandRunner) -> None:
+    """Install Python and synchronize all three isolated environments."""
+    if context.check_only:
+        return
+    for environment in (
+        context.root_environment,
+        context.metricflow_environment,
+        context.dbt_metricflow_environment,
+    ):
+        require_environment_version(context, runner, environment)
+    run_checked(
+        runner,
+        ("uv", "python", "install", PYTHON_VERSION),
+        cwd=context.root,
+    )
+    python = find_uv_python(context, runner)
+    run_checked(
+        runner,
+        ("uv", "sync", "--frozen", "--all-groups", "--python", PYTHON_VERSION),
+        cwd=context.root,
+    )
+    create_upstream_environment(
+        context,
+        runner,
+        project=context.root / "vendor" / "metricflow",
+        environment=context.metricflow_environment,
+        python=python,
+    )
+    dbt_metricflow_project = (
+        context.root / "vendor" / "dbt-metricflow" / "dbt-metricflow"
+    )
+    create_upstream_environment(
+        context,
+        runner,
+        project=dbt_metricflow_project,
+        environment=context.dbt_metricflow_environment,
+        python=python,
+        editable_overrides=(dbt_metricflow_project.parent,),
+    )
+
+
+def verify_pip_check(
+    context: BootstrapContext,
+    runner: CommandRunner,
+    python: Path,
+    *,
+    allowed_lines: frozenset[str] = frozenset(),
+) -> None:
+    """Accept a clean dependency graph or explicitly allow-listed diagnostics."""
+    result = runner(
+        ("uv", "pip", "check", "--python", str(python)),
+        cwd=context.root,
+    )
+    lines = frozenset(
+        line.strip()
+        for line in (result.stdout + result.stderr).splitlines()
+        if line.strip()
+    )
+    if result.returncode == 0:
+        return
+    diagnostics = frozenset(
+        line
+        for line in lines
+        if not line.startswith(("Using Python ", "Checked "))
+    )
+    expected_summary = (
+        f"Found {len(allowed_lines)} incompatibility"
+        if len(allowed_lines) == 1
+        else f"Found {len(allowed_lines)} incompatibilities"
+    )
+    if allowed_lines and diagnostics == allowed_lines | {expected_summary}:
+        return
+    raise BootstrapError(
+        "Dependency integrity check failed: " + "; ".join(sorted(lines))
+    )
+
+
+def _required_environment_pythons(
+    context: BootstrapContext,
+    runner: CommandRunner,
+) -> tuple[Path, Path, Path]:
+    environments = (
+        context.root_environment,
+        context.metricflow_environment,
+        context.dbt_metricflow_environment,
+    )
+    for environment in environments:
+        require_environment_version(context, runner, environment)
+    pythons = tuple(
+        environment_python(environment, context.platform) for environment in environments
+    )
+    missing = [python for python in pythons if not python.is_file()]
+    if missing:
+        raise BootstrapError(f"Required environment is missing: {missing[0]}")
+    return pythons
+
+
+def verify_environments(context: BootstrapContext, runner: CommandRunner) -> None:
+    """Validate versions, imports, local sources, lint, and representative tests."""
+    root_python, metricflow_python, dbt_metricflow_python = (
+        _required_environment_pythons(context, runner)
+    )
+    run_checked(
+        runner,
+        (str(root_python), "-c", ROOT_IMPORT_AND_SOURCE_CHECK),
+        cwd=context.root,
+    )
+    run_checked(
+        runner,
+        (str(metricflow_python), "-c", METRICFLOW_IMPORT_CHECK),
+        cwd=context.root,
+    )
+    run_checked(
+        runner,
+        (str(dbt_metricflow_python), "-c", DBT_METRICFLOW_IMPORT_CHECK),
+        cwd=context.root,
+    )
+    verify_pip_check(context, runner, root_python)
+    verify_pip_check(context, runner, metricflow_python)
+    verify_pip_check(
+        context,
+        runner,
+        dbt_metricflow_python,
+        allowed_lines=frozenset({DBT_METRICFLOW_EDITABLE_MISMATCH}),
+    )
+    run_checked(
+        runner,
+        (str(root_python), "-m", "pytest", "tests/test_dependencies.py", "-v"),
+        cwd=context.root,
+    )
+    run_checked(
+        runner,
+        (str(root_python), "-m", "ruff", "check", "src", "tests", "scripts"),
+        cwd=context.root,
+    )
+    rendered_query = (
+        "tests_metricflow/integration/test_rendered_query.py::test_render_query"
+    )
+    run_checked(
+        runner,
+        (str(metricflow_python), "-m", "pytest", rendered_query, "-v"),
+        cwd=context.root / "vendor" / "metricflow",
+    )
+    run_checked(
+        runner,
+        (str(dbt_metricflow_python), "-m", "pytest", rendered_query, "-v"),
+        cwd=context.root / "vendor" / "dbt-metricflow",
+    )
+
+
+def print_interpreter_summary(context: BootstrapContext) -> None:
+    """Print stable interpreter paths relative to the checkout."""
+    print("Development environments are ready:")
+    for label, environment in (
+        ("service", context.root_environment),
+        ("metricflow", context.metricflow_environment),
+        ("dbt-metricflow", context.dbt_metricflow_environment),
+    ):
+        python = environment_python(environment, context.platform)
+        print(f"  {label}: {python.relative_to(context.root)}")
+
+
 def current_platform(platform: str) -> PlatformName:
     if platform == "win32":
         return "windows"
@@ -306,7 +586,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             platform=current_platform(sys.platform),
             check_only=options.check,
         )
-        logger.info("Repository: %s", context.root)
+        prepare_submodules(context, subprocess_runner)
+        sync_environments(context, subprocess_runner)
+        verify_environments(context, subprocess_runner)
+        print_interpreter_summary(context)
         return 0
     except BootstrapError as error:
         logger.error("%s", error)

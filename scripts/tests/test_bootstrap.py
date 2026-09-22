@@ -7,12 +7,17 @@ from pathlib import Path
 import pytest
 
 from scripts.bootstrap import (
+    DBT_METRICFLOW_EDITABLE_MISMATCH,
     BootstrapContext,
     BootstrapError,
+    create_upstream_environment,
     environment_python,
     parse_args,
     prepare_submodules,
+    require_environment_version,
     resolve_repository_root,
+    sync_environments,
+    verify_pip_check,
     verify_submodule_commit,
     verify_windows_symlinks,
 )
@@ -145,3 +150,154 @@ def test_windows_symlink_check_accepts_real_link(tmp_path: Path) -> None:
     )
 
     verify_windows_symlinks(context, runner)
+
+
+def test_wrong_existing_python_is_not_replaced(tmp_path: Path) -> None:
+    context = BootstrapContext(tmp_path, "macos", False)
+    python = environment_python(context.root_environment, context.platform)
+    python.parent.mkdir(parents=True)
+    python.touch()
+    runner = RecordingRunner([completed("3.11\n")])
+
+    with pytest.raises(BootstrapError, match="Python 3.12"):
+        require_environment_version(context, runner, context.root_environment)
+
+    assert not any("sync" in args or "env" in args for args, _, _ in runner.calls)
+
+
+def test_existing_environment_requires_an_interpreter(tmp_path: Path) -> None:
+    context = BootstrapContext(tmp_path, "macos", False)
+    context.root_environment.mkdir()
+
+    with pytest.raises(BootstrapError, match="no Python interpreter"):
+        require_environment_version(context, RecordingRunner(), context.root_environment)
+
+
+def test_metricflow_environment_uses_local_path(tmp_path: Path) -> None:
+    root = tmp_path / "checkout with spaces"
+    context = BootstrapContext(root, "windows", False)
+    runner = RecordingRunner()
+
+    create_upstream_environment(
+        context,
+        runner,
+        project=root / "vendor" / "metricflow",
+        environment=root / "vendor" / "metricflow" / ".venv",
+        python=Path("C:/uv/python.exe"),
+    )
+
+    create_args, create_cwd, create_env = runner.calls[0]
+    assert create_args == (
+        "uv",
+        "venv",
+        "--python",
+        "C:\\uv\\python.exe",
+        str(root / "vendor" / "metricflow" / ".venv"),
+    )
+    assert create_cwd == root / "vendor" / "metricflow"
+    assert create_env == {}
+
+    install_args, install_cwd, install_env = runner.calls[1]
+    assert install_args == (
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        str(root / "vendor" / "metricflow" / ".venv" / "Scripts" / "python.exe"),
+        "--editable",
+        f"{root / 'vendor' / 'metricflow'}[dev-env-requirements]",
+    )
+    assert install_cwd == root / "vendor" / "metricflow"
+    assert install_env == {}
+
+
+def test_dbt_metricflow_environment_installs_parent_editable(tmp_path: Path) -> None:
+    context = BootstrapContext(tmp_path, "macos", False)
+    project = tmp_path / "vendor" / "dbt-metricflow" / "dbt-metricflow"
+    runner = RecordingRunner()
+
+    create_upstream_environment(
+        context,
+        runner,
+        project=project,
+        environment=context.dbt_metricflow_environment,
+        python=Path("/uv/python"),
+        editable_overrides=(project.parent,),
+    )
+
+    assert runner.calls[2][0] == (
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        str(context.dbt_metricflow_environment / "bin" / "python"),
+        "--editable",
+        str(project.parent),
+    )
+
+
+def test_check_mode_does_not_install_or_sync(tmp_path: Path) -> None:
+    context = BootstrapContext(tmp_path, "macos", True)
+    runner = RecordingRunner()
+
+    sync_environments(context, runner)
+
+    forbidden = {"install", "sync", "create"}
+    assert not any(forbidden.intersection(args) for args, _, _ in runner.calls)
+
+
+def test_pip_check_accepts_clean_environment(tmp_path: Path) -> None:
+    context = BootstrapContext(tmp_path, "windows", True)
+    runner = RecordingRunner([completed("No broken requirements found.\n")])
+    python = Path("python.exe")
+
+    verify_pip_check(context, runner, python)
+
+    assert runner.calls[0][0] == (
+        "uv",
+        "pip",
+        "check",
+        "--python",
+        str(python),
+    )
+
+
+def test_pip_check_accepts_only_the_known_editable_mismatch(tmp_path: Path) -> None:
+    context = BootstrapContext(tmp_path, "windows", True)
+    runner = RecordingRunner(
+        [
+            completed(
+                "Using Python 3.12 environment at: .venv\n"
+                "Checked 115 packages in 5ms\n"
+                "Found 1 incompatibility\n"
+                f"{DBT_METRICFLOW_EDITABLE_MISMATCH}\n",
+                returncode=1,
+            )
+        ]
+    )
+
+    verify_pip_check(
+        context,
+        runner,
+        Path("python.exe"),
+        allowed_lines=frozenset({DBT_METRICFLOW_EDITABLE_MISMATCH}),
+    )
+
+
+def test_pip_check_rejects_an_additional_problem(tmp_path: Path) -> None:
+    context = BootstrapContext(tmp_path, "windows", True)
+    output = (
+        "Checked 116 packages in 5ms\n"
+        "Found 2 incompatibilities\n"
+        f"{DBT_METRICFLOW_EDITABLE_MISMATCH}\n"
+        "missing-package 1.0 requires absent-package\n"
+    )
+    runner = RecordingRunner([completed(output, returncode=1)])
+
+    with pytest.raises(BootstrapError, match="missing-package"):
+        verify_pip_check(
+            context,
+            runner,
+            Path("python.exe"),
+            allowed_lines=frozenset({DBT_METRICFLOW_EDITABLE_MISMATCH}),
+        )
