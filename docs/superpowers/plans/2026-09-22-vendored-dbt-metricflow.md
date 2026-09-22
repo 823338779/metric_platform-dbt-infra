@@ -205,6 +205,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
 COPY vendor/dbt/core ./vendor/dbt/core
 COPY vendor/metricflow ./vendor/metricflow
+COPY vendor/dbt-metricflow/requirements-files ./vendor/dbt-metricflow/requirements-files
 COPY vendor/dbt-metricflow/dbt-metricflow ./vendor/dbt-metricflow/dbt-metricflow
 RUN uv sync --frozen --no-dev --no-install-project
 COPY src ./src
