@@ -40,6 +40,7 @@ packages = ["src/dbt_metricflow_service"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+pythonpath = ["."]
 testpaths = ["tests", "scripts/tests"]
 
 [tool.ruff]
