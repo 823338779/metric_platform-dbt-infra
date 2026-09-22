@@ -63,6 +63,57 @@ git submodule status
 
 `git submodule status` 行首为 `-` 表示源码尚未初始化，行首为 `+` 表示工作树 commit 与服务锁定的 gitlink 不一致。两种状态都不能用于发布构建；正常状态以一个空格开头。
 
+## 一键配置开发环境
+
+Windows：
+
+```powershell
+.\bootstrap.ps1
+```
+
+macOS：
+
+```bash
+./bootstrap.sh
+```
+
+脚本会自动安装缺失的 Git、uv、Hatch 和 uv 管理的最新 Python 3.12 补丁版本，初始化固定 commit 的
+submodule，并创建三套相互隔离的项目本地环境。Windows 首次运行可能弹出管理员确认，用于启用 Developer
+Mode；macOS 首次运行可能需要完成 Homebrew 或 Xcode Command Line Tools 的系统提示。
+
+只检查、不安装或修改环境：
+
+```powershell
+.\bootstrap.ps1 --check
+```
+
+```bash
+./bootstrap.sh --check
+```
+
+PyCharm 本身不会被安装或修改，也不需要提交 `.idea` 路径。打开工程后按模块选择以下已有解释器即可：
+
+| Module | Windows | macOS |
+|---|---|---|
+| Service | `.venv\Scripts\python.exe` | `.venv/bin/python` |
+| MetricFlow | `vendor\metricflow\.venv\Scripts\python.exe` | `vendor/metricflow/.venv/bin/python` |
+| dbt-metricflow | `vendor\dbt-metricflow\.venv\Scripts\python.exe` | `vendor/dbt-metricflow/.venv/bin/python` |
+
+如果脚本提示已有环境不是 Python 3.12，它不会自动删除该目录。确认不再需要旧环境后，可先保留备份再重建：
+
+```powershell
+Rename-Item .venv .venv.backup
+.\bootstrap.ps1
+```
+
+```bash
+mv .venv .venv.backup
+./bootstrap.sh
+```
+
+同样的方式适用于 `vendor/metricflow/.venv` 或 `vendor/dbt-metricflow/.venv`。如果脚本报告 submodule
+存在改动，应先检查并自行提交或另行保存这些改动；脚本不会执行 `reset --hard` 或删除工作树。
+
 ## 启动
 
 本地开发：
@@ -162,26 +213,38 @@ uv run mf --version
 
 ### 隔离的上游开发环境
 
-根目录的 `.venv` 只用于服务和本仓测试。需要运行上游源码自己的测试时，使用它们已有的 Hatch
-`dev-env`，避免 MetricFlow 的 `pytest<9`、`httpx<0.25` 等开发约束覆盖服务环境。Hatch 环境默认存放在
-用户级缓存目录，可用 `uvx hatch env find dev-env` 查询解释器路径。
+根目录的 `.venv` 只用于服务和本仓测试。两个上游 `.venv` 分别安装各自 Hatch 配置声明的
+`dev-env-requirements`，避免 MetricFlow 的 `pytest<9`、`httpx<0.25` 等开发约束覆盖服务环境。
+
+#### 手动诊断与恢复
+
+通常应优先重新运行平台 bootstrap。需要单独检查时，可直接使用项目本地解释器，不依赖用户级 Hatch
+缓存路径。
 
 MetricFlow core：
 
 ```powershell
 Set-Location vendor/metricflow
-uvx hatch env create dev-env
-uvx hatch run dev-env:pytest tests_metricflow/integration/test_rendered_query.py::test_render_query -v
+& .\.venv\Scripts\python.exe -m pytest tests_metricflow/integration/test_rendered_query.py::test_render_query -v
+```
+
+```bash
+cd vendor/metricflow
+./.venv/bin/python -m pytest tests_metricflow/integration/test_rendered_query.py::test_render_query -v
 ```
 
 dbt-metricflow CLI：
 
 ```powershell
-Set-Location vendor/dbt-metricflow/dbt-metricflow
-uvx hatch env create dev-env
-# 保持上游开发配置的意图，让 CLI 测试直接使用同一 checkout 中的 MetricFlow 源码。
-uvx hatch run dev-env:pip install --no-deps --editable ..
-uvx hatch run dev-env:python -c "import dbt_metricflow, metricflow; print(dbt_metricflow.__path__); print(metricflow.__path__)"
+Set-Location vendor/dbt-metricflow
+& .\.venv\Scripts\python.exe -m pytest tests_metricflow/integration/test_rendered_query.py::test_render_query -v
+& .\.venv\Scripts\python.exe -c "import dbt_metricflow, metricflow; print(dbt_metricflow.__path__); print(metricflow.__path__)"
+```
+
+```bash
+cd vendor/dbt-metricflow
+./.venv/bin/python -m pytest tests_metricflow/integration/test_rendered_query.py::test_render_query -v
+./.venv/bin/python -c "import dbt_metricflow, metricflow; print(dbt_metricflow.__path__); print(metricflow.__path__)"
 ```
 
 Windows 必须启用“开发者模式”并用 `core.symlinks=true` 检出 MetricFlow submodule；否则 Git symlink 会被保存为

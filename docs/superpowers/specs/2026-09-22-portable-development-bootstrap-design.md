@@ -72,10 +72,10 @@ dbt-metricflow-service/
 ```
 
 - The root `.venv` is owned by uv and contains the service plus the root development dependency group.
-- `vendor/metricflow/.venv` is the upstream MetricFlow `dev-env` created by Hatch.
-- `vendor/dbt-metricflow/.venv` is created from `vendor/dbt-metricflow/dbt-metricflow/pyproject.toml`. The existing upstream Hatch post-install command installs the parent MetricFlow checkout in editable mode.
+- `vendor/metricflow/.venv` installs the upstream MetricFlow `dev-env-requirements` feature in editable mode.
+- `vendor/dbt-metricflow/.venv` installs the feature declared by `vendor/dbt-metricflow/dbt-metricflow/pyproject.toml`, then applies its Hatch post-install intent by installing the parent MetricFlow checkout in editable mode.
 
-The orchestrator selects each Hatch environment location with the process-local `HATCH_ENV_TYPE_VIRTUAL_PATH` variable. It also selects the uv-managed Python 3.12 interpreter explicitly. No Hatch cache hash, user name, drive letter, or absolute interpreter path is stored in tracked files.
+The orchestrator uses uv to reproduce those upstream Hatch feature declarations at stable project-local paths and selects the uv-managed Python 3.12 interpreter explicitly. A global `HATCH_ENV_TYPE_VIRTUAL_PATH` override is not used because it also redirects Hatch's internal build environment to the same path. No Hatch cache hash, user name, drive letter, or absolute interpreter path is stored in tracked files.
 
 The three environments remain isolated because the service and upstream projects have incompatible development constraints, including different pytest and HTTPX ranges.
 
@@ -91,8 +91,8 @@ The default flow performs these stages in order:
 6. Initialize all submodules recursively.
 7. Verify every submodule is at the gitlink commit recorded by the parent repository.
 8. Synchronize the root environment with `uv sync --frozen --all-groups --python 3.12`.
-9. Create or synchronize the MetricFlow Hatch `dev-env` at `vendor/metricflow/.venv`.
-10. Create or synchronize the dbt-metricflow Hatch `dev-env` at `vendor/dbt-metricflow/.venv` from the nested dbt-metricflow project.
+9. Create or synchronize the MetricFlow development feature at `vendor/metricflow/.venv`.
+10. Create or synchronize the dbt-metricflow development feature at `vendor/dbt-metricflow/.venv` from the nested dbt-metricflow project.
 11. Run environment, import-source, symlink, lint, and representative-test verification.
 12. Print a concise summary containing repository-relative interpreter paths.
 
