@@ -1,0 +1,9 @@
+[submodule "vendor/dbt"]
+	path = vendor/dbt
+	url = https://github.com/dbt-labs/dbt.git
+[submodule "vendor/metricflow"]
+	path = vendor/metricflow
+	url = https://github.com/dbt-labs/metricflow.git
+[submodule "vendor/dbt-metricflow"]
+	path = vendor/dbt-metricflow
+	url = https://github.com/dbt-labs/metricflow.git

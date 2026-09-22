@@ -2,9 +2,10 @@
 
 本仓库是 dbt 与 MetricFlow 的独立 HTTP 包装服务。
 
-- 上游版本固定为 `dbt-core==1.12.5`、`dbt-starrocks==1.12.2`、`dbt-metricflow==0.15.0` 和 `metricflow==0.213.0`。
-- 不得读取、修改、复制或构建父工作区的 `dbt/` 与 `metricflow/` 源码。
-- dbt 与 MetricFlow 只能通过已安装包提供的公开 CLI 或公开 API 调用。
+- 上游版本固定为 `dbt-core==1.12.5`、`dbt-starrocks==1.12.2`、`dbt-duckdb==1.11.0`、`dbt-metricflow==0.15.0` 和 `metricflow==0.213.0`。
+- `vendor/dbt`、`vendor/metricflow` 与 `vendor/dbt-metricflow` 是只读 Git submodule；不得在其中修改或提交源码，只能通过更新 gitlink 升级。
+- `dbt-core`、`metricflow` 与 `dbt-metricflow` 必须从固定 submodule 构建；父工作区并列的 `dbt/` 与 `metricflow/` 不得作为依赖来源。
+- 服务只能通过已安装包提供的公开 CLI 或公开 API 调用 dbt 与 MetricFlow，不得跨目录导入其内部实现。
 - 所有 Python 文件使用 `from __future__ import annotations`、模块 logger 和完整类型注解。
 - 增量字段必须用 `Field(description=...)` 或相邻注释说明用途。
 - 按逻辑块添加说明用途和关键约束的注释，避免解释不言自明的语句。

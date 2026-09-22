@@ -4,7 +4,7 @@
 
 **Goal:** 让 `dbt-metricflow-service` 通过固定 Git submodule 自带 dbt 与 MetricFlow 源码，并从这些源码构建可独立部署的 Python 服务。
 
-**Architecture:** 在 `vendor/` 下固定两个上游仓库的 gitlink，通过 `tool.uv.sources` 将三个核心 Python 包解析到本地源码路径。Docker builder 从这些路径构建非 editable 包，runtime 只携带已安装环境和服务代码，现有 HTTP API 与任务行为不变。
+**Architecture:** 在 `vendor/` 下固定两个上游仓库的三个 gitlink，通过 `tool.uv.sources` 将三个核心 Python 包解析到对应的本地源码路径。Docker builder 从这些路径构建非 editable 包，runtime 只携带已安装环境和服务代码，现有 HTTP API 与任务行为不变。
 
 **Tech Stack:** Git submodule、Python 3.12、uv 0.12.17、Hatchling、FastAPI、pytest、Docker、dbt Core、MetricFlow
 
@@ -13,10 +13,11 @@
 ## Global Constraints
 
 - `vendor/dbt` 必须固定到 dbt `v1.12.5` 的 commit `7f78d7b6aa3a88e5efa6dd92753e4983d92aeba4`。
-- `vendor/metricflow` 必须固定到 `dbt-metricflow/v0.15.0` 的 commit `bd05dd9a145f290a1bf3090cbdbb3b11d7322701`。
+- `vendor/metricflow` 必须固定到 `v0.213.0` 的 commit `4200f85c59b2bb334f0b0dea851b38d0b8198134`。
+- `vendor/dbt-metricflow` 必须固定到 `dbt-metricflow/v0.15.0` 的 commit `bd05dd9a145f290a1bf3090cbdbb3b11d7322701`。
 - `dbt-core`、`metricflow` 和 `dbt-metricflow` 必须从本地 submodule 构建，禁止回退到 PyPI 同名包。
 - `dbt-starrocks==1.12.2` 与 `dbt-duckdb==1.11.0` 继续从包索引安装。
-- 不得修改两个 submodule 或父工作区并列 `dbt/`、`metricflow/` 仓库的源码。
+- 不得修改三个 submodule 或父工作区并列 `dbt/`、`metricflow/` 仓库的源码。
 - 保持现有 HTTP API、任务模型、安全边界和 Compose 运行契约不变。
 - 每项任务完成验证后创建一个独立 commit。
 
@@ -36,6 +37,7 @@
 - Create: `.gitmodules`
 - Create: `vendor/dbt`（Git submodule）
 - Create: `vendor/metricflow`（Git submodule）
+- Create: `vendor/dbt-metricflow`（Git submodule）
 - Modify: `pyproject.toml`
 - Modify: `uv.lock`
 - Modify: `AGENTS.md`
@@ -43,7 +45,7 @@
 
 **Interfaces:**
 - Consumes: dbt tag `v1.12.5`、MetricFlow tag `dbt-metricflow/v0.15.0`、现有精确依赖版本。
-- Produces: `tool.uv.sources` 中的三个固定本地包来源，以及可供 Docker builder 构建的 `vendor/dbt/core`、`vendor/metricflow`、`vendor/metricflow/dbt-metricflow` 路径。
+- Produces: `tool.uv.sources` 中的三个固定本地包来源，以及可供 Docker builder 构建的 `vendor/dbt/core`、`vendor/metricflow`、`vendor/dbt-metricflow/dbt-metricflow` 路径。
 
 - [ ] **Step 1: 编写依赖来源和 submodule 固定测试**
 
@@ -60,12 +62,13 @@ from urllib.request import url2pathname
 PROJECT_ROOT = Path(__file__).parents[1]
 EXPECTED_LOCAL_SOURCES = {
     "dbt-core": "vendor/dbt/core",
-    "dbt-metricflow": "vendor/metricflow/dbt-metricflow",
+    "dbt-metricflow": "vendor/dbt-metricflow/dbt-metricflow",
     "metricflow": "vendor/metricflow",
 }
 EXPECTED_SUBMODULE_COMMITS = {
     "vendor/dbt": "7f78d7b6aa3a88e5efa6dd92753e4983d92aeba4",
-    "vendor/metricflow": "bd05dd9a145f290a1bf3090cbdbb3b11d7322701",
+    "vendor/dbt-metricflow": "bd05dd9a145f290a1bf3090cbdbb3b11d7322701",
+    "vendor/metricflow": "4200f85c59b2bb334f0b0dea851b38d0b8198134",
 }
 
 
@@ -113,9 +116,9 @@ def test_core_packages_are_installed_from_vendored_sources() -> None:
 
 Run: `uv run pytest tests/test_dependencies.py -v`
 
-Expected: FAIL，因为 `tool.uv.sources`、`vendor/dbt` 和 `vendor/metricflow` 尚不存在，已安装包也没有指向这些本地路径的 `direct_url.json`。
+Expected: FAIL，因为 `tool.uv.sources` 和三个 `vendor/` 源码路径尚不存在，已安装包也没有指向这些本地路径的 `direct_url.json`。
 
-- [ ] **Step 3: 增加并固定两个 Git submodule**
+- [ ] **Step 3: 增加并固定三个 Git submodule 工作树**
 
 在服务仓库根目录执行：
 
@@ -123,10 +126,12 @@ Expected: FAIL，因为 `tool.uv.sources`、`vendor/dbt` 和 `vendor/metricflow`
 git submodule add https://github.com/dbt-labs/dbt.git vendor/dbt
 git -C vendor/dbt checkout 7f78d7b6aa3a88e5efa6dd92753e4983d92aeba4
 git submodule add https://github.com/dbt-labs/metricflow.git vendor/metricflow
-git -C vendor/metricflow checkout bd05dd9a145f290a1bf3090cbdbb3b11d7322701
+git -C vendor/metricflow checkout 4200f85c59b2bb334f0b0dea851b38d0b8198134
+git submodule add https://github.com/dbt-labs/metricflow.git vendor/dbt-metricflow
+git -C vendor/dbt-metricflow checkout bd05dd9a145f290a1bf3090cbdbb3b11d7322701
 ```
 
-运行 `git submodule status`，确认输出中的两个 commit 与 Global Constraints 完全一致，并且行首没有 `-`、`+` 或 `U`。
+运行 `git submodule status`，确认输出中的三个 commit 与 Global Constraints 完全一致，并且行首没有 `-`、`+` 或 `U`。
 
 - [ ] **Step 4: 配置 uv 本地非 editable source**
 
@@ -135,7 +140,7 @@ git -C vendor/metricflow checkout bd05dd9a145f290a1bf3090cbdbb3b11d7322701
 ```toml
 [tool.uv.sources]
 dbt-core = { path = "vendor/dbt/core" }
-dbt-metricflow = { path = "vendor/metricflow/dbt-metricflow" }
+dbt-metricflow = { path = "vendor/dbt-metricflow/dbt-metricflow" }
 metricflow = { path = "vendor/metricflow" }
 ```
 
@@ -154,7 +159,7 @@ uv sync --frozen --all-groups
 
 ```markdown
 - 上游版本固定为 `dbt-core==1.12.5`、`dbt-starrocks==1.12.2`、`dbt-duckdb==1.11.0`、`dbt-metricflow==0.15.0` 和 `metricflow==0.213.0`。
-- `vendor/dbt` 与 `vendor/metricflow` 是只读 Git submodule；不得在其中修改或提交源码，只能通过更新 gitlink 升级。
+- `vendor/dbt`、`vendor/metricflow` 与 `vendor/dbt-metricflow` 是只读 Git submodule；不得在其中修改或提交源码，只能通过更新 gitlink 升级。
 - `dbt-core`、`metricflow` 与 `dbt-metricflow` 必须从固定 submodule 构建；父工作区并列的 `dbt/` 与 `metricflow/` 不得作为依赖来源。
 - 服务只能通过已安装包提供的公开 CLI 或公开 API 调用 dbt 与 MetricFlow，不得跨目录导入其内部实现。
 ```
@@ -172,7 +177,7 @@ Expected: PASS。
 - [ ] **Step 7: 提交源码边界与依赖解析变更**
 
 ```powershell
-git add .gitmodules vendor/dbt vendor/metricflow pyproject.toml uv.lock AGENTS.md tests/test_dependencies.py
+git add .gitmodules vendor/dbt vendor/metricflow vendor/dbt-metricflow pyproject.toml uv.lock AGENTS.md tests/test_dependencies.py docs/superpowers/specs/2026-09-22-vendored-dbt-metricflow-design.md docs/superpowers/plans/2026-09-22-vendored-dbt-metricflow.md
 git commit -m "build: source dbt metricflow from submodules"
 ```
 
@@ -189,7 +194,7 @@ git commit -m "build: source dbt metricflow from submodules"
 
 Run: `docker build -t dbt-metricflow-service:source-bundle .`
 
-Expected: FAIL 于首次 `uv sync`，错误指出 `vendor/dbt/core` 或 `vendor/metricflow` 本地路径不存在。
+Expected: FAIL 于首次 `uv sync`，错误指出三个本地 source 路径至少有一个不存在。
 
 - [ ] **Step 2: 在 builder 中复制构建所需源码**
 
@@ -200,6 +205,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
 COPY vendor/dbt/core ./vendor/dbt/core
 COPY vendor/metricflow ./vendor/metricflow
+COPY vendor/dbt-metricflow/dbt-metricflow ./vendor/dbt-metricflow/dbt-metricflow
 RUN uv sync --frozen --no-dev --no-install-project
 COPY src ./src
 RUN uv sync --frozen --no-dev
@@ -216,7 +222,7 @@ Expected: PASS。
 Run:
 
 ```powershell
-docker run --rm dbt-metricflow-service:source-bundle python -c "import importlib.metadata as m, json, pathlib; expected={'dbt-core':'/app/vendor/dbt/core','metricflow':'/app/vendor/metricflow','dbt-metricflow':'/app/vendor/metricflow/dbt-metricflow'}; actual={name:json.loads(m.distribution(name).read_text('direct_url.json'))['url'] for name in expected}; assert all(path in actual[name] for name,path in expected.items()), actual; assert not pathlib.Path('/app/vendor').exists()"
+docker run --rm dbt-metricflow-service:source-bundle python -c "import importlib.metadata as m, json, pathlib; expected={'dbt-core':'/app/vendor/dbt/core','metricflow':'/app/vendor/metricflow','dbt-metricflow':'/app/vendor/dbt-metricflow/dbt-metricflow'}; actual={name:json.loads(m.distribution(name).read_text('direct_url.json'))['url'] for name in expected}; assert all(path in actual[name] for name,path in expected.items()), actual; assert not pathlib.Path('/app/vendor').exists()"
 ```
 
 Expected: exit code `0`；安装元数据指向 builder 内的固定本地源码，同时 runtime 不存在 `/app/vendor`。
@@ -276,7 +282,8 @@ git commit -m "build: package vendored dbt tools in image"
 
 ```markdown
 - dbt 源码：`vendor/dbt`，固定到 tag `v1.12.5`
-- MetricFlow 源码：`vendor/metricflow`，固定到 tag `dbt-metricflow/v0.15.0`
+- MetricFlow core 源码：`vendor/metricflow`，固定到 tag `v0.213.0`
+- dbt-metricflow CLI 源码：`vendor/dbt-metricflow`，固定到 tag `dbt-metricflow/v0.15.0`
 - `dbt-core`、`metricflow`、`dbt-metricflow` 由 `uv` 从上述本地源码构建
 - `dbt-starrocks==1.12.2` 与 `dbt-duckdb==1.11.0` 从包索引安装
 ```
@@ -337,7 +344,7 @@ git -C ..\dbt status --short
 git -C ..\metricflow status --short
 ```
 
-Expected: 服务仓库只包含本计划的 README 变更；两个 submodule 与父工作区两个上游仓库的内部状态均为空。
+Expected: 服务仓库只包含本计划的 README 变更；三个 submodule 与父工作区两个上游仓库的内部状态均为空。
 
 - [ ] **Step 6: 提交部署文档**
 

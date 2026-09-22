@@ -30,9 +30,12 @@
 | 目录 | 上游仓库 | tag | 固定 commit |
 | --- | --- | --- | --- |
 | `vendor/dbt` | `https://github.com/dbt-labs/dbt.git` | `v1.12.5` | `7f78d7b6aa3a88e5efa6dd92753e4983d92aeba4` |
-| `vendor/metricflow` | `https://github.com/dbt-labs/metricflow.git` | `dbt-metricflow/v0.15.0` | `bd05dd9a145f290a1bf3090cbdbb3b11d7322701` |
+| `vendor/metricflow` | `https://github.com/dbt-labs/metricflow.git` | `v0.213.0` | `4200f85c59b2bb334f0b0dea851b38d0b8198134` |
+| `vendor/dbt-metricflow` | `https://github.com/dbt-labs/metricflow.git` | `dbt-metricflow/v0.15.0` | `bd05dd9a145f290a1bf3090cbdbb3b11d7322701` |
 
 Gitlink commit 是实际构建依据；tag 用于说明该 commit 对应的上游发布版本。服务仓库不依赖父工作区中并列存在的 `dbt/` 与 `metricflow/` 目录。
+
+MetricFlow 上游仓库分别发布 `metricflow` 与 `dbt-metricflow`。两个稳定 tag 位于不同 commit，任一单独工作树都无法同时构建 `metricflow==0.213.0` 和 `dbt-metricflow==0.15.0`，因此使用两个只读 gitlink 检出同一上游仓库的对应发布版本。
 
 ## 依赖解析
 
@@ -42,7 +45,7 @@ Gitlink commit 是实际构建依据；tag 用于说明该 commit 对应的上�
 | --- | --- |
 | `dbt-core` | `vendor/dbt/core` |
 | `metricflow` | `vendor/metricflow` |
-| `dbt-metricflow` | `vendor/metricflow/dbt-metricflow` |
+| `dbt-metricflow` | `vendor/dbt-metricflow/dbt-metricflow` |
 
 本地路径依赖采用非 editable 安装。`uv.lock` 记录本地 source，使本地开发、测试和 Docker 构建使用同一套依赖图。`dbt-starrocks==1.12.2`、`dbt-duckdb==1.11.0` 及其他传递依赖继续从包索引安装。
 
@@ -63,7 +66,7 @@ git submodule update --init --recursive
 uv sync --frozen
 ```
 
-Docker builder 先复制依赖清单和两个 submodule 源码，再执行 `uv sync --frozen --no-dev --no-install-project`。之后复制服务源码并安装服务包。这样，上游源码变化会使依赖构建层失效，而单纯的服务源码变化仍可复用依赖层。
+Docker builder 先复制依赖清单和三个 submodule 工作树中的构建源码，再执行 `uv sync --frozen --no-dev --no-install-project`。之后复制服务源码并安装服务包。这样，上游源码变化会使依赖构建层失效，而单纯的服务源码变化仍可复用依赖层。
 
 运行镜像继续使用非 root 用户，只复制已构建的 `.venv`、服务源码和启动配置。容器内的 `dbt` 与 `mf` 命令来自 builder 根据 submodule 源码构建的包，不要求运行镜像存在 `vendor/` 目录。
 
@@ -87,14 +90,14 @@ Compose 的启动方式、挂载目录、环境变量和健康检查保持现有
 
 实现完成后执行以下验证：
 
-1. 检查 `.gitmodules`、两个 gitlink commit 和上游 tag 对应关系。
+1. 检查 `.gitmodules`、三个 gitlink commit 和上游 tag 对应关系。
 2. 检查 `uv.lock` 的三个本地 source，并读取已安装 distribution 的 `direct_url.json`，确认没有使用 PyPI 回退。
 3. 确认安装版本为 `dbt-core 1.12.5`、`metricflow 0.213.0`、`dbt-metricflow 0.15.0`、`dbt-starrocks 1.12.2`。
 4. 运行完整 `pytest` 与 `ruff check`。
 5. 运行 `dbt --version`、`mf --version` 和现有 DuckDB 集成测试。
 6. 构建并启动容器，验证非 root 用户、存活与就绪检查、版本接口以及容器内两个 CLI。
 7. 验证 `dbt-starrocks` adapter 能加载。真实 StarRocks 端到端任务仍以可访问实例和凭据为前提。
-8. 检查两个 submodule、父工作区原有 `dbt/` 与 `metricflow/` 仓库没有源码改动。
+8. 检查三个 submodule、父工作区原有 `dbt/` 与 `metricflow/` 仓库没有源码改动。
 
 ## 升级流程
 
