@@ -3,7 +3,7 @@ param(
     [switch]$Check,
     [switch]$EnableDeveloperModeOnly,
     [Parameter(ValueFromRemainingArguments = $true)]
-    [string[]]$BootstrapArguments
+    [string[]]$BootstrapArguments = @()
 )
 
 Set-StrictMode -Version Latest
@@ -72,6 +72,21 @@ function Resolve-GitPath {
     return $null
 }
 
+function Test-UvVersion {
+    param([Parameter(Mandatory = $true)][string]$UvPath)
+    $versionOutput = & $UvPath --version
+    if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch '^uv (\d+\.\d+\.\d+)') {
+        return $false
+    }
+    return [version]$Matches[1] -ge [version]"0.12.0"
+}
+
+function Test-HatchVersion {
+    param([Parameter(Mandatory = $true)][string]$UvPath)
+    $toolOutput = & $UvPath tool list
+    return $LASTEXITCODE -eq 0 -and $toolOutput -match '(?m)^hatch v1\.18\.1$'
+}
+
 function Invoke-NativeCommand {
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
@@ -89,17 +104,26 @@ if ($EnableDeveloperModeOnly) {
 }
 
 if ($Check) {
-    if ($null -eq (Resolve-GitPath)) {
+    $gitPath = Resolve-GitPath
+    if ($null -eq $gitPath) {
         throw "Git is missing. Run .\bootstrap.ps1 without --check first."
     }
     $uvPath = Resolve-UvPath
     if ($null -eq $uvPath) {
         throw "uv is missing. Run .\bootstrap.ps1 without --check first."
     }
+    $env:PATH = (Split-Path -Parent $gitPath) + [IO.Path]::PathSeparator + `
+        (Split-Path -Parent $uvPath) + [IO.Path]::PathSeparator + $env:PATH
+    if (-not (Test-UvVersion $uvPath)) {
+        throw "uv 0.12 or newer is required. Run .\bootstrap.ps1 without --check first."
+    }
+    if (-not (Test-HatchVersion $uvPath)) {
+        throw "Hatch 1.18.1 is missing. Run .\bootstrap.ps1 without --check first."
+    }
     if (-not (Test-DeveloperMode)) {
         throw "Windows Developer Mode is disabled. Run .\bootstrap.ps1 without --check first."
     }
-    $pythonOutput = & $uvPath --no-python-downloads python find "3.12"
+    $pythonOutput = & $uvPath --no-python-downloads python find --system --managed-python "3.12"
     if ($LASTEXITCODE -ne 0) {
         throw "uv-managed Python 3.12 is missing. Run .\bootstrap.ps1 without --check first."
     }
@@ -120,9 +144,16 @@ if ($null -eq (Resolve-GitPath)) {
         "--accept-package-agreements", "--accept-source-agreements"
     )
 }
-if ($null -eq (Resolve-UvPath)) {
+$existingUvPath = Resolve-UvPath
+if ($null -eq $existingUvPath) {
     Invoke-NativeCommand $wingetPath @(
         "install", "--id", "astral-sh.uv", "--exact", "--source", "winget",
+        "--accept-package-agreements", "--accept-source-agreements"
+    )
+}
+elseif (-not (Test-UvVersion $existingUvPath)) {
+    Invoke-NativeCommand $wingetPath @(
+        "upgrade", "--id", "astral-sh.uv", "--exact", "--source", "winget",
         "--accept-package-agreements", "--accept-source-agreements"
     )
 }
@@ -131,10 +162,14 @@ $gitPath = Resolve-GitPath
 if ($null -eq $gitPath) {
     throw "Git was installed but could not be resolved. Start a new terminal and rerun this script."
 }
-$env:PATH = (Split-Path -Parent $gitPath) + [IO.Path]::PathSeparator + $env:PATH
 $uvPath = Resolve-UvPath
 if ($null -eq $uvPath) {
     throw "uv was installed but could not be resolved. Start a new terminal and rerun this script."
+}
+$env:PATH = (Split-Path -Parent $gitPath) + [IO.Path]::PathSeparator + `
+    (Split-Path -Parent $uvPath) + [IO.Path]::PathSeparator + $env:PATH
+if (-not (Test-UvVersion $uvPath)) {
+    throw "uv 0.12 or newer is required after installation."
 }
 
 if (-not (Test-DeveloperMode)) {
@@ -160,8 +195,8 @@ if (-not (Test-DeveloperMode)) {
     }
 }
 
-Invoke-NativeCommand $uvPath @("python", "install", "3.12")
-Invoke-NativeCommand $uvPath @("tool", "install", "hatch==1.18.1")
+Invoke-NativeCommand $uvPath @("python", "install", "--upgrade", "3.12")
+Invoke-NativeCommand $uvPath @("tool", "install", "--force", "hatch==1.18.1")
 Invoke-NativeCommand $uvPath @(
     "run", "--no-project", "--python", "3.12",
     (Join-Path $repositoryRoot "scripts\bootstrap.py")

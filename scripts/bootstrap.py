@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import re
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
@@ -13,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 PYTHON_VERSION = "3.12"
 HATCH_VERSION = "1.18.1"
+MINIMUM_UV_VERSION = (0, 12, 0)
 PlatformName = Literal["windows", "macos"]
 SUBMODULE_PATHS = (
     Path("vendor/dbt"),
@@ -54,6 +57,12 @@ METRICFLOW_IMPORT_CHECK = (
     "metricflow_semantics, pytest, sqlalchemy"
 )
 DBT_METRICFLOW_IMPORT_CHECK = "import dbt, dbt_metricflow, metricflow, pytest"
+ENVIRONMENT_IDENTITY_CHECK = (
+    "import sys; from pathlib import Path; "
+    "print(sys.implementation.name); "
+    "print(f'{sys.version_info.major}.{sys.version_info.minor}'); "
+    "print(Path(sys.base_prefix).resolve())"
+)
 
 
 class BootstrapError(RuntimeError):
@@ -120,17 +129,34 @@ def subprocess_runner(
     cwd: Path,
     env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        list(args),
-        cwd=cwd,
-        env=dict(env) if env is not None else None,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        shell=False,
-        check=False,
-    )
+    try:
+        return subprocess.run(
+            list(args),
+            cwd=cwd,
+            env=dict(env) if env is not None else None,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            shell=False,
+            check=False,
+        )
+    except OSError as error:
+        raise BootstrapError(f"Unable to start command {args[0]}: {error}") from None
+
+
+def verification_environment(context: BootstrapContext) -> dict[str, str]:
+    """Return an inherited environment with read-only check safeguards."""
+    environment = dict(os.environ)
+    if context.check_only:
+        environment.update(
+            {
+                "GIT_OPTIONAL_LOCKS": "0",
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "UV_NO_CACHE": "1",
+            }
+        )
+    return environment
 
 
 def run_checked(
@@ -140,7 +166,10 @@ def run_checked(
     cwd: Path,
     env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    result = runner(args, cwd=cwd, env=env)
+    try:
+        result = runner(args, cwd=cwd, env=env)
+    except OSError as error:
+        raise BootstrapError(f"Unable to start command {args[0]}: {error}") from None
     if result.returncode != 0:
         command = repr(tuple(args))
         raise BootstrapError(
@@ -167,6 +196,7 @@ def submodule_is_clean(
             "--untracked-files=all",
         ),
         cwd=context.root,
+        env=verification_environment(context),
     )
     return not result.stdout.strip()
 
@@ -181,6 +211,7 @@ def verify_submodule_commit(
         runner,
         ("git", "ls-tree", "HEAD", relative_path.as_posix()),
         cwd=context.root,
+        env=verification_environment(context),
     )
     fields = tree.stdout.split()
     if len(fields) < 3 or fields[0] != "160000":
@@ -189,6 +220,7 @@ def verify_submodule_commit(
         runner,
         ("git", "-C", str(context.root / relative_path), "rev-parse", "HEAD"),
         cwd=context.root,
+        env=verification_environment(context),
     ).stdout.strip()
     if actual != fields[2]:
         raise BootstrapError(
@@ -213,6 +245,7 @@ def tracked_symlinks(
             "-z",
         ),
         cwd=context.root,
+        env=verification_environment(context),
     )
     links: list[Path] = []
     for record in result.stdout.split("\0"):
@@ -324,21 +357,53 @@ def find_uv_python(context: BootstrapContext, runner: CommandRunner) -> Path:
     """Return the uv-managed CPython 3.12 executable."""
     result = run_checked(
         runner,
-        ("uv", "python", "find", PYTHON_VERSION),
+        (
+            "uv",
+            "--no-python-downloads",
+            "python",
+            "find",
+            "--system",
+            "--managed-python",
+            PYTHON_VERSION,
+        ),
         cwd=context.root,
+        env=verification_environment(context),
     )
-    python = Path(result.stdout.strip())
+    python = Path(result.stdout.strip()).resolve()
     if not python.is_file():
         raise BootstrapError(f"uv returned a missing Python interpreter: {python}")
     return python
+
+
+def validate_uv_version(context: BootstrapContext, runner: CommandRunner) -> None:
+    """Require the supported uv CLI before running shared orchestration."""
+    result = run_checked(
+        runner,
+        ("uv", "--version"),
+        cwd=context.root,
+        env=verification_environment(context),
+    )
+    match = re.match(r"^uv (\d+)\.(\d+)\.(\d+)", result.stdout.strip())
+    if match is None or tuple(map(int, match.groups())) < MINIMUM_UV_VERSION:
+        raise BootstrapError("uv 0.12 or newer is required; rerun the platform bootstrap")
+
+
+def _environment_recovery(context: BootstrapContext, environment: Path) -> str:
+    relative = environment.relative_to(context.root)
+    if context.platform == "windows":
+        path = str(relative)
+        return f"Rename-Item '{path}' '{path}.backup'; .\\bootstrap.ps1"
+    path = relative.as_posix()
+    return f"mv '{path}' '{path}.backup' && ./bootstrap.sh"
 
 
 def require_environment_version(
     context: BootstrapContext,
     runner: CommandRunner,
     environment: Path,
+    managed_python: Path | None = None,
 ) -> None:
-    """Reject an existing environment that is missing or not based on Python 3.12."""
+    """Require an existing environment to use uv-managed CPython 3.12."""
     if not environment.exists():
         return
     python = environment_python(environment, context.platform)
@@ -351,13 +416,24 @@ def require_environment_version(
         (
             str(python),
             "-c",
-            "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+            ENVIRONMENT_IDENTITY_CHECK,
         ),
         cwd=context.root,
+        env=verification_environment(context),
     )
-    if result.stdout.strip() != PYTHON_VERSION:
+    identity = result.stdout.splitlines()
+    if len(identity) != 3 or identity[0] != "cpython" or identity[1] != PYTHON_VERSION:
         raise BootstrapError(
-            f"Existing environment must use Python 3.12: {environment}"
+            f"Existing environment must use uv-managed CPython 3.12: {environment}. "
+            f"Recover with: {_environment_recovery(context, environment)}"
+        )
+    if (
+        managed_python is not None
+        and Path(identity[2]).resolve() != managed_python.resolve().parent
+    ):
+        raise BootstrapError(
+            f"Existing environment does not use the selected uv-managed Python: "
+            f"{environment}. Recover with: {_environment_recovery(context, environment)}"
         )
 
 
@@ -384,6 +460,7 @@ def create_upstream_environment(
             "uv",
             "pip",
             "install",
+            "--exact",
             "--python",
             str(environment_interpreter),
             "--editable",
@@ -398,6 +475,7 @@ def create_upstream_environment(
                 "uv",
                 "pip",
                 "install",
+                "--no-deps",
                 "--python",
                 str(environment_interpreter),
                 "--editable",
@@ -419,13 +497,19 @@ def sync_environments(context: BootstrapContext, runner: CommandRunner) -> None:
         require_environment_version(context, runner, environment)
     run_checked(
         runner,
-        ("uv", "python", "install", PYTHON_VERSION),
+        ("uv", "python", "install", "--upgrade", PYTHON_VERSION),
         cwd=context.root,
     )
     python = find_uv_python(context, runner)
+    for environment in (
+        context.root_environment,
+        context.metricflow_environment,
+        context.dbt_metricflow_environment,
+    ):
+        require_environment_version(context, runner, environment, python)
     run_checked(
         runner,
-        ("uv", "sync", "--frozen", "--all-groups", "--python", PYTHON_VERSION),
+        ("uv", "sync", "--frozen", "--all-groups", "--python", str(python)),
         cwd=context.root,
     )
     create_upstream_environment(
@@ -459,6 +543,7 @@ def verify_pip_check(
     result = runner(
         ("uv", "pip", "check", "--python", str(python)),
         cwd=context.root,
+        env=verification_environment(context),
     )
     lines = frozenset(
         line.strip()
@@ -487,6 +572,7 @@ def verify_pip_check(
 def _required_environment_pythons(
     context: BootstrapContext,
     runner: CommandRunner,
+    managed_python: Path,
 ) -> tuple[Path, Path, Path]:
     environments = (
         context.root_environment,
@@ -494,7 +580,7 @@ def _required_environment_pythons(
         context.dbt_metricflow_environment,
     )
     for environment in environments:
-        require_environment_version(context, runner, environment)
+        require_environment_version(context, runner, environment, managed_python)
     pythons = tuple(
         environment_python(environment, context.platform) for environment in environments
     )
@@ -506,23 +592,28 @@ def _required_environment_pythons(
 
 def verify_environments(context: BootstrapContext, runner: CommandRunner) -> None:
     """Validate versions, imports, local sources, lint, and representative tests."""
+    managed_python = find_uv_python(context, runner)
     root_python, metricflow_python, dbt_metricflow_python = (
-        _required_environment_pythons(context, runner)
+        _required_environment_pythons(context, runner, managed_python)
     )
+    environment = verification_environment(context)
     run_checked(
         runner,
         (str(root_python), "-c", ROOT_IMPORT_AND_SOURCE_CHECK),
         cwd=context.root,
+        env=environment,
     )
     run_checked(
         runner,
         (str(metricflow_python), "-c", METRICFLOW_IMPORT_CHECK),
         cwd=context.root,
+        env=environment,
     )
     run_checked(
         runner,
         (str(dbt_metricflow_python), "-c", DBT_METRICFLOW_IMPORT_CHECK),
         cwd=context.root,
+        env=environment,
     )
     verify_pip_check(context, runner, root_python)
     verify_pip_check(context, runner, metricflow_python)
@@ -534,26 +625,63 @@ def verify_environments(context: BootstrapContext, runner: CommandRunner) -> Non
     )
     run_checked(
         runner,
-        (str(root_python), "-m", "pytest", "tests/test_dependencies.py", "-v"),
+        (
+            str(root_python),
+            "-m",
+            "pytest",
+            "tests/test_dependencies.py",
+            "-v",
+            "-p",
+            "no:cacheprovider",
+        ),
         cwd=context.root,
+        env=environment,
     )
     run_checked(
         runner,
-        (str(root_python), "-m", "ruff", "check", "src", "tests", "scripts"),
+        (
+            str(root_python),
+            "-m",
+            "ruff",
+            "check",
+            "--no-cache",
+            "src",
+            "tests",
+            "scripts",
+        ),
         cwd=context.root,
+        env=environment,
     )
     rendered_query = (
         "tests_metricflow/integration/test_rendered_query.py::test_render_query"
     )
     run_checked(
         runner,
-        (str(metricflow_python), "-m", "pytest", rendered_query, "-v"),
+        (
+            str(metricflow_python),
+            "-m",
+            "pytest",
+            rendered_query,
+            "-v",
+            "-p",
+            "no:cacheprovider",
+        ),
         cwd=context.root / "vendor" / "metricflow",
+        env=environment,
     )
     run_checked(
         runner,
-        (str(dbt_metricflow_python), "-m", "pytest", rendered_query, "-v"),
+        (
+            str(dbt_metricflow_python),
+            "-m",
+            "pytest",
+            rendered_query,
+            "-v",
+            "-p",
+            "no:cacheprovider",
+        ),
         cwd=context.root / "vendor" / "dbt-metricflow",
+        env=environment,
     )
 
 
@@ -586,6 +714,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             platform=current_platform(sys.platform),
             check_only=options.check,
         )
+        validate_uv_version(context, subprocess_runner)
         prepare_submodules(context, subprocess_runner)
         sync_environments(context, subprocess_runner)
         verify_environments(context, subprocess_runner)

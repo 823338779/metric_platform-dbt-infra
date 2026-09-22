@@ -15,11 +15,17 @@ from scripts.bootstrap import (
     BootstrapError,
     create_upstream_environment,
     environment_python,
+    find_uv_python,
     parse_args,
     prepare_submodules,
     require_environment_version,
     resolve_repository_root,
+    run_checked,
+    submodule_is_clean,
     sync_environments,
+    validate_uv_version,
+    verification_environment,
+    verify_environments,
     verify_pip_check,
     verify_submodule_commit,
     verify_windows_symlinks,
@@ -80,6 +86,14 @@ def completed(
     stderr: str = "",
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(("git",), returncode, stdout, stderr)
+
+
+def bash_path(path: Path) -> str:
+    """Return a path accepted by native Bash or Git Bash."""
+    resolved = path.resolve()
+    if resolved.drive:
+        return f"/{resolved.drive[0].lower()}{resolved.as_posix()[2:]}"
+    return resolved.as_posix()
 
 
 def test_dirty_submodule_stops_before_update(tmp_path: Path) -> None:
@@ -160,7 +174,7 @@ def test_wrong_existing_python_is_not_replaced(tmp_path: Path) -> None:
     python = environment_python(context.root_environment, context.platform)
     python.parent.mkdir(parents=True)
     python.touch()
-    runner = RecordingRunner([completed("3.11\n")])
+    runner = RecordingRunner([completed("cpython\n3.11\n/uv/python\n")])
 
     with pytest.raises(BootstrapError, match="Python 3.12"):
         require_environment_version(context, runner, context.root_environment)
@@ -174,6 +188,36 @@ def test_existing_environment_requires_an_interpreter(tmp_path: Path) -> None:
 
     with pytest.raises(BootstrapError, match="no Python interpreter"):
         require_environment_version(context, RecordingRunner(), context.root_environment)
+
+
+def test_existing_environment_requires_cpython(tmp_path: Path) -> None:
+    context = BootstrapContext(tmp_path, "macos", False)
+    python = environment_python(context.root_environment, context.platform)
+    python.parent.mkdir(parents=True)
+    python.touch()
+    runner = RecordingRunner([completed("pypy\n3.12\n/uv/python\n")])
+
+    with pytest.raises(BootstrapError, match="CPython 3.12"):
+        require_environment_version(context, runner, context.root_environment)
+
+
+def test_find_uv_python_requires_managed_existing_interpreter(tmp_path: Path) -> None:
+    context = BootstrapContext(tmp_path, "macos", True)
+    python = tmp_path / "managed" / "python"
+    python.parent.mkdir()
+    python.touch()
+    runner = RecordingRunner([completed(f"{python}\n")])
+
+    assert find_uv_python(context, runner) == python
+    assert runner.calls[0][0] == (
+        "uv",
+        "--no-python-downloads",
+        "python",
+        "find",
+        "--system",
+        "--managed-python",
+        "3.12",
+    )
 
 
 def test_metricflow_environment_uses_local_path(tmp_path: Path) -> None:
@@ -205,6 +249,7 @@ def test_metricflow_environment_uses_local_path(tmp_path: Path) -> None:
         "uv",
         "pip",
         "install",
+        "--exact",
         "--python",
         str(root / "vendor" / "metricflow" / ".venv" / "Scripts" / "python.exe"),
         "--editable",
@@ -232,6 +277,7 @@ def test_dbt_metricflow_environment_installs_parent_editable(tmp_path: Path) -> 
         "uv",
         "pip",
         "install",
+        "--no-deps",
         "--python",
         str(context.dbt_metricflow_environment / "bin" / "python"),
         "--editable",
@@ -306,11 +352,81 @@ def test_pip_check_rejects_an_additional_problem(tmp_path: Path) -> None:
         )
 
 
+def test_old_uv_version_is_rejected(tmp_path: Path) -> None:
+    context = BootstrapContext(tmp_path, "macos", True)
+
+    with pytest.raises(BootstrapError, match="uv 0.12"):
+        validate_uv_version(context, RecordingRunner([completed("uv 0.11.9\n")]))
+
+
+def test_missing_executable_becomes_bootstrap_error(tmp_path: Path) -> None:
+    def missing_runner(
+        args: Sequence[str],
+        *,
+        cwd: Path,
+        env: Mapping[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del args, cwd, env
+        raise FileNotFoundError("missing-tool")
+
+    with pytest.raises(BootstrapError, match="Unable to start command"):
+        run_checked(missing_runner, ("missing-tool",), cwd=tmp_path)
+
+
+def test_check_verification_disables_repository_caches(tmp_path: Path) -> None:
+    context = BootstrapContext(tmp_path, "macos", True)
+    managed_python = tmp_path / "managed" / "python"
+    managed_python.parent.mkdir()
+    managed_python.touch()
+    for environment in (
+        context.root_environment,
+        context.metricflow_environment,
+        context.dbt_metricflow_environment,
+    ):
+        python = environment_python(environment, context.platform)
+        python.parent.mkdir(parents=True)
+        python.touch()
+    identity = f"cpython\n3.12\n{managed_python.parent}\n"
+    runner = RecordingRunner(
+        [completed(f"{managed_python}\n"), *(completed(identity) for _ in range(3))]
+    )
+
+    verify_environments(context, runner)
+
+    check_env = verification_environment(context)
+    assert check_env["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert check_env["GIT_OPTIONAL_LOCKS"] == "0"
+    pytest_calls = [args for args, _, _ in runner.calls if "pytest" in args]
+    assert pytest_calls
+    assert all(("-p", "no:cacheprovider") == args[-2:] for args in pytest_calls)
+    ruff_call = next(args for args, _, _ in runner.calls if "ruff" in args)
+    assert "--no-cache" in ruff_call
+    assert all(
+        env.get("PYTHONDONTWRITEBYTECODE") == "1"
+        for args, _, env in runner.calls
+        if "-c" in args or "pytest" in args or "ruff" in args
+    )
+
+
+def test_check_git_inspection_disables_optional_locks(tmp_path: Path) -> None:
+    context = BootstrapContext(tmp_path, "macos", True)
+    runner = RecordingRunner([completed()])
+
+    assert submodule_is_clean(context, runner, Path("vendor/metricflow"))
+    assert runner.calls[0][2]["GIT_OPTIONAL_LOCKS"] == "0"
+
+
 def test_windows_launcher_parses_and_check_mode_skips_winget(tmp_path: Path) -> None:
     if sys.platform != "win32":
         pytest.skip("PowerShell launcher is exercised on Windows")
-    powershell = shutil.which("pwsh") or shutil.which("powershell")
-    if powershell is None:
+    powershells = tuple(
+        dict.fromkeys(
+            path
+            for name in ("powershell", "pwsh")
+            if (path := shutil.which(name)) is not None
+        )
+    )
+    if not powershells:
         pytest.skip("PowerShell is not available")
     project_root = Path(__file__).parents[2]
     launcher = project_root / "bootstrap.ps1"
@@ -330,17 +446,20 @@ def test_windows_launcher_parses_and_check_mode_skips_winget(tmp_path: Path) -> 
         "if ($errors.Count -ne 0) { $errors; exit 1 }"
     )
 
-    parsed = subprocess.run(
-        [powershell, "-NoProfile", "-Command", parse_command],
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    parsed_results = [
+        subprocess.run(
+            [powershell, "-NoProfile", "-Command", parse_command],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        for powershell in powershells
+    ]
     checked = subprocess.run(
         [
-            powershell,
+            powershells[-1],
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",
@@ -356,7 +475,7 @@ def test_windows_launcher_parses_and_check_mode_skips_winget(tmp_path: Path) -> 
         errors="replace",
     )
 
-    assert parsed.returncode == 0, parsed.stderr
+    assert all(result.returncode == 0 for result in parsed_results)
     assert "positional parameter" not in checked.stderr
     assert not marker.exists()
 
@@ -387,3 +506,94 @@ def test_macos_launcher_has_valid_bash_and_rejects_unknown_argument() -> None:
 
     assert syntax.returncode == 0, syntax.stderr
     assert invalid.returncode != 0
+
+
+def test_macos_launcher_rejects_linux_before_homebrew(tmp_path: Path) -> None:
+    git_bash = Path("C:/Program Files/Git/bin/bash.exe")
+    bash = str(git_bash) if git_bash.is_file() else shutil.which("bash")
+    if bash is None:
+        pytest.skip("Bash is not available")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    marker = tmp_path / "brew-invoked"
+    uname = fake_bin / "uname"
+    brew = fake_bin / "brew"
+    uname.write_text("#!/usr/bin/env bash\necho Linux\n", encoding="utf-8")
+    brew.write_text(
+        f"#!/usr/bin/env bash\nprintf invoked > '{bash_path(marker)}'\n",
+        encoding="utf-8",
+    )
+    uname.chmod(0o755)
+    brew.chmod(0o755)
+    result = subprocess.run(
+        [
+            bash,
+            "-c",
+            'PATH="$1:$PATH"; export PATH; bash "$2"',
+            "bootstrap-test",
+            bash_path(fake_bin),
+            bash_path(Path(__file__).parents[2] / "bootstrap.sh"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    assert result.returncode != 0
+    assert "macOS" in result.stderr
+    assert not marker.exists()
+
+
+def test_macos_check_flow_uses_existing_tools_without_installing(tmp_path: Path) -> None:
+    git_bash = Path("C:/Program Files/Git/bin/bash.exe")
+    bash = str(git_bash) if git_bash.is_file() else shutil.which("bash")
+    if bash is None:
+        pytest.skip("Bash is not available")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    marker = tmp_path / "python-arguments"
+    fake_python = fake_bin / "python"
+    fake_python.write_text(
+        f"#!/usr/bin/env bash\nprintf '%s' \"$*\" > '{bash_path(marker)}'\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    scripts = {
+        "uname": "#!/usr/bin/env bash\necho Darwin\n",
+        "git": "#!/usr/bin/env bash\nexit 0\n",
+        "brew": "#!/usr/bin/env bash\nexit 99\n",
+        "uv": (
+            "#!/usr/bin/env bash\n"
+            "case \"$*\" in\n"
+            "  '--version') echo 'uv 0.12.17' ;;\n"
+            "  'tool list') echo 'hatch v1.18.1' ;;\n"
+            "  '--no-python-downloads python find --system --managed-python 3.12') "
+            f"echo '{bash_path(fake_python)}' ;;\n"
+            "  *) exit 98 ;;\n"
+            "esac\n"
+        ),
+    }
+    for name, content in scripts.items():
+        executable = fake_bin / name
+        executable.write_text(content, encoding="utf-8")
+        executable.chmod(0o755)
+    result = subprocess.run(
+        [
+            bash,
+            "-c",
+            'PATH="$1:$PATH"; export PATH; bash "$2" --check',
+            "bootstrap-test",
+            bash_path(fake_bin),
+            bash_path(Path(__file__).parents[2] / "bootstrap.sh"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert marker.read_text(encoding="utf-8").endswith("scripts/bootstrap.py --check")
