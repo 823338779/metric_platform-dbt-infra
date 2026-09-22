@@ -1,10 +1,13 @@
 # dbt MetricFlow Service
 
-这是一个可独立部署的 Python HTTP 服务。它通过官方公开 CLI 包装 dbt 和 MetricFlow，不复制、不修改，也不从源码目录导入两者的实现。服务提供结构化命令白名单、异步任务状态、项目级写互斥、超时控制、输出截断和 dbt secret 环境变量遮盖。
+这是一个可独立部署的 Python HTTP 服务。它通过只读 Git submodule 携带固定版本的 dbt 与 MetricFlow 源码，在构建阶段安装对应 Python 包，并通过官方公开 CLI 包装能力；服务不修改上游源码，也不跨源码目录导入内部实现。服务提供结构化命令白名单、异步任务状态、项目级写互斥、超时控制、输出截断和 dbt secret 环境变量遮盖。
 
 ## 版本基线
 
 - Python `3.11` 至 `3.14`，容器使用 Python `3.12`
+- dbt 源码：`vendor/dbt`，固定到 tag `v1.12.5`
+- MetricFlow core 源码：`vendor/metricflow`，固定到 tag `v0.213.0`
+- dbt-metricflow CLI 源码：`vendor/dbt-metricflow`，固定到 tag `dbt-metricflow/v0.15.0`
 - `dbt-core==1.12.5`
 - `dbt-starrocks==1.12.2`
 - `dbt-duckdb==1.11.0`（提供一个可直接运行的 MetricFlow 支持 adapter）
@@ -12,7 +15,9 @@
 - `metricflow==0.213.0`
 - `uv==0.12.17`（容器构建工具）
 
-依赖由 `uv.lock` 固定。`GET /v1/versions` 返回当前进程实际加载的服务与上游包版本。
+`dbt-core`、`metricflow` 与 `dbt-metricflow` 由 `uv` 从上述本地源码构建，`dbt-starrocks` 与 `dbt-duckdb` 从包索引安装。依赖由 `uv.lock` 固定。`GET /v1/versions` 返回当前进程实际加载的服务与上游包版本。
+
+MetricFlow 上游在不同 commit 发布 core 和 CLI，因此服务使用两个只读 gitlink 分别固定这两个稳定 tag；两个目录仍来自同一个 `dbt-labs/metricflow` 仓库。
 
 ## 目录和配置
 
@@ -39,6 +44,24 @@ sales:
 ```
 
 以 `DBT_ENV_SECRET_` 开头的非空环境变量值如果被子进程写入 stdout 或 stderr，服务会在保存任务结果前替换为 `***`。不要把真实凭据放在请求参数、项目文件或日志中。
+
+## 获取完整源码
+
+新检出必须递归初始化 submodule：
+
+```bash
+git clone --recurse-submodules https://github.com/823338779/metric_platform-dbt-infra.git
+cd metric_platform-dbt-infra
+```
+
+已有检出执行：
+
+```bash
+git submodule update --init --recursive
+git submodule status
+```
+
+`git submodule status` 行首为 `-` 表示源码尚未初始化，行首为 `+` 表示工作树 commit 与服务锁定的 gitlink 不一致。两种状态都不能用于发布构建；正常状态以一个空格开头。
 
 ## 启动
 
@@ -137,6 +160,13 @@ uv run dbt --version
 uv run mf --version
 ```
 
+以下命令同时验证三个源码包的安装来源；输出必须是仓库内 `vendor/` 路径：
+
+```bash
+uv run pytest tests/test_dependencies.py -v
+uv run python -c "import importlib.metadata as m; print(m.distribution('dbt-core').read_text('direct_url.json')); print(m.distribution('metricflow').read_text('direct_url.json')); print(m.distribution('dbt-metricflow').read_text('direct_url.json'))"
+```
+
 真实 StarRocks E2E 默认跳过。提供临时测试 schema 的连接参数后显式启用；测试会依次通过 HTTP 运行 `debug`、`seed`、`build`、`test`，并在该 schema 中创建测试对象：
 
 ```bash
@@ -150,3 +180,9 @@ uv run pytest tests/test_starrocks_e2e.py -v
 ```
 
 请只使用可安全清理的专用 schema。没有显式开关或缺少连接参数时，测试报告为 `SKIPPED`，不会伪造成功结果。
+
+## 升级上游版本
+
+先验证目标 tag 与当前 adapter 兼容，再移动对应 gitlink。MetricFlow core 与 dbt-metricflow CLI 分别发布，升级时可能需要同时调整 `vendor/metricflow` 和 `vendor/dbt-metricflow`。
+
+更新 gitlink 后，同步 `pyproject.toml` 中的精确版本，重新生成 `uv.lock`，然后运行完整测试、CLI 冒烟测试和 Docker 镜像验收。不得只移动 submodule 指针而保留旧锁文件，也不得直接修改 `vendor/` 内的上游源码。

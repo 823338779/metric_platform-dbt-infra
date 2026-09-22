@@ -340,6 +340,7 @@ Run:
 git status --short --branch
 git submodule status
 git -C vendor/dbt status --short
+git -C vendor/dbt-metricflow status --short
 git -C vendor/metricflow status --short
 git -C ..\dbt status --short
 git -C ..\metricflow status --short
