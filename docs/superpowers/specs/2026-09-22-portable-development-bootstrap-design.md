@@ -154,6 +154,7 @@ No committed file refers to a specific user's home directory or absolute checkou
 - Create `bootstrap.sh` for macOS prerequisite installation.
 - Create `scripts/bootstrap.py` for cross-platform orchestration.
 - Create `scripts/tests/test_bootstrap.py` for isolated bootstrap behavior tests.
+- Modify `pyproject.toml` so the root pytest suite includes `scripts/tests`.
 - Modify `README.md` with one-command setup, interpreter locations, diagnostics, and recovery instructions.
 
 The implementation does not modify source files inside `vendor/dbt`, `vendor/metricflow`, or `vendor/dbt-metricflow`.
