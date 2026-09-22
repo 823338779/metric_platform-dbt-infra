@@ -160,6 +160,34 @@ uv run dbt --version
 uv run mf --version
 ```
 
+### 隔离的上游开发环境
+
+根目录的 `.venv` 只用于服务和本仓测试。需要运行上游源码自己的测试时，使用它们已有的 Hatch
+`dev-env`，避免 MetricFlow 的 `pytest<9`、`httpx<0.25` 等开发约束覆盖服务环境。Hatch 环境默认存放在
+用户级缓存目录，可用 `uvx hatch env find dev-env` 查询解释器路径。
+
+MetricFlow core：
+
+```powershell
+Set-Location vendor/metricflow
+uvx hatch env create dev-env
+uvx hatch run dev-env:pytest tests_metricflow/integration/test_rendered_query.py::test_render_query -v
+```
+
+dbt-metricflow CLI：
+
+```powershell
+Set-Location vendor/dbt-metricflow/dbt-metricflow
+uvx hatch env create dev-env
+# 保持上游开发配置的意图，让 CLI 测试直接使用同一 checkout 中的 MetricFlow 源码。
+uvx hatch run dev-env:pip install --no-deps --editable ..
+uvx hatch run dev-env:python -c "import dbt_metricflow, metricflow; print(dbt_metricflow.__path__); print(metricflow.__path__)"
+```
+
+Windows 必须启用“开发者模式”并用 `core.symlinks=true` 检出 MetricFlow submodule；否则 Git symlink 会被保存为
+只含目标路径的普通文本文件，依赖安装虽然正常，读取测试 YAML 时仍会失败。不要通过修改或复制 `vendor/` 内的
+这些文件来绕过该问题。
+
 以下命令同时验证三个源码包的安装来源；输出必须是仓库内 `vendor/` 路径：
 
 ```bash
