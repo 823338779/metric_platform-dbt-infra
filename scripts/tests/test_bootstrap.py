@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -301,3 +304,86 @@ def test_pip_check_rejects_an_additional_problem(tmp_path: Path) -> None:
             Path("python.exe"),
             allowed_lines=frozenset({DBT_METRICFLOW_EDITABLE_MISMATCH}),
         )
+
+
+def test_windows_launcher_parses_and_check_mode_skips_winget(tmp_path: Path) -> None:
+    if sys.platform != "win32":
+        pytest.skip("PowerShell launcher is exercised on Windows")
+    powershell = shutil.which("pwsh") or shutil.which("powershell")
+    if powershell is None:
+        pytest.skip("PowerShell is not available")
+    project_root = Path(__file__).parents[2]
+    launcher = project_root / "bootstrap.ps1"
+    marker = tmp_path / "winget-invoked"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "winget.cmd").write_text(
+        f'@echo invoked>"{marker}"\r\n@exit /b 0\r\n',
+        encoding="utf-8",
+    )
+    environment = dict(os.environ)
+    environment["PATH"] = str(fake_bin) + os.pathsep + environment["PATH"]
+    parse_command = (
+        "$tokens = $null; $errors = $null; "
+        "[System.Management.Automation.Language.Parser]::ParseFile("
+        f"'{launcher}', [ref]$tokens, [ref]$errors) | Out-Null; "
+        "if ($errors.Count -ne 0) { $errors; exit 1 }"
+    )
+
+    parsed = subprocess.run(
+        [powershell, "-NoProfile", "-Command", parse_command],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    checked = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(launcher),
+            "--check",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    assert parsed.returncode == 0, parsed.stderr
+    assert "positional parameter" not in checked.stderr
+    assert not marker.exists()
+
+
+def test_macos_launcher_has_valid_bash_and_rejects_unknown_argument() -> None:
+    git_bash = Path("C:/Program Files/Git/bin/bash.exe")
+    bash = str(git_bash) if git_bash.is_file() else shutil.which("bash")
+    if bash is None:
+        pytest.skip("Bash is not available")
+    launcher = Path(__file__).parents[2] / "bootstrap.sh"
+
+    syntax = subprocess.run(
+        [bash, "-n", str(launcher)],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    invalid = subprocess.run(
+        [bash, str(launcher), "--unsupported"],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    assert syntax.returncode == 0, syntax.stderr
+    assert invalid.returncode != 0
