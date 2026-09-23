@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from importlib.metadata import version
+from io import StringIO
 from pathlib import Path
 
 from dbt.adapters.factory import get_adapter_by_type
@@ -199,8 +201,14 @@ def execute_dbt(
         "--no-partial-parse",
         "--no-use-v2-parser",
     ]
+    captured_stdout = StringIO()
+    captured_stderr = StringIO()
     try:
-        with _install_resource_hooks(project_dir, request.resources):
+        with (
+            _install_resource_hooks(project_dir, request.resources),
+            redirect_stdout(captured_stdout),
+            redirect_stderr(captured_stderr),
+        ):
             result = dbtRunner().invoke(arguments)
     except ResourceAdapterError:
         raise
@@ -212,6 +220,8 @@ def execute_dbt(
             raise result.exception
         logger.info("Resource dbt invocation failed with %s", type(result.exception).__name__)
         raise ResourceAdapterError("resource_parse_error")
+    sys.stdout.write(captured_stdout.getvalue())
+    sys.stderr.write(captured_stderr.getvalue())
     return 0
 
 

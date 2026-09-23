@@ -21,10 +21,11 @@ MetricFlow 上游在不同 commit 发布 core 和 CLI，因此服务使用两个
 
 ## 目录和配置
 
-服务使用两个固定容器目录：
+服务使用三个固定容器目录：
 
 - `/workspace/projects`：每个一级子目录是一个 dbt 项目。dbt 需要在项目内写入 `target/` 和 `logs/`，因此该挂载必须可写。
 - `/workspace/profiles`：包含 `profiles.yml`，只需只读挂载。
+- `/workspace/job-artifacts`：请求级 resources 的派生产物目录，由服务用户管理和清理，不要由多个服务实例共享。
 
 项目通过安全的单段标识访问，例如 `/workspace/projects/sales` 对应请求字段 `"project": "sales"`。服务拒绝路径、绝对路径和逃逸项目根目录的符号链接。
 
@@ -122,6 +123,7 @@ mv .venv .venv.backup
 uv sync --frozen --all-groups
 PROJECTS_ROOT=/absolute/path/projects \
 DBT_PROFILES_DIR=/absolute/path/profiles \
+JOB_ARTIFACTS_ROOT=/absolute/path/job-artifacts \
 uv run dbt-metricflow-service
 ```
 
@@ -148,8 +150,9 @@ docker compose up -d --build
 
 - `COMMAND_TIMEOUT_SECONDS`：单个 CLI 子进程的最长运行时间，默认 `1800` 秒。
 - `MAX_OUTPUT_BYTES`：每个 stdout/stderr 流保留的尾部字节数，默认 `1048576`。
+- `JOB_ARTIFACTS_ROOT`：请求级任务派生产物根目录，默认 `/workspace/job-artifacts`。
 
-`GET /health/live` 只检查 HTTP 进程；`GET /health/ready` 检查 `dbt`、`mf` 以及两个挂载目录；容器健康检查使用 liveness 端点。
+`GET /health/live` 只检查 HTTP 进程；`GET /health/ready` 检查 `dbt`、`mf`、项目/profile 目录以及任务产物目录；容器健康检查使用 liveness 端点。
 
 ## dbt 任务
 
@@ -170,6 +173,40 @@ curl -sS http://127.0.0.1:8000/v1/jobs/00000000-0000-0000-0000-000000000000
 ```
 
 状态依次为 `queued`、`running`，最终进入 `succeeded`、`failed` 或 `timed_out`。任务保存在当前进程内存中，进程重启后旧 ID 返回 `job_not_found`。同一项目同时只能运行一个 dbt 写任务；冲突返回 HTTP 409 `project_busy`。
+
+## 请求级 YAML resources
+
+dbt 和 MetricFlow 的任务请求都可以携带可选的 `resources`。key 是单个 `.yml` 或 `.yaml` 文件名，value 是本次请求使用的 YAML 原文：
+
+```json
+{
+  "project": "sales",
+  "command": "parse",
+  "resources": {
+    "orders.yml": "version: 2\nmodels:\n  - name: orders\n"
+  }
+}
+```
+
+存在同名项目 YAML 时，本次解析优先读取内存原文；不存在同名文件时，资源会作为第一个 model-path 下的虚拟 schema 文件参与解析。外部原文不会创建、覆盖或修改项目 YAML。
+
+缺失、空字符串和纯空白条目沿用项目默认定义。非空白内容一律交给 dbt 解析，因此语法、引用或校验错误会使任务失败，不会回退到磁盘版本；注释和 `{}` 也属于非空白内容。资源名不接受路径，多处存在同名 YAML 时任务失败。`debug` 不消费 schema，因此只接受缺失或全部为空白的 resources。
+
+资源原文通过子进程 stdin 传输，不进入 argv、环境变量、任务响应或磁盘请求文件。`partial_parse.msgpack` 在资源模式下禁用。`manifest.json`、`semantic_manifest.json`、编译 SQL 等派生产物允许写入任务独立目录，并在任务结束后清理；无法确认已结束的残留目录会保留供维护处理。
+
+MetricFlow 资源请求会先用本次 YAML 执行 dbt parse，再直接读取本次任务的 semantic manifest，不要求项目已有 `target/manifest.json`。例如：
+
+```json
+{
+  "project": "sales",
+  "command": "list_metrics",
+  "resources": {
+    "orders.yml": "version: 2\nmodels:\n  - name: orders\n    semantic_model:\n      enabled: true\n"
+  }
+}
+```
+
+未提供有效 resources 的请求保持原有 CLI 行为及 MetricFlow manifest 前置检查。MetricFlow 仍不支持 StarRocks；资源模式会在异步任务结果中返回该限制。
 
 ## MetricFlow 任务
 
@@ -197,7 +234,7 @@ curl -sS -X POST http://127.0.0.1:8000/v1/metricflow/jobs \
   -d '{"project":"sales","command":"query","metrics":["revenue"],"limit":100}'
 ```
 
-提交 MetricFlow 任务前必须先运行 dbt parse，让项目生成 `target/manifest.json`。MetricFlow `0.213.0` 不支持 StarRocks adapter，因此 StarRocks 项目的 MetricFlow 请求固定返回 HTTP 422 `metricflow_adapter_not_supported`，不会启动 `mf` 子进程。dbt 对 StarRocks 的 parse、compile、seed、run、test、build 和 debug 不受此限制。
+未携带有效 resources 时，提交 MetricFlow 任务前必须先运行 dbt parse，让项目生成 `target/manifest.json`。MetricFlow `0.213.0` 不支持 StarRocks adapter：普通请求同步返回 HTTP 422 `metricflow_adapter_not_supported`，资源请求在异步任务中失败并返回同一诊断代码。dbt 对 StarRocks 的 parse、compile、seed、run、test、build 和 debug 不受此限制。
 
 ## 测试
 
