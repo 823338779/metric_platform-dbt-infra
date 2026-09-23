@@ -10,6 +10,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from dbt_metricflow_service.resources import normalize_resources
+
 logger = logging.getLogger(__name__)
 
 
@@ -56,6 +58,22 @@ class DbtJobRequest(BaseModel):
     exclude: list[str] = Field(default_factory=list, description="dbt exclusion 条件。")
     variables: dict[str, object] = Field(default_factory=dict, description="传递给 dbt --vars 的值。")
     full_refresh: bool = Field(default=False, description="是否执行 dbt full refresh。")
+    resources: dict[str, str] = Field(
+        default_factory=dict,
+        repr=False,
+        description="本次任务优先读取的 YAML 原文；缺失或空白时沿用默认资源。",
+    )
+
+    @field_validator("resources", mode="before")
+    @classmethod
+    def validate_resources(cls, value: object) -> dict[str, str]:
+        return normalize_resources(value)
+
+    @model_validator(mode="after")
+    def reject_debug_resources(self) -> DbtJobRequest:
+        if self.command is DbtCommand.DEBUG and self.resources:
+            raise ValueError("debug does not consume YAML resources")
+        return self
 
     @field_validator("select", "exclude")
     @classmethod
@@ -80,6 +98,16 @@ class MetricFlowJobRequest(BaseModel):
     start_time: datetime | None = Field(default=None, description="查询起始时间。")
     end_time: datetime | None = Field(default=None, description="查询结束时间。")
     limit: int | None = Field(default=None, ge=1, description="最大返回行数。")
+    resources: dict[str, str] = Field(
+        default_factory=dict,
+        repr=False,
+        description="本次任务优先读取的 YAML 原文；缺失或空白时沿用默认资源。",
+    )
+
+    @field_validator("resources", mode="before")
+    @classmethod
+    def validate_resources(cls, value: object) -> dict[str, str]:
+        return normalize_resources(value)
 
     @model_validator(mode="after")
     def require_metrics_for_metric_commands(self) -> MetricFlowJobRequest:
