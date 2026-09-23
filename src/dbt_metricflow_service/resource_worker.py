@@ -7,10 +7,12 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from dbt_metricflow_service.models import DbtJobRequest, MetricFlowJobRequest
 from dbt_metricflow_service.resource_adapter import (
     IncompatibleRuntimeError,
     ResourceAdapterError,
     execute_dbt,
+    execute_metricflow,
 )
 from dbt_metricflow_service.resource_protocol import WorkerRequest
 from dbt_metricflow_service.resources import MAX_WORKER_INPUT_BYTES
@@ -42,11 +44,13 @@ def main() -> int:
     except (ValidationError, ValueError):
         print("invalid_worker_request", file=sys.stderr)
         return 2
-    if envelope.kind != "dbt":
-        print("metricflow_resource_execution_unavailable", file=sys.stderr)
-        return 2
     try:
-        return execute_dbt(envelope.request, project_dir, profiles_dir, artifact_dir)  # type: ignore[arg-type]
+        if envelope.kind == "dbt" and isinstance(envelope.request, DbtJobRequest):
+            return execute_dbt(envelope.request, project_dir, profiles_dir, artifact_dir)
+        if envelope.kind == "metricflow" and isinstance(envelope.request, MetricFlowJobRequest):
+            return execute_metricflow(envelope.request, project_dir, profiles_dir, artifact_dir)
+        print("invalid_worker_request", file=sys.stderr)
+        return 2
     except (IncompatibleRuntimeError, ResourceAdapterError) as error:
         print(str(error), file=sys.stderr)
         return 1

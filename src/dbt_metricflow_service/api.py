@@ -13,6 +13,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from dbt_metricflow_service import __version__
+from dbt_metricflow_service.adapter_support import (
+    METRICFLOW_PACKAGE_VERSION,
+    METRICFLOW_SUPPORTED_ADAPTERS,
+)
 from dbt_metricflow_service.commands import (
     DBT_EXECUTABLE,
     METRICFLOW_EXECUTABLE,
@@ -46,22 +50,6 @@ VERSION_DISTRIBUTIONS = (
     "dbt-metricflow",
     "metricflow",
 )
-METRICFLOW_PACKAGE_VERSION = version("metricflow")
-METRICFLOW_SUPPORTED_ADAPTERS = frozenset(
-    {
-        "athena",
-        "bigquery",
-        "databricks",
-        "duckdb",
-        "postgres",
-        "redshift",
-        "snowflake",
-        "trino",
-        "vertica",
-    }
-)
-
-
 def _error_detail(code: str, message: str) -> dict[str, dict[str, str]]:
     """Build the stable error envelope shared by handlers and routes."""
     return {"detail": {"code": code, "message": message}}

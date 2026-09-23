@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from importlib.metadata import version
 from pathlib import Path
 
+from dbt.adapters.factory import get_adapter_by_type
 from dbt.artifacts.resources.base import FileHash
 from dbt.cli.main import dbtRunner
 from dbt.config import Project
@@ -13,10 +15,15 @@ from dbt.contracts.files import AnySourceFile, FilePath, ParseFileType, SchemaSo
 from dbt.parser import read_files
 from dbt.parser.manifest import ManifestLoader
 from dbt.parser.schemas import yaml_from_file
+from dbt_metricflow.cli.cli_configuration import CLIConfiguration
+from dbt_metricflow.cli.dbt_connectors.dbt_config_accessor import dbtArtifacts
+from dbt_metricflow.cli.main import cli as mf_cli
+from metricflow_semantics.model.dbt_manifest_parser import parse_manifest_from_dbt_generated_manifest
 from pathspec import PathSpec
 
-from dbt_metricflow_service.commands import build_dbt_command
-from dbt_metricflow_service.models import DbtJobRequest
+from dbt_metricflow_service.adapter_support import METRICFLOW_SUPPORTED_ADAPTERS
+from dbt_metricflow_service.commands import build_dbt_command, build_metricflow_command
+from dbt_metricflow_service.models import DbtJobRequest, MetricFlowJobRequest
 
 logger = logging.getLogger(__name__)
 EXPECTED_DBT_CORE_VERSION = "1.12.5"
@@ -32,6 +39,30 @@ class ResourceAdapterError(RuntimeError):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+class TaskCLIConfiguration(CLIConfiguration):
+    """MetricFlow configuration bound to one task's semantic artifact."""
+
+    def __init__(self, artifact_dir: Path) -> None:
+        super().__init__()
+        self._artifact_dir = artifact_dir
+
+    @property
+    def dbt_artifacts(self) -> dbtArtifacts:
+        if self._dbt_artifacts is None:
+            metadata = self.dbt_project_metadata
+            manifest_path = self._artifact_dir / "semantic_manifest.json"
+            semantic_manifest = parse_manifest_from_dbt_generated_manifest(
+                manifest_json_string=manifest_path.read_text(encoding="utf-8")
+            )
+            self._dbt_artifacts = dbtArtifacts(
+                profile=metadata.profile,
+                project=metadata.project,
+                adapter=get_adapter_by_type(metadata.profile.credentials.type),
+                semantic_manifest=semantic_manifest,
+            )
+        return self._dbt_artifacts
 
 
 def _memory_source(path: FilePath, project_name: str, contents: str) -> SchemaSourceFile:
@@ -181,4 +212,65 @@ def execute_dbt(
             raise result.exception
         logger.info("Resource dbt invocation failed with %s", type(result.exception).__name__)
         raise ResourceAdapterError("resource_parse_error")
+    return 0
+
+
+@contextmanager
+def _locked_metricflow_environment(artifact_dir: Path) -> Iterator[None]:
+    values = {
+        "DBT_TARGET_PATH": str(artifact_dir),
+        "DBT_LOG_PATH": str(artifact_dir / "logs"),
+        "DBT_LOG_LEVEL_FILE": "none",
+        "DBT_ENGINE_USE_V2_PARSER": "false",
+        "DBT_PARTIAL_PARSE": "false",
+    }
+    previous = {name: os.environ.get(name) for name in values}
+    os.environ.update(values)
+    try:
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def execute_metricflow(
+    request: MetricFlowJobRequest,
+    project_dir: Path,
+    profiles_dir: Path,
+    artifact_dir: Path,
+) -> int:
+    """Parse request resources, then run the installed MetricFlow CLI on that manifest."""
+    parse_request = DbtJobRequest(
+        project=request.project,
+        command="parse",
+        resources=request.resources,
+    )
+    execute_dbt(parse_request, project_dir, profiles_dir, artifact_dir)
+    configuration = TaskCLIConfiguration(artifact_dir)
+    with _locked_metricflow_environment(artifact_dir):
+        configuration.setup(
+            dbt_profiles_path=profiles_dir,
+            dbt_project_path=project_dir,
+            configure_file_logging=False,
+        )
+        adapter_type = configuration.dbt_project_metadata.profile.credentials.type
+        if adapter_type not in METRICFLOW_SUPPORTED_ADAPTERS:
+            raise ResourceAdapterError("metricflow_adapter_not_supported")
+        arguments = build_metricflow_command(
+            request.model_copy(update={"resources": {}}),
+            project_dir,
+            profiles_dir,
+        ).argv[1:]
+        try:
+            mf_cli.main(args=list(arguments), obj=configuration, standalone_mode=False)
+        except SystemExit as error:
+            if error.code is None:
+                return 0
+            return error.code if isinstance(error.code, int) else 1
+        finally:
+            if configuration._sql_client is not None:
+                configuration._sql_client.close()
     return 0
