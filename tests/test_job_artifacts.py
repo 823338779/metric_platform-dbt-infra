@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 from pathlib import Path
 from uuid import uuid4
 
@@ -53,6 +54,19 @@ def test_startup_recovery_only_removes_confirmed_finished_directories(tmp_path: 
     assert unknown.exists()
 
 
+def test_artifact_paths_work_without_python_312_isjunction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delattr(os.path, "isjunction", raising=False)
+    root = tmp_path / "artifacts"
+
+    directory = create_job_directory(root, uuid4())
+    recover_finished_directories(root)
+
+    assert directory.exists()
+
+
 @pytest.mark.parametrize("mode", ["artifact-success", "artifact-failure"])
 async def test_resource_job_artifacts_are_cleaned_after_exit(tmp_path: Path, mode: str) -> None:
     root = tmp_path / "artifacts"
@@ -63,6 +77,7 @@ async def test_resource_job_artifacts_are_cleaned_after_exit(tmp_path: Path, mod
     expected = JobStatus.SUCCEEDED if mode == "artifact-success" else JobStatus.FAILED
     assert completed.status is expected
     assert "JOB_ARTIFACT_DIR=" in completed.stdout
+    assert "MAX_OUTPUT_BYTES=512" in completed.stdout
     assert root.is_dir()
     assert not list(root.iterdir())
 

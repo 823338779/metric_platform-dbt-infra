@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import stat
 from pathlib import Path
 from uuid import UUID
 
@@ -11,7 +12,16 @@ FINISHED_MARKER = ".finished"
 
 
 def _is_link(path: Path) -> bool:
-    return path.is_symlink() or (os.name == "nt" and os.path.isjunction(path))
+    is_symlink = path.is_symlink()
+    if is_symlink or os.name != "nt":
+        return is_symlink
+    is_junction = getattr(os.path, "isjunction", None)
+    if is_junction is not None:
+        return bool(is_junction(path))
+    try:
+        return bool(path.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    except (AttributeError, FileNotFoundError):
+        return False
 
 
 def _validated_directory(root: Path, directory: Path) -> tuple[Path, Path]:

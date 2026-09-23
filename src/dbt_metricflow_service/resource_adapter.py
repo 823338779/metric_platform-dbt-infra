@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from importlib.metadata import version
-from io import StringIO
+from io import TextIOBase
 from pathlib import Path
+from typing import TextIO
 
 from dbt.adapters.factory import get_adapter_by_type
 from dbt.artifacts.resources.base import FileHash
@@ -26,9 +28,13 @@ from pathspec import PathSpec
 from dbt_metricflow_service.adapter_support import METRICFLOW_SUPPORTED_ADAPTERS
 from dbt_metricflow_service.commands import build_dbt_command, build_metricflow_command
 from dbt_metricflow_service.models import DbtJobRequest, MetricFlowJobRequest
+from dbt_metricflow_service.settings import DEFAULT_MAX_OUTPUT_BYTES, MAX_OUTPUT_BYTES_ENV
 
 logger = logging.getLogger(__name__)
 EXPECTED_DBT_CORE_VERSION = "1.12.5"
+TRUNCATED_OUTPUT_MARKER = "resource_output_truncated\n"
+ERROR_LINE_PATTERN = re.compile(r"\bline (\d+)\b", re.IGNORECASE)
+ERROR_COLUMN_PATTERN = re.compile(r"\bcolumn (\d+)\b", re.IGNORECASE)
 
 
 class IncompatibleRuntimeError(RuntimeError):
@@ -38,9 +44,86 @@ class IncompatibleRuntimeError(RuntimeError):
 class ResourceAdapterError(RuntimeError):
     """A stable, source-free resource failure suitable for worker stderr."""
 
-    def __init__(self, code: str) -> None:
-        super().__init__(code)
+    def __init__(self, code: str, detail: str | None = None) -> None:
+        super().__init__(f"{code}: {detail}" if detail else code)
         self.code = code
+
+
+class _BoundedTextCapture(TextIOBase):
+    """Retain a bounded UTF-8 tail while satisfying dbt's text stream writes."""
+
+    def __init__(self, max_bytes: int) -> None:
+        super().__init__()
+        self._max_bytes = max_bytes
+        self._data = bytearray()
+        self.truncated = False
+
+    @property
+    def retained_bytes(self) -> bytes:
+        return bytes(self._data)
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, text: str) -> int:
+        encoded = text.encode("utf-8", errors="replace")
+        self._data.extend(encoded)
+        if len(self._data) > self._max_bytes:
+            del self._data[: len(self._data) - self._max_bytes]
+            self.truncated = True
+        return len(text)
+
+    def replay(self, target: TextIO, text: str | None = None) -> None:
+        """Replay retained text and force the parent tail buffer to observe truncation."""
+        if self.truncated:
+            target.write(TRUNCATED_OUTPUT_MARKER)
+        target.write(
+            self._data.decode("utf-8", errors="replace") if text is None else text
+        )
+
+
+def _worker_output_limit() -> int:
+    try:
+        value = int(os.environ.get(MAX_OUTPUT_BYTES_ENV, str(DEFAULT_MAX_OUTPUT_BYTES)))
+    except ValueError:
+        return DEFAULT_MAX_OUTPUT_BYTES
+    return value if value > 0 else DEFAULT_MAX_OUTPUT_BYTES
+
+
+def _safe_error_detail(error: BaseException) -> str:
+    """Extract source-free location data from a dbt exception."""
+    category = type(error).__name__
+    parts = [f"category={category}"]
+    path = getattr(error, "path", None)
+    if isinstance(path, str) and path:
+        parts.append(f"file={Path(path).name}")
+    message = str(error)
+    line = ERROR_LINE_PATTERN.search(message)
+    column = ERROR_COLUMN_PATTERN.search(message)
+    if line is not None:
+        parts.append(f"line={line.group(1)}")
+    if column is not None:
+        parts.append(f"column={column.group(1)}")
+    return " ".join(parts)
+
+
+def _sanitized_execution_output(text: str, resources: Mapping[str, str]) -> str:
+    """Remove source-listing lines while retaining database execution diagnostics."""
+    source_lines = {
+        line.strip()
+        for raw in resources.values()
+        for line in raw.splitlines()
+        if line.strip()
+    }
+    sanitized: list[str] = []
+    for output_line in text.splitlines(keepends=True):
+        candidate = output_line.split("|", 1)[-1].strip()
+        if candidate in source_lines:
+            ending = "\n" if output_line.endswith(("\n", "\r")) else ""
+            sanitized.append(f"[resource content omitted]{ending}")
+        else:
+            sanitized.append(output_line)
+    return "".join(sanitized)
 
 
 class TaskCLIConfiguration(CLIConfiguration):
@@ -95,8 +178,6 @@ def _resource_paths(
             visible.setdefault(Path(path.relative_path).name.casefold(), []).append(path)
 
     selected: dict[str, FilePath] = {}
-    if not paths:
-        raise ResourceAdapterError("resource_model_path_missing")
     for name in resources:
         matches = visible.get(name.casefold(), [])
         if len(matches) > 1:
@@ -114,12 +195,14 @@ def _resource_paths(
         ]
         if physical_matches:
             raise ResourceAdapterError("resource_file_ignored")
-        first_model_path = paths[0].rstrip("/\\")
+        if not project.model_paths:
+            raise ResourceAdapterError("resource_model_path_missing")
+        first_model_path = project.model_paths[0].rstrip("/\\")
         virtual_relative = f"{first_model_path}/{name}".replace("\\", "/")
         if ignore_spec is not None and ignore_spec.match_file(virtual_relative):
             raise ResourceAdapterError("resource_file_ignored")
         selected[name.casefold()] = FilePath(
-            searched_path=paths[0],
+            searched_path=project.model_paths[0],
             relative_path=name,
             modification_time=0.0,
             project_root=str(project_root),
@@ -184,6 +267,8 @@ def execute_dbt(
     project_dir: Path,
     profiles_dir: Path,
     artifact_dir: Path,
+    *,
+    force_write_json: bool = False,
 ) -> int:
     """Invoke dbt with root schema YAML overlaid from request memory."""
     if version("dbt-core") != EXPECTED_DBT_CORE_VERSION:
@@ -201,8 +286,12 @@ def execute_dbt(
         "--no-partial-parse",
         "--no-use-v2-parser",
     ]
-    captured_stdout = StringIO()
-    captured_stderr = StringIO()
+    if force_write_json:
+        arguments.append("--write-json")
+    output_limit = _worker_output_limit()
+    captured_stdout = _BoundedTextCapture(output_limit)
+    captured_stderr = _BoundedTextCapture(output_limit)
+    print(f"resource_dbt_started command={request.command.value}", flush=True)
     try:
         with (
             _install_resource_hooks(project_dir, request.resources),
@@ -214,14 +303,33 @@ def execute_dbt(
         raise
     except Exception as error:
         logger.info("Resource parsing failed with %s", type(error).__name__)
-        raise ResourceAdapterError("resource_parse_error") from None
+        raise ResourceAdapterError("resource_parse_error", _safe_error_detail(error)) from None
     if not result.success:
         if isinstance(result.exception, ResourceAdapterError):
             raise result.exception
-        logger.info("Resource dbt invocation failed with %s", type(result.exception).__name__)
-        raise ResourceAdapterError("resource_parse_error")
-    sys.stdout.write(captured_stdout.getvalue())
-    sys.stderr.write(captured_stderr.getvalue())
+        if result.exception is not None:
+            logger.info("Resource dbt invocation failed with %s", type(result.exception).__name__)
+            raise ResourceAdapterError(
+                "resource_parse_error",
+                _safe_error_detail(result.exception),
+            )
+        captured_stdout.replay(
+            sys.stdout,
+            _sanitized_execution_output(
+                captured_stdout.retained_bytes.decode("utf-8", errors="replace"),
+                request.resources,
+            ),
+        )
+        captured_stderr.replay(
+            sys.stderr,
+            _sanitized_execution_output(
+                captured_stderr.retained_bytes.decode("utf-8", errors="replace"),
+                request.resources,
+            ),
+        )
+        raise ResourceAdapterError("resource_execution_error")
+    captured_stdout.replay(sys.stdout)
+    captured_stderr.replay(sys.stderr)
     return 0
 
 
@@ -258,7 +366,13 @@ def execute_metricflow(
         command="parse",
         resources=request.resources,
     )
-    execute_dbt(parse_request, project_dir, profiles_dir, artifact_dir)
+    execute_dbt(
+        parse_request,
+        project_dir,
+        profiles_dir,
+        artifact_dir,
+        force_write_json=True,
+    )
     configuration = TaskCLIConfiguration(artifact_dir)
     with _locked_metricflow_environment(artifact_dir):
         configuration.setup(

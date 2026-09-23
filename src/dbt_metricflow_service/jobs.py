@@ -19,6 +19,7 @@ from dbt_metricflow_service.job_artifacts import (
     remove_job_directory,
 )
 from dbt_metricflow_service.models import CommandSpec, JobRecord, JobStatus
+from dbt_metricflow_service.settings import MAX_OUTPUT_BYTES_ENV
 
 logger = logging.getLogger(__name__)
 
@@ -243,6 +244,7 @@ class JobRunner:
                 artifact_directory = create_job_directory(self._job_artifacts_root, job_id)
                 environment["JOB_ARTIFACT_DIR"] = str(artifact_directory)
                 environment["DBT_TARGET_PATH"] = str(artifact_directory)
+                environment[MAX_OUTPUT_BYTES_ENV] = str(self._max_output_bytes)
             # A dedicated process group lets timeout and shutdown include descendants.
             process_options: dict[str, object]
             if os.name == "nt":

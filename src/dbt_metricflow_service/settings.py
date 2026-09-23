@@ -12,6 +12,7 @@ DEFAULT_PROFILES_DIR = "/workspace/profiles"
 DEFAULT_JOB_ARTIFACTS_ROOT = "/workspace/job-artifacts"
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 1800
 DEFAULT_MAX_OUTPUT_BYTES = 1_048_576
+MAX_OUTPUT_BYTES_ENV = "MAX_OUTPUT_BYTES"
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,7 +39,7 @@ class Settings:
             command_timeout_seconds=int(
                 os.getenv("COMMAND_TIMEOUT_SECONDS", str(DEFAULT_COMMAND_TIMEOUT_SECONDS))
             ),
-            max_output_bytes=int(os.getenv("MAX_OUTPUT_BYTES", str(DEFAULT_MAX_OUTPUT_BYTES))),
+            max_output_bytes=int(os.getenv(MAX_OUTPUT_BYTES_ENV, str(DEFAULT_MAX_OUTPUT_BYTES))),
             job_artifacts_root=Path(
                 os.getenv("JOB_ARTIFACTS_ROOT", DEFAULT_JOB_ARTIFACTS_ROOT)
             ).resolve(),

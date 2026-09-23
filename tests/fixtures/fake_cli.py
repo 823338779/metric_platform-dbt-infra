@@ -81,6 +81,7 @@ def main() -> int:
         directory = Path(os.environ["JOB_ARTIFACT_DIR"])
         (directory / "derived.json").write_text("{}", encoding="utf-8")
         print(f"JOB_ARTIFACT_DIR={directory}", flush=True)
+        print(f"MAX_OUTPUT_BYTES={os.environ['MAX_OUTPUT_BYTES']}", flush=True)
         return 0 if mode == ARTIFACT_SUCCESS_MODE else FAILURE_EXIT_CODE
     raise ValueError(f"unsupported fake CLI mode: {mode}")
 
