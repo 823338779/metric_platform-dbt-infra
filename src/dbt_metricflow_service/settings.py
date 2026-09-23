@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_PROJECTS_ROOT = "/workspace/projects"
 DEFAULT_PROFILES_DIR = "/workspace/profiles"
+DEFAULT_JOB_ARTIFACTS_ROOT = "/workspace/job-artifacts"
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 1800
 DEFAULT_MAX_OUTPUT_BYTES = 1_048_576
 
@@ -25,6 +26,8 @@ class Settings:
     command_timeout_seconds: int
     # Maximum number of bytes retained for each subprocess output stream.
     max_output_bytes: int
+    # Service-owned root for task-isolated derived dbt and MetricFlow artifacts.
+    job_artifacts_root: Path = Path(DEFAULT_JOB_ARTIFACTS_ROOT)
 
     @classmethod
     def from_environment(cls) -> Settings:
@@ -36,4 +39,7 @@ class Settings:
                 os.getenv("COMMAND_TIMEOUT_SECONDS", str(DEFAULT_COMMAND_TIMEOUT_SECONDS))
             ),
             max_output_bytes=int(os.getenv("MAX_OUTPUT_BYTES", str(DEFAULT_MAX_OUTPUT_BYTES))),
+            job_artifacts_root=Path(
+                os.getenv("JOB_ARTIFACTS_ROOT", DEFAULT_JOB_ARTIFACTS_ROOT)
+            ).resolve(),
         )

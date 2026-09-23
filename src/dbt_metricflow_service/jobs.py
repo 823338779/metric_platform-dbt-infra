@@ -12,6 +12,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
+from dbt_metricflow_service.job_artifacts import (
+    create_job_directory,
+    mark_job_finished,
+    recover_finished_directories,
+    remove_job_directory,
+)
 from dbt_metricflow_service.models import CommandSpec, JobRecord, JobStatus
 
 logger = logging.getLogger(__name__)
@@ -114,6 +120,7 @@ class JobRunner:
         timeout_seconds: float,
         max_output_bytes: int,
         max_completed_jobs: int = DEFAULT_MAX_COMPLETED_JOBS,
+        job_artifacts_root: Path | None = None,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
@@ -126,11 +133,17 @@ class JobRunner:
         self._timeout_seconds = timeout_seconds
         self._max_output_bytes = max_output_bytes
         self._max_completed_jobs = max_completed_jobs
+        self._job_artifacts_root = job_artifacts_root
         self._state_lock = asyncio.Lock()
         self._jobs: dict[UUID, JobRecord] = {}
         self._tasks: dict[UUID, asyncio.Task[None]] = {}
         self._completed_jobs: deque[UUID] = deque()
         self._busy_projects: set[str] = set()
+
+    def prepare_artifacts(self) -> None:
+        """Create the configured root and recover only confirmed finished work."""
+        if self._job_artifacts_root is not None:
+            recover_finished_directories(self._job_artifacts_root)
 
     @property
     def max_output_bytes(self) -> int:
@@ -215,6 +228,7 @@ class JobRunner:
         process: asyncio.subprocess.Process | None = None
         readers: tuple[asyncio.Task[None], ...] = ()
         stdin_writer: asyncio.Task[None] | None = None
+        artifact_directory: Path | None = None
 
         await self._replace_record(
             job_id,
@@ -222,6 +236,13 @@ class JobRunner:
             started_at=datetime.now(UTC),
         )
         try:
+            environment = dict(command.environment)
+            if command.use_job_artifacts:
+                if self._job_artifacts_root is None:
+                    raise RuntimeError("job artifact root is not configured")
+                artifact_directory = create_job_directory(self._job_artifacts_root, job_id)
+                environment["JOB_ARTIFACT_DIR"] = str(artifact_directory)
+                environment["DBT_TARGET_PATH"] = str(artifact_directory)
             # A dedicated process group lets timeout and shutdown include descendants.
             process_options: dict[str, object]
             if os.name == "nt":
@@ -231,7 +252,7 @@ class JobRunner:
             process = await asyncio.create_subprocess_exec(
                 *command.argv,
                 cwd=command.cwd,
-                env=dict(command.environment),
+                env=environment,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 stdin=(asyncio.subprocess.PIPE if command.stdin_data is not None else None),
@@ -273,6 +294,16 @@ class JobRunner:
             await asyncio.shield(self._finish_readers(readers))
             stdout_buffer.finish()
             stderr_buffer.finish()
+            if artifact_directory is not None and self._job_artifacts_root is not None:
+                try:
+                    mark_job_finished(self._job_artifacts_root, artifact_directory)
+                    remove_job_directory(self._job_artifacts_root, artifact_directory)
+                except (OSError, ValueError) as error:
+                    logger.warning(
+                        "Unable to clean job artifact directory %s: %s",
+                        artifact_directory.name,
+                        type(error).__name__,
+                    )
             await asyncio.shield(
                 self._finalize(
                     job_id,

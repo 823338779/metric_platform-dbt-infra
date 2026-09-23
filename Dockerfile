@@ -13,7 +13,9 @@ COPY src ./src
 RUN uv sync --frozen --no-dev
 
 FROM python:3.12-slim AS runtime
-RUN useradd --create-home --uid 10001 app
+RUN useradd --create-home --uid 10001 app \
+    && mkdir -p /workspace/job-artifacts \
+    && chown app:app /workspace/job-artifacts
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/src /app/src

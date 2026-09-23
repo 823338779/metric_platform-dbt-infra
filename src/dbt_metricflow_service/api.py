@@ -59,6 +59,9 @@ def create_app(settings: Settings, registry: ProjectRegistry, runner: JobRunner)
     """Create one dependency-injected service application."""
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        prepare_artifacts = getattr(app.state.runner, "prepare_artifacts", None)
+        if prepare_artifacts is not None:
+            prepare_artifacts()
         yield
         close = getattr(app.state.runner, "close", None)
         if close is not None:

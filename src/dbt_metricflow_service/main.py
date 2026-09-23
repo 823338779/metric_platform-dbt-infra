@@ -21,7 +21,11 @@ def run() -> None:
     app = create_app(
         settings,
         ProjectRegistry(settings.projects_root),
-        JobRunner(settings.command_timeout_seconds, settings.max_output_bytes),
+        JobRunner(
+            settings.command_timeout_seconds,
+            settings.max_output_bytes,
+            job_artifacts_root=settings.job_artifacts_root,
+        ),
     )
     uvicorn.run(app, host=SERVER_HOST, port=SERVER_PORT)
 

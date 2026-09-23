@@ -18,6 +18,8 @@ STDIN_LENGTH_MODE = "stdin-length"
 STDOUT_BEFORE_STDIN_MODE = "stdout-before-stdin"
 EXIT_BEFORE_STDIN_MODE = "exit-before-stdin"
 NEVER_READ_STDIN_MODE = "never-read-stdin"
+ARTIFACT_SUCCESS_MODE = "artifact-success"
+ARTIFACT_FAILURE_MODE = "artifact-failure"
 SUCCESS_STDOUT = "success stdout"
 SUCCESS_STDERR = "success stderr"
 FAILURE_STDERR = "failure stderr"
@@ -72,6 +74,14 @@ def main() -> int:
     if mode == NEVER_READ_STDIN_MODE:
         time.sleep(5)
         return 0
+    if mode in {ARTIFACT_SUCCESS_MODE, ARTIFACT_FAILURE_MODE}:
+        import os
+        from pathlib import Path
+
+        directory = Path(os.environ["JOB_ARTIFACT_DIR"])
+        (directory / "derived.json").write_text("{}", encoding="utf-8")
+        print(f"JOB_ARTIFACT_DIR={directory}", flush=True)
+        return 0 if mode == ARTIFACT_SUCCESS_MODE else FAILURE_EXIT_CODE
     raise ValueError(f"unsupported fake CLI mode: {mode}")
 
 
