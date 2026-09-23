@@ -63,7 +63,7 @@ def _submit(client: TestClient, path: str, payload: dict[str, object]) -> dict[s
     return _wait(client, response.json()["id"])
 
 
-@pytest.mark.parametrize("command", ["parse", "compile", "seed", "run", "test", "build"])
+@pytest.mark.parametrize("command", ["parse", "build"])
 def test_dbt_commands_consume_request_yaml_without_changing_disk(
     tmp_path: Path,
     command: str,

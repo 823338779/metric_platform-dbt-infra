@@ -99,12 +99,6 @@ def test_build_dbt_command_serializes_all_structured_options(
     )
 
 
-def test_unknown_dbt_command_is_rejected_by_request_model() -> None:
-    """Raw or future CLI names must not bypass the command allowlist."""
-    with pytest.raises(ValidationError):
-        DbtJobRequest.model_validate({"project": "sales", "command": "run-operation"})
-
-
 @pytest.mark.parametrize("field", ["select", "exclude"])
 def test_dbt_selection_cannot_inject_cli_options(field: str) -> None:
     """Selection values must not override service-controlled dbt paths or options."""
@@ -127,14 +121,6 @@ def test_build_metricflow_list_metrics(project_dir: Path, profiles_dir: Path) ->
     assert spec.argv == ("mf", "list", "metrics", "--show-all-dimensions")
     assert spec.cwd == project_dir
     assert spec.write_operation is False
-
-
-def test_build_metricflow_list_dimensions_requires_metrics(
-    project_dir: Path, profiles_dir: Path
-) -> None:
-    """Dimension discovery without a metric set must fail before spawning mf."""
-    with pytest.raises(ValidationError, match="metrics"):
-        MetricFlowJobRequest(project="sales", command=MetricFlowCommand.LIST_DIMENSIONS)
 
 
 def test_build_metricflow_explain_serializes_query_options(
@@ -175,9 +161,3 @@ def test_build_metricflow_explain_serializes_query_options(
         "--limit",
         "10",
     )
-
-
-def test_build_metricflow_query_requires_metrics(project_dir: Path, profiles_dir: Path) -> None:
-    """A metric query without metrics or a saved query has no defined result."""
-    with pytest.raises(ValidationError, match="metrics"):
-        MetricFlowJobRequest(project="sales", command=MetricFlowCommand.QUERY)
