@@ -7,9 +7,9 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PROJECTS_ROOT = "/workspace/projects"
-DEFAULT_PROFILES_DIR = "/workspace/profiles"
-DEFAULT_JOB_ARTIFACTS_ROOT = "/workspace/job-artifacts"
+DEFAULT_PROJECTS_ROOT = "projects"
+DEFAULT_PROFILES_DIR = "profiles"
+DEFAULT_JOB_ARTIFACTS_ROOT = "job-artifacts"
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 1800
 DEFAULT_MAX_OUTPUT_BYTES = 1_048_576
 MAX_OUTPUT_BYTES_ENV = "MAX_OUTPUT_BYTES"

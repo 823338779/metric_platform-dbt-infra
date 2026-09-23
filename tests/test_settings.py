@@ -28,3 +28,16 @@ def test_settings_reads_paths_and_limits(monkeypatch, tmp_path: Path) -> None:
     assert settings.command_timeout_seconds == 45
     assert settings.max_output_bytes == 4096
     assert settings.job_artifacts_root == artifacts.resolve()
+
+
+def test_settings_defaults_to_local_directories(monkeypatch, tmp_path: Path) -> None:
+    """A local checkout should use directories under its working directory by default."""
+    monkeypatch.chdir(tmp_path)
+    for name in ("PROJECTS_ROOT", "DBT_PROFILES_DIR", "JOB_ARTIFACTS_ROOT"):
+        monkeypatch.delenv(name, raising=False)
+
+    settings = Settings.from_environment()
+
+    assert settings.projects_root == tmp_path / "projects"
+    assert settings.profiles_dir == tmp_path / "profiles"
+    assert settings.job_artifacts_root == tmp_path / "job-artifacts"

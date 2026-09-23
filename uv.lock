@@ -373,7 +373,7 @@ wheels = [
 
 [[package]]
 name = "dbt-metricflow"
-source = { directory = "vendor/dbt-metricflow/dbt-metricflow" }
+source = { directory = "vendor/metricflow/dbt-metricflow" }
 dependencies = [
     { name = "click" },
     { name = "dbt-core" },
@@ -455,7 +455,7 @@ dev = [
 requires-dist = [
     { name = "dbt-core", directory = "vendor/dbt/core" },
     { name = "dbt-duckdb", specifier = "==1.11.0" },
-    { name = "dbt-metricflow", directory = "vendor/dbt-metricflow/dbt-metricflow" },
+    { name = "dbt-metricflow", directory = "vendor/metricflow/dbt-metricflow" },
     { name = "dbt-starrocks", specifier = "==1.12.2" },
     { name = "fastapi", specifier = "==0.141.1" },
     { name = "metricflow", directory = "vendor/metricflow" },

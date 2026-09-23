@@ -3,7 +3,7 @@
 本仓库是 dbt 与 MetricFlow 的独立 HTTP 包装服务。
 
 - 上游版本固定为 `dbt-core==1.12.5`、`dbt-starrocks==1.12.2`、`dbt-duckdb==1.11.0`、`dbt-metricflow==0.15.0` 和 `metricflow==0.213.0`。
-- `vendor/dbt`、`vendor/metricflow` 与 `vendor/dbt-metricflow` 是只读 Git submodule；不得在其中修改或提交源码，只能通过更新 gitlink 升级。
+- `vendor/dbt` 与 `vendor/metricflow` 是只读 Git submodule；不得在其中修改或提交源码，只能通过更新 gitlink 升级。
 - `dbt-core`、`metricflow` 与 `dbt-metricflow` 必须从固定 submodule 构建；父工作区并列的 `dbt/` 与 `metricflow/` 不得作为依赖来源。
 - 服务只能通过已安装包提供的公开 CLI 或公开 API 调用 dbt 与 MetricFlow，不得跨目录导入其内部实现。
 - 仅 `resource_adapter.py` 可为请求级内存 YAML 适配调用已安装、固定版本的 dbt 与 MetricFlow 内部解析/配置 API；不得把该例外扩散到其他模块。
@@ -12,6 +12,6 @@
 - 按逻辑块添加说明用途和关键约束的注释，避免解释不言自明的语句。
 - 可复用字符串定义为模块常量；配置键、默认值和错误消息可以直接使用。
 - 不接受任意 shell 字符串、任意文件路径或未经白名单约束的命令。
-- 凭据只能通过环境变量或只读 profile 挂载提供，不得进入源码、测试固件、日志或响应。
+- 凭据只能通过环境变量或只读 profile 文件提供，不得进入源码、测试固件、日志或响应。
 - 使用 `uv` 管理依赖；修改行为时先写失败测试，再做最小实现。
 - 完成任务前运行受影响测试、完整 `pytest` 和 `ruff check`。

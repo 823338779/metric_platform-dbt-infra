@@ -7,3 +7,6 @@ build/
 dist/
 target/
 logs/
+/projects/
+/profiles/
+/job-artifacts/
