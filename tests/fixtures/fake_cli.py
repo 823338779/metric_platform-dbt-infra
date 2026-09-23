@@ -14,6 +14,10 @@ LARGE_OUTPUT_MODE = "large-output"
 ECHO_MODE = "echo"
 SPLIT_ECHO_MODE = "split-echo"
 CHILD_HOLDS_PIPE_MODE = "child-holds-pipe"
+STDIN_LENGTH_MODE = "stdin-length"
+STDOUT_BEFORE_STDIN_MODE = "stdout-before-stdin"
+EXIT_BEFORE_STDIN_MODE = "exit-before-stdin"
+NEVER_READ_STDIN_MODE = "never-read-stdin"
 SUCCESS_STDOUT = "success stdout"
 SUCCESS_STDERR = "success stderr"
 FAILURE_STDERR = "failure stderr"
@@ -53,6 +57,19 @@ def main() -> int:
         subprocess.Popen(
             [sys.executable, "-c", f"import time; time.sleep({float(sys.argv[2])})"]
         )
+        time.sleep(5)
+        return 0
+    if mode == STDIN_LENGTH_MODE:
+        print(len(sys.stdin.buffer.read()), flush=True)
+        return 0
+    if mode == STDOUT_BEFORE_STDIN_MODE:
+        sys.stdout.write("x" * (256 * 1024))
+        sys.stdout.flush()
+        print(len(sys.stdin.buffer.read()), flush=True)
+        return 0
+    if mode == EXIT_BEFORE_STDIN_MODE:
+        return FAILURE_EXIT_CODE
+    if mode == NEVER_READ_STDIN_MODE:
         time.sleep(5)
         return 0
     raise ValueError(f"unsupported fake CLI mode: {mode}")

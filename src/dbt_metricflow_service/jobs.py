@@ -214,6 +214,7 @@ class JobRunner:
         exit_code: int | None = None
         process: asyncio.subprocess.Process | None = None
         readers: tuple[asyncio.Task[None], ...] = ()
+        stdin_writer: asyncio.Task[None] | None = None
 
         await self._replace_record(
             job_id,
@@ -233,6 +234,7 @@ class JobRunner:
                 env=dict(command.environment),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                stdin=(asyncio.subprocess.PIPE if command.stdin_data is not None else None),
                 **process_options,
             )
             if process.stdout is None or process.stderr is None:
@@ -241,9 +243,16 @@ class JobRunner:
                 asyncio.create_task(self._drain(process.stdout, stdout_buffer)),
                 asyncio.create_task(self._drain(process.stderr, stderr_buffer)),
             )
+            if command.stdin_data is not None:
+                stdin_writer = asyncio.create_task(
+                    self._feed_stdin(process, command.stdin_data),
+                    name=f"stdin-{job_id}",
+                )
             try:
                 async with asyncio.timeout(self._timeout_seconds):
                     exit_code = await process.wait()
+                    if stdin_writer is not None:
+                        await stdin_writer
                 status = JobStatus.SUCCEEDED if exit_code == 0 else JobStatus.FAILED
             except TimeoutError:
                 status = JobStatus.TIMED_OUT
@@ -254,7 +263,13 @@ class JobRunner:
             raise
         except (OSError, RuntimeError) as error:
             stderr_buffer.feed(str(error).encode("utf-8", errors="replace"))
+            if process is not None and process.returncode is None:
+                await asyncio.shield(self._terminate(process, readers))
         finally:
+            if stdin_writer is not None and not stdin_writer.done():
+                stdin_writer.cancel()
+            if stdin_writer is not None:
+                await asyncio.gather(stdin_writer, return_exceptions=True)
             await asyncio.shield(self._finish_readers(readers))
             stdout_buffer.finish()
             stderr_buffer.finish()
@@ -320,6 +335,19 @@ class JobRunner:
         """Drain one pipe to EOF so large output cannot block the child."""
         while chunk := await stream.read(STREAM_READ_BYTES):
             buffer.feed(chunk)
+
+    @staticmethod
+    async def _feed_stdin(process: asyncio.subprocess.Process, payload: bytes) -> None:
+        """Write one in-memory payload and close the pipe without treating early exit as failure."""
+        if process.stdin is None:
+            raise RuntimeError("stdin pipe was not created")
+        try:
+            process.stdin.write(payload)
+            await process.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            process.stdin.close()
 
     @classmethod
     async def _terminate(

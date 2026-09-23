@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import os
 import sys
@@ -252,3 +253,40 @@ async def test_unknown_job_returns_none(runner: JobRunner) -> None:
     from uuid import uuid4
 
     assert await runner.get(uuid4()) is None
+
+
+async def test_stdin_payload_is_delivered_without_deadlocking_output(tmp_path: Path) -> None:
+    payload = b"x" * (512 * 1024)
+    spec = dataclasses.replace(
+        command_spec(tmp_path, "stdout-before-stdin"),
+        stdin_data=payload,
+    )
+    runner = JobRunner(timeout_seconds=3.0, max_output_bytes=128)
+    submitted = await runner.submit("sales", spec)
+    completed = await runner.wait(submitted.id)
+    assert completed.status is JobStatus.SUCCEEDED
+    assert str(len(payload)) in completed.stdout
+    assert payload.decode() not in repr(completed)
+
+
+async def test_child_exit_before_stdin_preserves_exit_code(tmp_path: Path) -> None:
+    spec = dataclasses.replace(
+        command_spec(tmp_path, "exit-before-stdin"),
+        stdin_data=b"x" * (512 * 1024),
+    )
+    runner = JobRunner(timeout_seconds=2.0, max_output_bytes=128)
+    submitted = await runner.submit("sales", spec)
+    completed = await runner.wait(submitted.id)
+    assert completed.status is JobStatus.FAILED
+    assert completed.exit_code == 7
+
+
+async def test_stdin_writer_is_inside_job_timeout(tmp_path: Path) -> None:
+    spec = dataclasses.replace(
+        command_spec(tmp_path, "never-read-stdin"),
+        stdin_data=b"x" * (512 * 1024),
+    )
+    runner = JobRunner(timeout_seconds=0.1, max_output_bytes=128)
+    submitted = await runner.submit("sales", spec)
+    completed = await runner.wait(submitted.id)
+    assert completed.status is JobStatus.TIMED_OUT

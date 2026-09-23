@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -151,3 +151,7 @@ class CommandSpec:
     environment: Mapping[str, str]
     # Whether the command must hold the per-project mutation lock.
     write_operation: bool
+    # Optional private subprocess input; excluded from repr to avoid accidental disclosure.
+    stdin_data: bytes | None = field(default=None, repr=False)
+    # Whether the runner should create an isolated derived-artifact directory.
+    use_job_artifacts: bool = False
