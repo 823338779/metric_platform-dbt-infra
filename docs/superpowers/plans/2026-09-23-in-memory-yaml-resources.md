@@ -4,7 +4,7 @@
 
 **Goal:** 给现有任务接口增加请求级 resources，优先消费内存 YAML，缺失或空白时沿用默认行为，非空白解析错误明确失败。
 
-**Architecture:** 有效 resources 为空时保留原有 CLI；否则通过 stdin 将请求交给一次性 Python worker。worker 仅在固定版本 dbt 的 schema 读取层使用内存适配，禁用原文缓存，派生产物写入独立任务目录，mf 配置绑定本次语义 manifest。生产代码和测试均从已安装的上游包导入。
+**Architecture:** 用组合式命令适配器包装现有构造器，有效 resources 为空时直接返回原命令，否则转换为经 stdin 接收请求的一次性 Python worker。worker 仅在固定版本 dbt 的 schema 读取层使用内存适配，禁用原文缓存，派生产物写入独立任务目录，mf 配置绑定本次语义 manifest。保持 commands.py、projects.py 不变，JobRunner 只增量接入 stdin 和产物 helper；不另建执行框架。
 
 **Tech Stack:** Python 3.11–3.14（开发/容器验证 3.12）、FastAPI、Pydantic、asyncio subprocess、dbt-core 1.12.5、dbt-metricflow 0.15.0、metricflow 0.213.0、pytest、ruff、uv。
 
@@ -25,6 +25,7 @@
 - 所有新 Python 模块具有 future annotations、模块 logger、完整类型注解；新增字段用 Field 的 description 参数或相邻注释说明用途；复用字符串用模块常量。
 - 先失败测试再实现。受影响测试通过后运行完整 pytest 和 `ruff check src tests scripts`；不修复只读 vendor 的已有 lint 问题。
 - 当前仅单服务进程部署；不新增发布体系、认证体系、Git 同步、通用文件系统、持久化任务队列或资源会话缓存。
+- 尽量少侵入既有实现：采用新增适配模块和组合复用，不复制 JobRunner，不重构既有状态机、锁、脱敏、argv 白名单，不做相邻格式整理；不为设计模式增加抽象工厂或插件注册表。
 
 ## Review Focus
 
@@ -41,16 +42,20 @@
 | 文件 | 职责 |
 | --- | --- |
 | 新增 `src/dbt_metricflow_service/resources.py` | 名称/大小校验、空白过滤、资源输入常量 |
-| 修改 `models.py` | 两种请求 resources 字段、内部 WorkerRequest、CommandSpec stdin/产物标记 |
+| 修改 `models.py` | 两种请求 resources 字段、CommandSpec 可选 stdin/产物标记；复用外部校验函数 |
+| 新增 `resource_protocol.py` | worker 私有 WorkerRequest，避免扩大原业务模型模块 |
+| 新增 `resource_commands.py` | 组合包装原构造器，无资源直接委托，有资源转换为 worker 命令 |
+| 新增 `adapter_support.py` | API 和 worker 共用既有 adapter 白名单和版本常量 |
 | 新增 `resource_adapter.py` | 唯一允许导入上游内部 API 的模块；读取适配、缓存/日志控制、mf 配置桥接 |
 | 新增 `resource_worker.py` | 受限 stdin 协议、分发、退出码；只调用服务适配层 |
 | 新增 `job_artifacts.py` | 服务所有的任务目录创建、退出清理、保守启动恢复 |
 | 新增 `request_limits.py` | 两个 POST 任务接口的 ASGI 请求体大小限制 |
-| 修改 `commands.py`、`jobs.py` | 固定 worker argv、管道输入、产物生命周期及现有命令白名单 |
+| 保持 `commands.py`、`projects.py` 不变 | 原命令白名单、argv 构造及基础项目解析继续复用 |
+| 最小修改 `jobs.py` | 增加可选 stdin 收尾和产物 helper 调用，不搬迁既有执行流程 |
 | 修改 `api.py`、`settings.py`、`main.py` | 路由分流、配置、启动检查与清理 |
 | 修改 `Dockerfile`、`README.md`、`AGENTS.md` | 非 root 产物目录、接口文档、限定内部 API 例外 |
 
-测试文件：新增 `tests/test_resources.py`、`tests/resource_helpers.py`、`tests/test_resource_adapter.py`、`tests/test_resource_metricflow.py`、`tests/test_job_artifacts.py`、`tests/test_request_limits.py`、`tests/test_resources_e2e.py`；扩展现有 commands/jobs/API/settings 测试和 `tests/fixtures/fake_cli.py`。
+测试文件：新增 `tests/test_resources.py`、`tests/test_resource_commands.py`、`tests/resource_helpers.py`、`tests/test_resource_adapter.py`、`tests/test_resource_metricflow.py`、`tests/test_job_artifacts.py`、`tests/test_request_limits.py`、`tests/test_resources_e2e.py`；扩展现有 jobs/API/settings 测试和 `tests/fixtures/fake_cli.py`，原 test_commands.py 作为不修改的回归基线。
 
 按 Task 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 顺序实施。Task 2 和 3 是首批技术验证门槛；不得先接入生产 API，再发现内存语义无法兑现。中间提交用于审查，不单独部署。
 
@@ -58,7 +63,7 @@
 
 ## Task 1: resources 契约与内部输入协议
 
-**Files:** Create `resources.py`, `tests/test_resources.py`; Modify `models.py`。
+**Files:** Create `resources.py`, `resource_protocol.py`, `tests/test_resources.py`; Modify `models.py`。
 
 **Interfaces:**
 
@@ -66,8 +71,8 @@
 resources.normalize_resources(value: object) -> dict[str, str]
 models.DbtJobRequest.resources: dict[str, str] = {}
 models.MetricFlowJobRequest.resources: dict[str, str] = {}
-models.WorkerRequest.kind: Literal["dbt", "metricflow"]
-models.WorkerRequest.request: DbtJobRequest | MetricFlowJobRequest
+resource_protocol.WorkerRequest.kind: Literal["dbt", "metricflow"]
+resource_protocol.WorkerRequest.request: DbtJobRequest | MetricFlowJobRequest
 ```
 
 WorkerRequest 是服务私有传输结构，`extra="forbid"`，after-validator 强制 kind 与请求类型一致，且必须有有效 resources。路径只来自父进程环境，不能出现在该结构中。
@@ -244,7 +249,7 @@ def test_memory_yaml_precedes_invalid_disk_yaml(tmp_path: Path) -> None:
 
 ## Task 3: MetricFlow 使用本次语义产物
 
-**Files:** Modify `resource_adapter.py`, `resource_worker.py`, `commands.py`, `api.py`; Create `tests/test_resource_metricflow.py`。
+**Files:** Modify `resource_adapter.py`, `resource_worker.py`, `api.py`; Create `adapter_support.py`, `tests/test_resource_metricflow.py`。
 
 **Interfaces:**
 
@@ -255,7 +260,7 @@ resource_adapter.TaskCLIConfiguration(CLIConfiguration)
 resource_adapter.TaskCLIConfiguration.dbt_artifacts -> dbtArtifacts
 ```
 
-将 adapter 白名单和固定版本常量从 api.py 移到 `commands.py` 的模块常量，api 和适配器统一引用，避免 worker 导入整个 FastAPI 模块。
+将 adapter 白名单和固定版本常量原样提取到 `adapter_support.py`，api 仅替换常量导入，判定逻辑不变；适配器引用同一模块。这样避免 worker 导入整个 FastAPI 模块，也不修改 commands.py。
 
 - [ ] **3.1 写失败测试：默认旧 manifest 不能获胜。** 用 helper 创建项目，在基础 target 放入无效旧 manifest 哨兵；请求将 fixture 的 `"    metrics:\n      - name: revenue"` 替换为 `"    metrics:\n      - name: request_revenue"`（只替换 metrics 段，不能改列名），走 worker list_metrics。
 
@@ -394,23 +399,22 @@ def test_cleanup_rejects_outside_directory(tmp_path: Path) -> None:
 
 ## Task 6: 命令构造与 worker 路由
 
-**Files:** Modify `commands.py`, `resource_worker.py`, `tests/test_commands.py`。
+**Files:** Create `resource_commands.py`, `tests/test_resource_commands.py`; Modify `resource_worker.py`。不改 commands.py 或 test_commands.py。
 
 **Interfaces:**
 
 ```text
-commands.build_dbt_command(request: DbtJobRequest, project_dir: Path,
+resource_commands.build_dbt_command(request: DbtJobRequest, project_dir: Path,
     profiles_dir: Path) -> CommandSpec
-commands.build_metricflow_command(request: MetricFlowJobRequest, project_dir: Path,
+resource_commands.build_metricflow_command(request: MetricFlowJobRequest, project_dir: Path,
     profiles_dir: Path) -> CommandSpec
-commands._resource_command(kind: Literal["dbt", "metricflow"],
-    request: DbtJobRequest | MetricFlowJobRequest,
-    project_dir: Path, profiles_dir: Path) -> CommandSpec
+resource_commands._adapt_command(kind: Literal["dbt", "metricflow"],
+    request: DbtJobRequest | MetricFlowJobRequest, base: CommandSpec) -> CommandSpec
 ```
 
-公开函数签名保持不变；新 helper 只用于两条资源分支。
+适配模块导出与原构造器相同签名的两个函数。API 在 Task 7 替换导入位置；原 commands.py 仍是 worker 内及原测试使用的实现。采用函数组合即可，不引入继承体系。
 
-- [ ] **6.1 写失败测试：** 两个 builder 的空/全空白输入仍生成原 CLI argv，非空白资源生成固定 worker 模块，YAML 不在 argv/env 中。以下断言对 dbt 与 mf 参数化：
+- [ ] **6.1 写失败测试：** tests/test_resource_commands.py 从新适配模块导入构造函数。两个适配入口的空/全空白输入仍生成原 CLI argv，非空白资源生成固定 worker 模块，YAML 不在 argv/env 中。以下是 dbt 用例；另加 MetricFlowJobRequest 的 list_metrics 用例，调用 build_metricflow_command，并断言 write_operation 为 False，其余资源传输约束相同：
 
 ```python
 def test_resource_command_keeps_yaml_only_in_stdin(
@@ -430,15 +434,44 @@ def test_resource_command_keeps_yaml_only_in_stdin(
     assert spec.use_job_artifacts is True
 ```
 
-- [ ] **6.2 验证失败：** `uv run --frozen pytest tests/test_commands.py -k resource -q`，应仍生成 dbt/mf argv 而失败。
-- [ ] **6.3 实现最小分支。** dbt builder 起始位置增加以下分支；mf builder 将 kind 改为 `"metricflow"`。其余原有白名单构造不改。helper 用 WorkerRequest.model_dump_json().encode("utf-8") 构造 stdin，设置 kind 对应的 write_operation（dbt=True，mf=False），固定 project/profiles 环境，不从请求接受 paths。必须保持资源适配器中清空 resources 后复用 builder 的路径，避免 worker 递归启动 worker。
+- [ ] **6.2 验证失败：** `uv run --frozen pytest tests/test_resource_commands.py -q`，应因新适配模块缺失失败。
+- [ ] **6.3 实现组合适配。** 新模块导入 `dbt_metricflow_service.commands as base_commands`。两个函数先调用原构造器，再调用共享 _adapt_command。以下代码只写入 resource_commands.py，原构造器不增加分支。原 cwd、环境和 write_operation 全部继承，避免再维护一套参数白名单。
 
 ```python
-if request.resources:
-    return _resource_command("dbt", request, project_dir, profiles_dir)
+def build_dbt_command(
+    request: DbtJobRequest, project_dir: Path, profiles_dir: Path,
+) -> CommandSpec:
+    base = base_commands.build_dbt_command(request, project_dir, profiles_dir)
+    return _adapt_command("dbt", request, base)
+
+def build_metricflow_command(
+    request: MetricFlowJobRequest, project_dir: Path, profiles_dir: Path,
+) -> CommandSpec:
+    base = base_commands.build_metricflow_command(request, project_dir, profiles_dir)
+    return _adapt_command("metricflow", request, base)
+
+def _adapt_command(
+    kind: Literal["dbt", "metricflow"],
+    request: DbtJobRequest | MetricFlowJobRequest,
+    base: CommandSpec,
+) -> CommandSpec:
+    if not request.resources:
+        return base
+    envelope = WorkerRequest(kind=kind, request=request)
+    environment = dict(base.environment)
+    environment["DBT_PROJECT_DIR"] = str(base.cwd)
+    return dataclasses.replace(
+        base,
+        argv=(sys.executable, "-m", WORKER_MODULE),
+        environment=environment,
+        stdin_data=envelope.model_dump_json().encode("utf-8"),
+        use_job_artifacts=True,
+    )
 ```
+
+该模块定义 WORKER_MODULE 常量并按项目规范导入 dataclasses、sys、Literal、Path、请求类型与 WorkerRequest。增加委托测试：将适配模块引用的 base_commands 构造函数替换为返回已知 CommandSpec 的桩，空/全空白请求必须返回同一个对象（`actual is base`），且只调用一次。worker 中明确从原 commands 模块导入，避免经过外层适配再启动 worker。
 - [ ] **6.4 worker 统一结果。** main 根据 kind 调用两个执行函数；退出码 int；未知内部错误输出固定类别、非零退出。不在整个 worker 外加“失败则原 CLI 重试”。parse 失败不得进入 mf；run/build 必须只执行一次。
-- [ ] **6.5 运行与提交：** `uv run --frozen pytest tests/test_commands.py tests/test_resources.py tests/test_resource_adapter.py tests/test_resource_metricflow.py -q`，再 ruff；提交 `feat: route nonblank YAML resources through workers`。
+- [ ] **6.5 运行与提交：** `uv run --frozen pytest tests/test_commands.py tests/test_resource_commands.py tests/test_resources.py tests/test_resource_adapter.py tests/test_resource_metricflow.py -q`，再 ruff；提交 `feat: adapt commands for nonblank YAML resources`。
 
 ## Task 7: HTTP 分流与有界请求体
 
@@ -455,7 +488,7 @@ RequestBodyLimitMiddleware.__call__(scope: Scope, receive: Receive, send: Send) 
 
 - [ ] **7.1 写失败 API 测试。** 没有基础 manifest 的 resources list_metrics 返回 202 且提交 worker；同请求 resources 全空白返回原来的 manifest 未生成错误。无 resources 的 StarRocks 仍 HTTP 422；有资源时先返回 202，执行失败由集成测试检查。debug 空白成功、非空白 422；响应任何字段不含 resources 原文。
 - [ ] **7.2 验证失败：** `uv run --frozen pytest tests/test_api_dbt.py tests/test_api_metricflow.py -q`，新 tests 应暴露 adapter 预检查未分流。
-- [ ] **7.3 修改路由：** `if not payload.resources:` 内保留原 metricflow adapter 检查，之后照常 build_metricflow_command；dbt 路由沿用 builder。不要在 HTTP 线程调用 parser。ready 增加任务目录可写状态，测试注入 tmp_path。
+- [ ] **7.3 最小接入路由：** 两个构造器函数改从 resource_commands 导入，其他命令常量仍从原模块导入；`if not payload.resources:` 内保留原 metricflow adapter 检查，其余提交和轮询流程不改。不要在 HTTP 线程调用 parser，也不把适配细节塞进路由。ready 增加任务目录可写状态，测试注入 tmp_path。
 - [ ] **7.4 写 ASGI 层失败测试。** 用一个仅记录是否被调用的下游 app，receive 依次返回多个 `http.request` frame，累计超过 max_bytes 必须 413、下游没有被调用；精确等于上限成功；Content-Length 缺省或谎报较小仍按实际字节数拒绝；disconnect 不启动任务；非目标 GET 原样转发。
 
 ```python
@@ -514,10 +547,11 @@ uv run --frozen pytest
 uv run --frozen ruff check src tests scripts
 git diff --check
 git diff --submodule=short -- vendor
+git diff 334c777 -- src/dbt_metricflow_service/commands.py src/dbt_metricflow_service/projects.py
 ```
 
 - [ ] **8.5 容器验证。** 若 Docker 可用，`docker build -t dbt-metricflow-service:resources .`，确认 UID 10001 可写默认任务目录；启动映射临时测试项目/profile，执行一次 resources parse 和 mf list_metrics，并检查不落原文。Windows 路径测试在当前宿主运行；Docker 不可用则明确记录此验证缺口，不安装或改动上游来绕过。
-- [ ] **8.6 提交：** `test: verify in-memory resource execution end to end`。检查工作区和 gitlink，最终报告范围、通过测试、未运行的外部验证，以及针对固定版本内部接口的维护限制。
+- [ ] **8.6 审查侵入范围并提交：** 检查相对计划基线 334c777 的 commands.py、projects.py diff 为空，原 test_commands.py 保持通过；逐段核对现有 models/api/jobs/settings/main 的修改只涉及必要接入，不存在锁、脱敏、任务状态或既有 argv 的重写。提交 `test: verify in-memory resource execution end to end`，最终报告范围、通过测试、未运行的外部验证，以及针对固定版本内部接口的维护限制。
 
 ## 自审映射
 
@@ -532,5 +566,6 @@ git diff --submodule=short -- vendor
 | 两个现有 HTTP 入口及默认路径兼容 | 6、7 |
 | 真实命令效果、并发、无串扰 | 3、8 |
 | 文档、仓库规则、完整测试 | 2、8 |
+| 组合适配、最小侵入、原命令/项目模块不变 | 6、7、8 |
 
 实现前仅需评审本计划并选择执行方式。建议同一执行者按顺序实施：适配器、worker、管道与路由紧密依赖；先验证 Task 2/3，再继续集成。独立最终代码评审仍需覆盖内部 hook 和资源生命周期。
