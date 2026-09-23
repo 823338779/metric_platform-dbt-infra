@@ -6,6 +6,7 @@
 - `vendor/dbt`、`vendor/metricflow` 与 `vendor/dbt-metricflow` 是只读 Git submodule；不得在其中修改或提交源码，只能通过更新 gitlink 升级。
 - `dbt-core`、`metricflow` 与 `dbt-metricflow` 必须从固定 submodule 构建；父工作区并列的 `dbt/` 与 `metricflow/` 不得作为依赖来源。
 - 服务只能通过已安装包提供的公开 CLI 或公开 API 调用 dbt 与 MetricFlow，不得跨目录导入其内部实现。
+- 仅 `resource_adapter.py` 可为请求级内存 YAML 适配调用已安装、固定版本的 dbt 与 MetricFlow 内部解析/配置 API；不得把该例外扩散到其他模块。
 - 所有 Python 文件使用 `from __future__ import annotations`、模块 logger 和完整类型注解。
 - 增量字段必须用 `Field(description=...)` 或相邻注释说明用途。
 - 按逻辑块添加说明用途和关键约束的注释，避免解释不言自明的语句。
