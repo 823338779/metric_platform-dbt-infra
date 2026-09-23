@@ -3,7 +3,7 @@
 	url = https://github.com/dbt-labs/dbt.git
 [submodule "vendor/metricflow"]
 	path = vendor/metricflow
-	url = https://github.com/dbt-labs/metricflow.git
+	url = https://github.com/823338779/metricflow.git
 [submodule "vendor/dbt-metricflow"]
 	path = vendor/dbt-metricflow
-	url = https://github.com/dbt-labs/metricflow.git
+	url = https://github.com/823338779/metricflow.git
