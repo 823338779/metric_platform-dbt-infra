@@ -177,3 +177,36 @@ def test_metricflow_command_without_metrics_returns_stable_422(
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "validation_error"
     assert runner.submissions == []
+
+
+def test_resources_skip_stale_manifest_precheck(
+    metricflow_api: tuple[TestClient, Path, StubJobRunner],
+) -> None:
+    client, _, runner = metricflow_api
+    response = client.post(
+        "/v1/metricflow/jobs",
+        json={
+            "project": "sales",
+            "command": "list_metrics",
+            "resources": {"metrics.yml": "version: 2\n"},
+        },
+    )
+    assert response.status_code == 202
+    assert runner.submissions[0][1].use_job_artifacts is True
+
+
+def test_blank_resources_keep_manifest_precheck(
+    metricflow_api: tuple[TestClient, Path, StubJobRunner],
+) -> None:
+    client, _, runner = metricflow_api
+    response = client.post(
+        "/v1/metricflow/jobs",
+        json={
+            "project": "sales",
+            "command": "list_metrics",
+            "resources": {"metrics.yml": " \n"},
+        },
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "semantic_manifest_not_generated"
+    assert runner.submissions == []

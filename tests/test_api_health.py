@@ -43,13 +43,16 @@ def build_client(tmp_path: Path) -> TestClient:
     """Create an application with concrete readable mount directories."""
     projects_root = tmp_path / "projects"
     profiles_dir = tmp_path / "profiles"
+    artifacts_root = tmp_path / "artifacts"
     projects_root.mkdir()
     profiles_dir.mkdir()
+    artifacts_root.mkdir()
     settings = Settings(
         projects_root=projects_root,
         profiles_dir=profiles_dir,
         command_timeout_seconds=30,
         max_output_bytes=1024,
+        job_artifacts_root=artifacts_root,
     )
     return TestClient(create_app(settings, ProjectRegistry(projects_root), EmptyJobRunner()))
 

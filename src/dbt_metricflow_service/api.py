@@ -20,8 +20,6 @@ from dbt_metricflow_service.adapter_support import (
 from dbt_metricflow_service.commands import (
     DBT_EXECUTABLE,
     METRICFLOW_EXECUTABLE,
-    build_dbt_command,
-    build_metricflow_command,
 )
 from dbt_metricflow_service.jobs import JobRunner, ProjectBusyError
 from dbt_metricflow_service.models import DbtJobRequest, JobRecord, MetricFlowJobRequest
@@ -31,6 +29,11 @@ from dbt_metricflow_service.projects import (
     ManifestNotFoundError,
     ProjectNotFoundError,
     ProjectRegistry,
+)
+from dbt_metricflow_service.request_limits import RequestBodyLimitMiddleware
+from dbt_metricflow_service.resource_commands import (
+    build_dbt_command,
+    build_metricflow_command,
 )
 from dbt_metricflow_service.settings import Settings
 
@@ -68,6 +71,7 @@ def create_app(settings: Settings, registry: ProjectRegistry, runner: JobRunner)
             await close()
 
     app = FastAPI(title=SERVICE_TITLE, version=__version__, lifespan=lifespan)
+    app.add_middleware(RequestBodyLimitMiddleware)
     app.state.settings = settings
     app.state.registry = registry
     app.state.runner = runner
@@ -92,9 +96,14 @@ def register_routes(app: FastAPI) -> None:
         )
         mounts_readable = all(
             path.is_dir() and os.access(path, os.R_OK)
-            for path in (settings.projects_root, settings.profiles_dir)
+            for path in (
+                settings.projects_root,
+                settings.profiles_dir,
+                settings.job_artifacts_root,
+            )
         )
-        if not commands_available or not mounts_readable:
+        artifacts_writable = os.access(settings.job_artifacts_root, os.W_OK)
+        if not commands_available or not mounts_readable or not artifacts_writable:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail={"code": "not_ready", "message": "required CLI or mount is unavailable"},
@@ -125,18 +134,19 @@ def register_routes(app: FastAPI) -> None:
         registry: ProjectRegistry = request.app.state.registry
         runner: JobRunner = request.app.state.runner
         project_dir = registry.resolve(payload.project)
-        adapter_type = registry.adapter_type(project_dir)
-        if adapter_type not in METRICFLOW_SUPPORTED_ADAPTERS:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail={
-                    "code": "metricflow_adapter_not_supported",
-                    "message": (
-                        f"adapter '{adapter_type}' is not supported by "
-                        f"MetricFlow {METRICFLOW_PACKAGE_VERSION}"
-                    ),
-                },
-            )
+        if not payload.resources:
+            adapter_type = registry.adapter_type(project_dir)
+            if adapter_type not in METRICFLOW_SUPPORTED_ADAPTERS:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail={
+                        "code": "metricflow_adapter_not_supported",
+                        "message": (
+                            f"adapter '{adapter_type}' is not supported by "
+                            f"MetricFlow {METRICFLOW_PACKAGE_VERSION}"
+                        ),
+                    },
+                )
         command = build_metricflow_command(payload, project_dir, settings.profiles_dir)
         return await runner.submit(payload.project, command)
 

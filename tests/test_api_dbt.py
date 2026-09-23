@@ -145,3 +145,32 @@ def test_arbitrary_dbt_command_returns_stable_422(client: TestClient) -> None:
 
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "validation_error"
+
+
+def test_nonblank_resources_submit_fixed_worker_without_echoing_yaml(
+    client: TestClient,
+    api_dependencies: tuple[Settings, ProjectRegistry, StubJobRunner],
+) -> None:
+    marker = "API_RESOURCE_MARKER_91df"
+    response = client.post(
+        "/v1/dbt/jobs",
+        json={
+            "project": "sales",
+            "command": "parse",
+            "resources": {"orders.yml": f"version: 2\n# {marker}\n"},
+        },
+    )
+    assert response.status_code == 202
+    assert marker not in response.text
+    command = api_dependencies[2].submissions[0][1]
+    assert command.argv[1:] == ("-m", "dbt_metricflow_service.resource_worker")
+    assert command.stdin_data is not None
+
+
+def test_debug_rejects_nonblank_resources(client: TestClient) -> None:
+    response = client.post(
+        "/v1/dbt/jobs",
+        json={"project": "sales", "command": "debug", "resources": {"a.yml": "{}"}},
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "validation_error"
