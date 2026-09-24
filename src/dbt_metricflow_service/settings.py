@@ -10,6 +10,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_PROJECTS_ROOT = "projects"
 DEFAULT_PROFILES_DIR = "profiles"
 DEFAULT_JOB_ARTIFACTS_ROOT = "job-artifacts"
+DEFAULT_PLATFORM_DB_PATH = "platform-jobs.sqlite"
+PLATFORM_BINDINGS_FILE_ENV = "PLATFORM_BINDINGS_FILE"
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 1800
 DEFAULT_MAX_OUTPUT_BYTES = 1_048_576
 MAX_OUTPUT_BYTES_ENV = "MAX_OUTPUT_BYTES"
@@ -29,6 +31,10 @@ class Settings:
     max_output_bytes: int
     # Service-owned root for task-isolated derived dbt and MetricFlow artifacts.
     job_artifacts_root: Path = Path(DEFAULT_JOB_ARTIFACTS_ROOT)
+    # 服务拥有的项目 Git 与 profile 绑定配置；不由 HTTP 请求覆盖。
+    platform_bindings_file: Path | None = None
+    # 平台构建与查询的可重启 SQLite 任务索引。
+    platform_db_path: Path = Path(DEFAULT_PLATFORM_DB_PATH)
 
     @classmethod
     def from_environment(cls) -> Settings:
@@ -43,4 +49,9 @@ class Settings:
             job_artifacts_root=Path(
                 os.getenv("JOB_ARTIFACTS_ROOT", DEFAULT_JOB_ARTIFACTS_ROOT)
             ).resolve(),
+            platform_bindings_file=(
+                Path(os.environ[PLATFORM_BINDINGS_FILE_ENV]).resolve()
+                if PLATFORM_BINDINGS_FILE_ENV in os.environ else None
+            ),
+            platform_db_path=Path(os.getenv("PLATFORM_DB_PATH", DEFAULT_PLATFORM_DB_PATH)).resolve(),
         )

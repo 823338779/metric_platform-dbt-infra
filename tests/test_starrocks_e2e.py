@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from dbt_metricflow_service.api import create_app
 from dbt_metricflow_service.jobs import JobRunner
+from dbt_metricflow_service.platform_metricflow import execute_programmatic
 from dbt_metricflow_service.projects import ProjectRegistry
 from dbt_metricflow_service.settings import Settings
 
@@ -23,6 +24,7 @@ E2E_ENVIRONMENT_KEYS = (
     "DBT_ENV_SECRET_STARROCKS_PASSWORD",
     "DBT_STARROCKS_SCHEMA",
 )
+E2E_PASSWORD_KEY = "DBT_ENV_SECRET_STARROCKS_PASSWORD"
 E2E_PROJECT = "starrocks_e2e"
 FINAL_JOB_STATUSES = frozenset({"succeeded", "failed", "timed_out"})
 POLL_TIMEOUT_SECONDS = 120.0
@@ -31,7 +33,10 @@ POLL_INTERVAL_SECONDS = 0.2
 
 def _required_environment() -> dict[str, str]:
     """Read real StarRocks settings only when the caller explicitly enables E2E."""
-    missing = [key for key in E2E_ENVIRONMENT_KEYS if not os.getenv(key)]
+    missing = [
+        key for key in E2E_ENVIRONMENT_KEYS
+        if key not in os.environ or (key != E2E_PASSWORD_KEY and not os.environ[key])
+    ]
     if missing:
         pytest.skip(f"missing StarRocks E2E environment: {', '.join(missing)}")
     return {key: os.environ[key] for key in E2E_ENVIRONMENT_KEYS}
@@ -61,16 +66,29 @@ def _write_e2e_project(projects_root: Path, profiles_dir: Path, values: dict[str
         encoding="utf-8",
     )
     (seeds_dir / "orders_seed.csv").write_text(
-        "order_id,revenue\n1,10\n",
+        "order_id,order_date,revenue\n1,2024-01-01,10\n",
         encoding="utf-8",
     )
     (models_dir / "orders.sql").write_text(
-        "select order_id, revenue from {{ ref('orders_seed') }}\n",
+        "select order_id, cast(order_date as date) as ordered_at, revenue from {{ ref('orders_seed') }}\n",
+        encoding="utf-8",
+    )
+    (models_dir / "time_spine.sql").write_text(
+        "select distinct cast(order_date as date) as date_day from {{ ref('orders_seed') }}\n",
         encoding="utf-8",
     )
     (models_dir / "orders.yml").write_text(
-        "version: 2\nmodels:\n  - name: orders\n    columns:\n"
-        "      - name: order_id\n        data_tests: [not_null]\n",
+        "version: 2\nmodels:\n"
+        "  - name: time_spine\n    time_spine:\n      standard_granularity_column: date_day\n"
+        "    columns:\n      - name: date_day\n        granularity: day\n"
+        "  - name: orders\n    semantic_model:\n      enabled: true\n"
+        "    agg_time_dimension: ordered_at\n    columns:\n"
+        "      - name: order_id\n        entity: {name: order, type: primary}\n"
+        "        data_tests: [not_null]\n"
+        "      - name: ordered_at\n        granularity: day\n        dimension: {type: time}\n"
+        "      - name: revenue\n"
+        "    metrics:\n      - name: revenue\n        type: simple\n"
+        "        agg: sum\n        expr: revenue\n",
         encoding="utf-8",
     )
     (profiles_dir / "profiles.yml").write_text(
@@ -135,6 +153,21 @@ def test_real_starrocks_debug_seed_build_and_test(tmp_path: Path) -> None:
         for command in ("debug", "seed", "build", "test"):
             record = _submit_and_wait(client, command)
             assert record["status"] == "succeeded", record
+
+    # 构建后用真实 StarRocks 执行 MetricFlow 指标查询，验证平台查询适配路径。
+    result = execute_programmatic(projects_root / E2E_PROJECT, profiles_dir, {
+        "mode": "QUERY",
+        "request": {
+            "runId": "00000000-0000-0000-0000-000000000001",
+            "idempotencyKey": "starrocks-e2e",
+            "mode": "QUERY",
+            "metrics": ["revenue"],
+            "groupBy": ["metric_time__month"],
+            "limit": 10,
+        },
+    })
+    assert len(result["rows"]) == 1
+    assert result["rows"][0][1] == 10
 
 
 def test_e2e_profile_references_secret_environment_without_copying_value(

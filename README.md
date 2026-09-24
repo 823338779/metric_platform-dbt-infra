@@ -10,6 +10,7 @@
 - `dbt-core==1.12.5`
 - `dbt-starrocks==1.12.2`
 - `dbt-duckdb==1.11.0`（提供一个可直接运行的 MetricFlow 支持 adapter）
+- `dbt-postgres==1.11.0`（平台固定版本任务的 PostgreSQL 验收 adapter）
 - `dbt-metricflow==0.15.0`
 - `metricflow==0.213.0`
 - `uv`（本地依赖管理工具）
@@ -95,6 +96,35 @@ uv run --frozen dbt-metricflow-service
 
 `GET /health/live` 只检查 HTTP 进程；`GET /health/ready` 检查 `dbt`、`mf`、项目/profile 目录以及任务产物目录。
 
+## 平台固定版本任务
+
+设置 `PLATFORM_BINDINGS_FILE` 为服务拥有的 JSON 文件路径，并设置 `PLATFORM_DB_PATH` 为服务独占的 SQLite 索引路径。绑定文件是数组，例如：
+
+```json
+[
+  {
+    "projectId": "sales",
+    "remote": "https://example.invalid/data-model.git",
+    "projectSubdir": ".",
+    "profileBindingId": "postgres"
+  }
+]
+```
+
+`profileBindingId` 对应 `profiles.yml` 中的 target。该 target 的 `schema` 必须引用 `{{ env_var('DBT_PLATFORM_SCHEMA') }}`，由服务为每个 run 设置独立 schema。连接凭据只放在服务环境变量中。平台请求不能提供 remote、profile 内容、schema 或 CLI 参数。
+
+`POST /v1/project-runs` 接收 `projectId`、`commitSha`、`projectDigest`、`profileBindingId`、`configVersion` 和 `idempotencyKey`；按 `GET /v1/project-runs/{runId}` 或 `/v1/project-runs/by-key/{key}` 轮询。任务只从受控 main 的固定 SHA 读取允许的 dbt 输入，核对与平台一致的摘要，对全部定义执行 `dbt build`，验证产物和真实 MetricFlow 查询后才返回 `READY`。`GET /v1/project-runs/{runId}/catalog` 返回版本化原生目录及依赖。
+
+`GET /v1/project-runs/{runId}/query-options?metrics=revenue` 返回该指标组合可用的维度与 `metric_time` 粒度 token。`POST /v1/query-jobs` 接收固定 `runId`、幂等键、`QUERY`、`EXPLAIN`、`PREVIEW` 或 `DIMENSION_VALUES` 模式，以及指标、维度、筛选、时间范围和行数上限；按 `/v1/query-jobs/{queryId}` 或 `/v1/query-jobs/by-key/{key}` 轮询。查询结果有列类型、行、截断标记；Decimal 值作为字符串返回以保留精度。`POST /v1/project-runs/{runId}:cleanup` 仅在无活动查询时回收该 run 的 schema 和目录。
+
+独立 PostgreSQL 测试库配置 `PLATFORM_TEST_POSTGRES=1`、`PLATFORM_TEST_PGHOST`、`PLATFORM_TEST_PGPORT`、`PLATFORM_TEST_PGUSER`、`PLATFORM_TEST_PGPASSWORD`、`PLATFORM_TEST_PGDATABASE` 后运行：
+
+```bash
+uv run --frozen pytest -q tests/integration/test_postgres_platform_flow.py
+```
+
+这组测试覆盖两次提交的全量构建、独立 schema、目录、`metric_time__month`、维度值与清理。平台固定版本路径也可使用 StarRocks：服务通过 `dbt-starrocks` 执行 MetricFlow 生成的聚合 SQL，只有真实查询探针与构建产物校验通过才标为 `READY`。启用平台发布前，仍需按指标平台运行说明在目标 StarRocks 实例完成端到端验收。
+
 ## dbt 任务
 
 允许的 dbt 命令为 `parse`、`compile`、`seed`、`run`、`test`、`build` 和 `debug`。服务只接受结构化选项，不接受任意 shell 命令。
@@ -175,7 +205,7 @@ curl -sS -X POST http://127.0.0.1:8000/v1/metricflow/jobs \
   -d '{"project":"sales","command":"query","metrics":["revenue"],"limit":100}'
 ```
 
-未携带有效 resources 时，提交 MetricFlow 任务前必须先运行 dbt parse，让项目生成 `target/manifest.json`。MetricFlow `0.213.0` 不支持 StarRocks adapter：普通请求同步返回 HTTP 422 `metricflow_adapter_not_supported`，资源请求在异步任务中失败并返回同一诊断代码。dbt 对 StarRocks 的 parse、compile、seed、run、test、build 和 debug 不受此限制。
+未携带有效 resources 时，提交 MetricFlow 任务前必须先运行 dbt parse，让项目生成 `target/manifest.json`。通用 `/v1/metricflow/jobs` 仍使用上游 CLI，MetricFlow `0.213.0` 不支持其 StarRocks adapter：普通请求同步返回 HTTP 422 `metricflow_adapter_not_supported`，资源请求在异步任务中失败并返回同一诊断代码。平台固定版本的 `/v1/project-runs`、`/v1/query-jobs` 走经过真实 StarRocks 验证的程序化路径。dbt 对 StarRocks 的 parse、compile、seed、run、test、build 和 debug 不受此限制。
 
 ## 测试
 

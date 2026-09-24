@@ -1,0 +1,26 @@
+version: 2
+models:
+  - name: time_spine
+    time_spine:
+      standard_granularity_column: date_day
+    columns:
+      - name: date_day
+        granularity: day
+  - name: orders
+    semantic_model:
+      enabled: true
+    agg_time_dimension: ordered_at
+    columns:
+      - name: order_id
+        entity: {name: order, type: primary}
+      - name: ordered_at
+        granularity: day
+        dimension: {type: time}
+      - name: revenue
+      - name: region
+        dimension: {type: categorical}
+    metrics:
+      - name: revenue
+        type: simple
+        agg: sum
+        expr: revenue
