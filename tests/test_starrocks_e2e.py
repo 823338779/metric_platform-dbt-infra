@@ -154,7 +154,7 @@ def test_real_starrocks_debug_seed_build_and_test(tmp_path: Path) -> None:
             record = _submit_and_wait(client, command)
             assert record["status"] == "succeeded", record
 
-    # 构建后用真实 StarRocks 执行 MetricFlow 指标查询，验证平台查询适配路径。
+    # 通过已有 DuckDB 渲染器生成聚合 SQL，再由 dbt-starrocks 执行真实查询。
     result = execute_programmatic(projects_root / E2E_PROJECT, profiles_dir, {
         "mode": "QUERY",
         "request": {

@@ -40,7 +40,7 @@ def test_ready_requires_sha_digests_tests_relations_and_query_probe(tmp_path: Pa
     assert result["queryCapability"] is True
     assert result["relationsVerified"] is True
 
-    # StarRocks 只有通过真实查询探针后才能作为可查询发布候选。
+    # StarRocks 使用已有渲染器时，仍以真实查询探针决定能否发布。
     manifest = json.loads((artifacts / "manifest.json").read_text(encoding="utf-8"))
     manifest["metadata"]["adapter_type"] = "starrocks"
     (artifacts / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")

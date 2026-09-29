@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from dbt.adapters.factory import get_adapter_by_type
 from dbt.config.runtime import RuntimeConfig
 from dbt.context.providers import generate_runtime_macro_context
 from dbt.parser.manifest import ManifestLoader
@@ -23,6 +24,11 @@ from dbt_metricflow_service.starrocks_metricflow import STARROCKS_ADAPTER, StarR
 
 WORKER_MODULE = "dbt_metricflow_service.platform_metricflow"
 WORKER_TIMEOUT_SECONDS = 1800
+INVALID_OPTIONS_CODE = "INVALID_QUERY"
+
+
+class InvalidOptions(ValueError):
+    """已加载固定目录后确认的选项请求错误，不包括连接或初始化故障。"""
 
 
 def _literal(value: Any) -> str:
@@ -59,7 +65,9 @@ def execute_programmatic(project: Path, profiles: Path, input_data: dict[str, An
         schema = input_data["schema"]
         if not isinstance(schema, str) or not schema.startswith("run_"):
             raise ValueError("清理 schema 无效")
-        adapter = configuration.dbt_artifacts.adapter
+        # 清理只依赖项目连接配置；失败构建可能尚未产生 semantic manifest。
+        metadata = configuration.dbt_project_metadata
+        adapter = get_adapter_by_type(metadata.profile.credentials.type)
         if adapter.get_macro_resolver() is None:
             metadata = configuration.dbt_project_metadata
             runtime = RuntimeConfig.from_parts(
@@ -90,7 +98,10 @@ def execute_programmatic(project: Path, profiles: Path, input_data: dict[str, An
         result = engine.query(MetricFlowQueryRequest.create(metric_names=[metrics[0].name], limit=1))
         return {"queryCapability": result.result_df is not None}
     if mode == "OPTIONS":
-        return query_options(engine, tuple(input_data["metrics"]))
+        try:
+            return query_options(engine, tuple(input_data["metrics"]))
+        except ValueError as error:
+            raise InvalidOptions("invalid metrics or dimensions") from error
     request = PlatformQueryRequest.model_validate(input_data["request"])
     if request.mode is QueryMode.PREVIEW:
         catalog = catalog_from_artifacts(project / "target")
@@ -166,7 +177,12 @@ def main() -> None:
     payload = json.loads(input_path.read_text(encoding="utf-8"))
     project = Path(os.environ["DBT_PROJECT_DIR"]).resolve()
     profiles = Path(os.environ["DBT_PROFILES_DIR"]).resolve()
-    result = execute_programmatic(project, profiles, payload)
+    try:
+        result = execute_programmatic(project, profiles, payload)
+    except InvalidOptions:
+        # 同步选项接口可区分无效参数与可重试的基础设施错误。
+        output_path.write_text(json.dumps({"errorCode": INVALID_OPTIONS_CODE}), encoding="utf-8")
+        raise SystemExit(2) from None
     output_path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
 
 

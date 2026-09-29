@@ -21,6 +21,8 @@ MetricFlow 上游分别发布 core `0.213.0` 和 CLI `0.15.0`。fork 的组合�
 
 ## 目录和配置
 
+设置 `SERVICE_DATABASE_URL` 后启用下文的 PostgreSQL 无状态模式；本节的本地目录、SQLite 和内存任务说明仅适用于未设置该变量的兼容开发模式。两种模式不共享任务历史，不应同时接收同一业务项目的请求。
+
 从仓库根目录启动时，服务默认使用三个本地目录，也可以用环境变量指定其他绝对路径：
 
 - `projects/`（`PROJECTS_ROOT`）：每个一级子目录是一个 dbt 项目；dbt 会在项目内写入 `target/` 和 `logs/`。
@@ -123,7 +125,7 @@ uv run --frozen dbt-metricflow-service
 uv run --frozen pytest -q tests/integration/test_postgres_platform_flow.py
 ```
 
-这组测试覆盖两次提交的全量构建、独立 schema、目录、`metric_time__month`、维度值与清理。平台固定版本路径也可使用 StarRocks：服务通过 `dbt-starrocks` 执行 MetricFlow 生成的聚合 SQL，只有真实查询探针与构建产物校验通过才标为 `READY`。启用平台发布前，仍需按指标平台运行说明在目标 StarRocks 实例完成端到端验收。
+这组测试覆盖两次提交的全量构建、独立 schema、目录、`metric_time__month`、维度值与清理。平台固定版本路径也可使用 StarRocks：服务复用 MetricFlow 的 DuckDB SQL 渲染器，并通过 `dbt-starrocks` 执行生成的聚合 SQL；只有真实查询探针与构建产物校验通过才标为 `READY`。当前端到端测试覆盖简单聚合与月份分组，其他 SQL 表达式需结合实际指标验证。
 
 ## dbt 任务
 
@@ -205,7 +207,87 @@ curl -sS -X POST http://127.0.0.1:8000/v1/metricflow/jobs \
   -d '{"project":"sales","command":"query","metrics":["revenue"],"limit":100}'
 ```
 
-未携带有效 resources 时，提交 MetricFlow 任务前必须先运行 dbt parse，让项目生成 `target/manifest.json`。通用 `/v1/metricflow/jobs` 仍使用上游 CLI，MetricFlow `0.213.0` 不支持其 StarRocks adapter：普通请求同步返回 HTTP 422 `metricflow_adapter_not_supported`，资源请求在异步任务中失败并返回同一诊断代码。平台固定版本的 `/v1/project-runs`、`/v1/query-jobs` 走经过真实 StarRocks 验证的程序化路径。dbt 对 StarRocks 的 parse、compile、seed、run、test、build 和 debug 不受此限制。
+未携带有效 resources 时，提交 MetricFlow 任务前必须先运行 dbt parse，让项目生成 `target/manifest.json`。通用 `/v1/metricflow/jobs` 仍使用上游 CLI，MetricFlow `0.213.0` 不支持其 StarRocks adapter：普通请求同步返回 HTTP 422 `metricflow_adapter_not_supported`，资源请求在异步任务中失败并返回同一诊断代码。平台固定版本的 `/v1/project-runs`、`/v1/query-jobs` 通过已有渲染器和 `dbt-starrocks` 执行已验证的聚合与时间分组查询。dbt 对 StarRocks 的 parse、compile、seed、run、test、build 和 debug 不受此限制。
+
+## PostgreSQL 无状态部署
+
+该模式覆盖通用 dbt/MetricFlow 任务和平台固定版本任务。PostgreSQL 保存六张 `runtime_*` 业务表及迁移版本；产物按原始字节保存到 `bytea`，目录、请求和结果使用 JSONB。实例仅持有可丢弃的临时目录。`vendor/` 无需修改。
+
+### 初始化与启动
+
+先创建专用 PostgreSQL 数据库和服务账号，通过 Secret 设置 `SERVICE_DATABASE_URL`（libpq DSN 或 PostgreSQL URL）。不要将真实连接信息放入 Git、命令行参数或日志。安装并运行管理命令：
+
+```powershell
+uv sync --frozen --all-groups
+# 由部署环境提前注入 SERVICE_DATABASE_URL 和 DBT_PROFILES_DIR
+uv run --frozen dbt-service-admin migrate
+uv run --frozen dbt-service-admin register-bindings bindings.json
+uv run --frozen dbt-service-admin import-project sales projects/sales
+uv run --frozen dbt-metricflow-service
+```
+
+`register-bindings` 使用前文的平台绑定数组，可增加 `configVersion`（默认 `1`）和 `queryRetrySafe`（默认关闭）。仅在目标库账号权限保证只读时启用 `queryRetrySafe`。绑定信息保存到 PostgreSQL，HTTP 请求不能覆盖 remote 或 profile。通用 CLI 项目通过 `import-project` 导入；项目包含有效 `target/manifest.json` 时同时导入现有输出，之后 MetricFlow 请求无需本地项目挂载。输入文件会排除 profile、Git 元数据、日志及 partial parse 缓存。
+
+启动多个副本时，使用同一服务数据库、同一版本镜像和相同 profile/Secret 绑定，每个副本配置**不同的临时目录**。已发布版本查询不访问 Git，不要求共享磁盘。`dbt deps` 在构建阶段解析的依赖随执行产物一起保存。
+
+| 配置 | 默认值与用途 |
+| --- | --- |
+| `SERVICE_DATABASE_URL` | 未设置时为兼容本地模式；设置后全部公开任务走 PostgreSQL |
+| `SERVICE_TEMP_ROOT` | `runtime-tmp`；实例独占的临时目录 |
+| `SERVICE_CONFIG_VERSION` | `1`；该实例支持的连接配置版本 |
+| `SERVICE_TOOLCHAIN_VERSION` | 默认由服务代码和安装包版本计算；部署可指定固定镜像标识 |
+| `WORKER_CONCURRENCY` | `2`；每实例执行槽位 |
+| `JOB_LEASE_SECONDS` / `JOB_HEARTBEAT_SECONDS` | `90` / `15` 秒；租约至少覆盖三个心跳间隔 |
+| `MAX_ARTIFACT_FILE_BYTES` / `MAX_ARTIFACT_BYTES` | 单文件 `64 MiB` / 单集合 `256 MiB` |
+| `MAX_RESULT_BYTES` | 单结果 `16 MiB` |
+| `MAX_OUTPUT_BYTES` | stdout/stderr 各保留 `1 MiB` 尾部 |
+| `SYNCHRONOUS_WAIT_SECONDS` | `30`；选项和清理接口等待任务完成的预算 |
+
+数据库迁移只由管理命令执行，服务启动仅检查 schema 版本。健康检查验证数据库、CLI、profile 文件和临时目录；数据库不可用时受理返回 503，不返回未持久化的成功。数据库需要常规备份、容量/WAL 告警和独立的恢复演练；服务数据库备份不包含目标仓库的数据表。
+
+### 故障恢复与清理
+
+- 持久任务通过 `FOR UPDATE SKIP LOCKED` 领取，状态更新和产物发布均检查当前 attempt 与未过期的租约。构建发布、文件封存和结果成功在同一事务完成。
+- 未开始外部执行的持久任务可恢复；确认只读的查询失联后最多尝试三次。已经开始 dbt 外部执行的失联任务标为 `EXECUTION_OUTCOME_UNKNOWN`，不自动重复写入。
+- 临时 YAML `resources` 仅由受理节点在内存持有，经 stdin 传输；不进入任务参数或持久产物。输入租约也覆盖排队阶段。节点丢失后状态为失败、诊断为 `INPUT_LOST`，调用方重新提交；资源解析失败时不持久化可能回显 YAML 的子进程日志。
+- 任何活动查询、选项任务或未确认停止的外部 attempt 都会阻止 run 清理。清理任务真正完成后才返回 `200/CLEANED`；等待超时返回 503，重复调用继续等待原任务。不能因收到 503 就认定 schema 已删除。
+- 对未知外部执行，先在目标仓库核实会话、写入和子进程已结束，再执行下列管理命令解除保护。该命令是人工确认，不会自动取消目标库会话。
+
+```powershell
+uv run --frozen dbt-service-admin reconcile-attempt <attempt-uuid> --confirm-external-stopped
+uv run --frozen dbt-service-admin gc --older-than-hours 24 --limit 100
+```
+
+GC 只回收满足引用和执行保护条件的孤立集合。已发布 run 和默认项目输出不会按时间自动淘汰；任务状态与有界结果默认保留。配置版本或工具链变更后，旧 run 查询仍绑定原版本，应保留相应 worker，不能将不同配置或代码伪装成同一个版本标识。
+
+### 旧数据切换
+
+1. 暂停旧实例受理并排空所有任务，备份 SQLite、run/query 目录及通用项目目录。
+2. 初始化服务 PostgreSQL 数据库，登记绑定并导入通用项目。
+3. 执行下面的只读旧库导入；保留原 run/query UUID、schemaName、原文件字节和查询结果，不重新构建目标表。
+4. 从空临时目录的新实例验证原 run 的目录和查询，再切换指标平台请求。不要同时向两套存储写入。
+
+```powershell
+uv run --frozen dbt-service-admin import-legacy path/to/platform-jobs.sqlite
+```
+
+导入验证 READY 的完整产物和摘要，缺失或发生改变时拒绝；重复导入相同记录不会产生新的任务 ID。旧通用任务只存在旧进程内存中，已丢失历史无法从 SQLite 恢复。新系统受理新任务后回退必须先排空并核对新增状态，不能直接恢复旧 SQLite 覆盖新历史。
+
+### 无状态验收测试
+
+为避免影响业务库，单独配置 `SERVICE_TEST_DATABASE_URL` 指向可写测试库：
+
+```powershell
+uv run --frozen pytest -q tests/test_runtime_storage.py tests/test_runtime_artifacts.py tests/test_runtime_worker.py tests/test_runtime_execution.py tests/test_runtime_api.py tests/test_runtime_migration.py
+```
+
+真实双进程验收还需设置 `SERVICE_RUNTIME_E2E=1` 和前文 `PLATFORM_TEST_PG*` 目标库参数，然后运行：
+
+```powershell
+uv run --frozen pytest -q tests/test_runtime_e2e.py
+```
+
+该测试启动两个独立 HTTP 进程和独立临时目录，执行真实 dbt build、跨节点读取、停止受理进程后的 MetricFlow 查询及清理。未配置测试库时显式跳过。
 
 ## 测试
 

@@ -69,6 +69,11 @@ def _error_detail(code: str, message: str) -> dict[str, dict[str, str]]:
 
 def create_app(settings: Settings, registry: ProjectRegistry, runner: JobRunner) -> FastAPI:
     """Create one dependency-injected service application."""
+    # PostgreSQL 模式使用共享任务和产物，不初始化本地 SQLite 或内存公开队列。
+    if settings.database_url:
+        from dbt_metricflow_service.runtime_api import create_runtime_app
+        return create_runtime_app(settings)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         prepare_artifacts = getattr(app.state.runner, "prepare_artifacts", None)

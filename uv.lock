@@ -440,6 +440,7 @@ dependencies = [
     { name = "dbt-starrocks" },
     { name = "fastapi" },
     { name = "metricflow" },
+    { name = "psycopg2-binary" },
     { name = "pyyaml" },
     { name = "uvicorn" },
 ]
@@ -461,6 +462,7 @@ requires-dist = [
     { name = "dbt-starrocks", specifier = "==1.12.2" },
     { name = "fastapi", specifier = "==0.141.1" },
     { name = "metricflow", directory = "vendor/metricflow" },
+    { name = "psycopg2-binary", specifier = "==2.9.13" },
     { name = "pyyaml", specifier = "==6.0.3" },
     { name = "uvicorn", specifier = "==0.53.0" },
 ]
