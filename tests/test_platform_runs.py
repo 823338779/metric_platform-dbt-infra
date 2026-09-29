@@ -68,3 +68,34 @@ def test_profile_binding_mismatch_is_rejected() -> None:
     )
     with pytest.raises(ValueError):
         validate_request_binding(request, ProjectBinding("sample", "remote", ".", "postgres"))
+
+
+def test_ready_requires_own_run_prefix(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "manifest.json").write_text(json.dumps({
+        "metadata": {"adapter_type": "starrocks", "dbt_schema_version": MANIFEST_SCHEMA},
+        "nodes": {"model.sample.a": {"resource_type": "model", "schema": "dbt_ecom",
+                                      "alias": "rv_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_orders",
+                                      "relation_name": "`dbt_ecom`.`rv_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_orders`",
+                                      "config": {"materialized": "table"}}},
+    }), encoding="utf-8")
+    (target / "semantic_manifest.json").write_text(
+        json.dumps({"semantic_models": [], "metrics": []}), encoding="utf-8"
+    )
+    (target / "run_results.json").write_text(json.dumps({
+        "results": [{"status": "success", "unique_id": "model.sample.a"}]
+    }), encoding="utf-8")
+    (target / "catalog.json").write_text(json.dumps({
+        "metadata": {"dbt_schema_version": CATALOG_SCHEMA}, "nodes": {"model.sample.a": {"columns": {}}},
+    }), encoding="utf-8")
+
+    validate_artifacts(
+        target, "dbt_ecom", query_probe_passed=True,
+        table_prefix="rv_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_",
+    )
+    with pytest.raises(ValueError):
+        validate_artifacts(
+            target, "dbt_ecom", query_probe_passed=True,
+            table_prefix="rv_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb_",
+        )

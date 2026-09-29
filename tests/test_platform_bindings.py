@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from dbt_metricflow_service.platform_bindings import ProjectBinding, resolve_revision
+from dbt_metricflow_service.platform_bindings import ProjectBinding, load_bindings, resolve_revision
 from dbt_metricflow_service.platform_models import PlatformRunRequest
 
 
@@ -88,3 +88,36 @@ def test_remote_cannot_be_supplied_by_request() -> None:
             "profileBindingId": "postgres", "configVersion": "1", "idempotencyKey": "one",
             "remote": "https://untrusted.invalid/repo.git",
         })
+
+
+def test_fixed_schema_binding_is_controlled_by_service(tmp_path: Path) -> None:
+    config = tmp_path / "bindings.json"
+    config.write_text(
+        '[{"projectId":"sample","remote":"https://example.invalid/project.git",'
+        '"projectSubdir":".","profileBindingId":"starrocks","schemaName":"dbt_ecom"}]',
+        encoding="utf-8",
+    )
+
+    binding = load_bindings(config)["sample"]
+
+    assert binding.schema_name == "dbt_ecom"
+    with pytest.raises(ValidationError):
+        PlatformRunRequest.model_validate({
+            "projectId": "sample", "commitSha": "a" * 40, "projectDigest": "b" * 64,
+            "profileBindingId": "starrocks", "configVersion": "2", "idempotencyKey": "one",
+            "schemaName": "attacker_db",
+        })
+
+
+@pytest.mark.parametrize("schema", ["dbt-ecom", "", "a" * 257])
+def test_fixed_schema_binding_rejects_unsafe_name(tmp_path: Path, schema: str) -> None:
+    config = tmp_path / "bindings.json"
+    config.write_text(
+        '{"projectId":"sample","remote":"https://example.invalid/project.git",'
+        '"projectSubdir":".","profileBindingId":"starrocks","schemaName":"' + schema + '"}',
+        encoding="utf-8",
+    )
+    config.write_text("[" + config.read_text(encoding="utf-8") + "]", encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        load_bindings(config)

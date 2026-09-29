@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from dbt_metricflow_service.platform_metricflow import cleanup_versioned_relations
 from dbt_metricflow_service.platform_runs import PlatformRunCoordinator
 from dbt_metricflow_service.platform_store import PlatformJobStore, RunState
 
@@ -63,3 +64,45 @@ def test_cleanup_has_single_claimant(tmp_path: Path) -> None:
     coordinator, run_id, _directory = ready_run(tmp_path)
     assert coordinator.store.claim_cleanup(run_id)
     assert not coordinator.store.claim_cleanup(run_id)
+
+
+def test_cleanup_only_own_prefix_without_manifest() -> None:
+    from uuid import UUID
+
+    class Relation:
+        def __init__(self, identifier: str):
+            self.identifier = identifier
+            self.schema = "dbt_ecom"
+
+    class Adapter:
+        class Relation:
+            @staticmethod
+            def create(*, schema):
+                return type("SchemaRelation", (), {"schema": schema})()
+
+        def __init__(self):
+            self.relations = [
+                Relation("rv_12345678123456789abcdef012345678_orders"),
+                Relation("rv_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_orders"),
+                Relation("manual_table"),
+            ]
+            self.dropped: list[str] = []
+
+        def list_relations_without_caching(self, schema_relation):
+            assert schema_relation.schema == "dbt_ecom"
+            return self.relations
+
+        def drop_relation(self, relation):
+            self.dropped.append(relation.identifier)
+            self.relations.remove(relation)
+
+    adapter = Adapter()
+    run_id = UUID("12345678-1234-5678-9abc-def012345678")
+
+    cleanup_versioned_relations(adapter, "dbt_ecom", run_id)
+    cleanup_versioned_relations(adapter, "dbt_ecom", run_id)
+
+    assert adapter.dropped == ["rv_12345678123456789abcdef012345678_orders"]
+    assert [relation.identifier for relation in adapter.relations] == [
+        "rv_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_orders", "manual_table",
+    ]

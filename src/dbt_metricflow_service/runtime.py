@@ -14,6 +14,7 @@ from uuid import uuid4
 from dbt_metricflow_service.adapter_support import METRICFLOW_SUPPORTED_ADAPTERS
 from dbt_metricflow_service.models import DbtJobRequest, JobRecord, JobStatus, MetricFlowJobRequest
 from dbt_metricflow_service.platform_models import PlatformQueryRequest, PlatformRunRequest
+from dbt_metricflow_service.platform_namespace import validate_schema_name
 from dbt_metricflow_service.projects import (
     PROJECT_NAME_PATTERN,
     InvalidManifestError,
@@ -199,7 +200,9 @@ class Runtime:
             BUILD, request.project_id, payload, job_id=str(job_id),
             idempotency_scope=BUILD, idempotency_key=request.idempotency_key,
             config_version=request.config_version, toolchain_version=self.toolchain,
-            schema_name=SCHEMA_PREFIX + job_id.hex, profile_binding_id=request.profile_binding_id,
+            schema_name=(
+                validate_schema_name(binding["schemaName"]) if "schemaName" in binding else SCHEMA_PREFIX + job_id.hex
+            ), profile_binding_id=request.profile_binding_id,
             timeout_seconds=self.settings.command_timeout_seconds,
             expected_revision=project["revision"],
         )

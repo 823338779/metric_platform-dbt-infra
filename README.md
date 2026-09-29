@@ -105,19 +105,21 @@ uv run --frozen dbt-metricflow-service
 ```json
 [
   {
-    "projectId": "sales",
+    "projectId": "ecommerce_metrics",
     "remote": "https://example.invalid/data-model.git",
     "projectSubdir": ".",
-    "profileBindingId": "postgres"
+    "profileBindingId": "starrocks",
+    "schemaName": "dbt_ecom"
   }
 ]
 ```
 
-`profileBindingId` 对应 `profiles.yml` 中的 target。该 target 的 `schema` 必须引用 `{{ env_var('DBT_PLATFORM_SCHEMA') }}`，由服务为每个 run 设置独立 schema。连接凭据只放在服务环境变量中。平台请求不能提供 remote、profile 内容、schema 或 CLI 参数。
+`profileBindingId` 对应 `profiles.yml` 中的 target。该 target 的 `schema` 必须引用 `{{ env_var('DBT_PLATFORM_SCHEMA') }}`。设置受控绑定的 `schemaName` 后，服务在固定 schema 内按 run ID 为模型表加 `rv_<runId>_` 前缀；不设置时沿用旧的独立 `run_...` schema。`dbt_ecom` 需预建或由受控运行账号创建，运行账号需要建表、删表权限；`ecommerce_raw` 只需读取权限。连接凭据只放在服务环境变量中。平台请求不能提供 remote、profile 内容、schema 或 CLI 参数。
+固定 schema 构建会拒绝模型的 `pre-hook`、`post-hook` 和项目级 `on-run-start`、`on-run-end`，避免钩子误写旧活动表。受控 Git 项目中的自定义宏和 materialization 仍按可信项目代码执行；生产部署须限制谁能修改该项目的 `main`。
 
 `POST /v1/project-runs` 接收 `projectId`、`commitSha`、`projectDigest`、`profileBindingId`、`configVersion` 和 `idempotencyKey`；按 `GET /v1/project-runs/{runId}` 或 `/v1/project-runs/by-key/{key}` 轮询。任务只从受控 main 的固定 SHA 读取允许的 dbt 输入，核对与平台一致的摘要，对全部定义执行 `dbt build`，验证产物和真实 MetricFlow 查询后才返回 `READY`。`GET /v1/project-runs/{runId}/catalog` 返回版本化原生目录及依赖。
 
-`GET /v1/project-runs/{runId}/query-options?metrics=revenue` 返回该指标组合可用的维度与 `metric_time` 粒度 token。`POST /v1/query-jobs` 接收固定 `runId`、幂等键、`QUERY`、`EXPLAIN`、`PREVIEW` 或 `DIMENSION_VALUES` 模式，以及指标、维度、筛选、时间范围和行数上限；按 `/v1/query-jobs/{queryId}` 或 `/v1/query-jobs/by-key/{key}` 轮询。查询结果有列类型、行、截断标记；Decimal 值作为字符串返回以保留精度。`POST /v1/project-runs/{runId}:cleanup` 仅在无活动查询时回收该 run 的 schema 和目录。
+`GET /v1/project-runs/{runId}/query-options?metrics=revenue` 返回该指标组合可用的维度与 `metric_time` 粒度 token。`POST /v1/query-jobs` 接收固定 `runId`、幂等键、`QUERY`、`EXPLAIN`、`PREVIEW` 或 `DIMENSION_VALUES` 模式，以及指标、维度、筛选、时间范围和行数上限；按 `/v1/query-jobs/{queryId}` 或 `/v1/query-jobs/by-key/{key}` 轮询。查询结果有列类型、行、截断标记；Decimal 值作为字符串返回以保留精度。`POST /v1/project-runs/{runId}:cleanup` 仅在无活动查询时回收该 run 的对象和目录；固定 schema 模式只删除本 run 前缀对象，不删除 schema。
 
 独立 PostgreSQL 测试库配置 `PLATFORM_TEST_POSTGRES=1`、`PLATFORM_TEST_PGHOST`、`PLATFORM_TEST_PGPORT`、`PLATFORM_TEST_PGUSER`、`PLATFORM_TEST_PGPASSWORD`、`PLATFORM_TEST_PGDATABASE` 后运行：
 

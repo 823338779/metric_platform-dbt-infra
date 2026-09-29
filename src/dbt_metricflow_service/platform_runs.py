@@ -15,6 +15,7 @@ from dbt_metricflow_service.platform_bindings import ProjectBinding, resolve_rev
 from dbt_metricflow_service.platform_catalog import catalog_from_artifacts
 from dbt_metricflow_service.platform_metricflow import invoke_programmatic
 from dbt_metricflow_service.platform_models import PlatformRunRequest
+from dbt_metricflow_service.platform_namespace import prepare_versioned_project, validate_versioned_manifest
 from dbt_metricflow_service.platform_store import PlatformJobStore, RunRecord, RunState
 from dbt_metricflow_service.starrocks_metricflow import STARROCKS_ADAPTER
 
@@ -50,7 +51,9 @@ def _load_artifact(target: Path, name: str) -> dict[str, object]:
     return value
 
 
-def validate_artifacts(target: Path, schema: str, *, query_probe_passed: bool) -> dict[str, object]:
+def validate_artifacts(
+    target: Path, schema: str, *, query_probe_passed: bool, table_prefix: str | None = None,
+) -> dict[str, object]:
     """READY 之前核验完整测试、物理关系、原生产物和真实查询证明。"""
 
     if not query_probe_passed:
@@ -85,6 +88,8 @@ def validate_artifacts(target: Path, schema: str, *, query_probe_passed: bool) -
     catalog_nodes = catalog.get("nodes")
     if not isinstance(catalog_nodes, dict):
         raise ValueError("dbt 物理目录缺失")
+    if table_prefix is not None:
+        validate_versioned_manifest(target, schema, table_prefix)
     for native_id, node in nodes.items():
         if not isinstance(node, dict) or node.get("resource_type") not in {"model", "seed", "snapshot"}:
             continue
@@ -194,10 +199,16 @@ class PlatformRunCoordinator:
                 project = Path(json.loads(project_file.read_text(encoding="utf-8"))["path"]).resolve()
                 if not project.is_relative_to(directory.resolve()) or project.is_symlink():
                     raise ValueError("运行项目目录不安全")
-                schema = "run_" + run_id.hex
+                namespace_file = directory / "namespace.json"
+                namespace = json.loads(namespace_file.read_text(encoding="utf-8")) if namespace_file.is_file() else {}
+                schema = namespace.get("schemaName", "run_" + run_id.hex)
+                table_prefix = namespace.get("tablePrefix")
                 input_path = directory / "cleanup-input.json"
                 output_path = directory / "cleanup-output.json"
-                input_path.write_text(json.dumps({"mode": "CLEANUP", "schema": schema}), encoding="utf-8")
+                cleanup_input = {"mode": "CLEANUP", "schema": schema}
+                if table_prefix is not None:
+                    cleanup_input.update({"runId": str(run_id), "tablePrefix": table_prefix})
+                input_path.write_text(json.dumps(cleanup_input), encoding="utf-8")
                 request = json.loads((directory / "request.json").read_text(encoding="utf-8"))
                 invoke_programmatic(
                     project, self.profiles_dir, schema, request["profileBindingId"], input_path, output_path
@@ -227,12 +238,16 @@ class PlatformRunCoordinator:
         self, run_id: UUID, request: PlatformRunRequest,
         binding: ProjectBinding, run_dir: Path,
     ) -> None:
-        schema = "run_" + run_id.hex
+        schema = binding.schema_name or "run_" + run_id.hex
         try:
             project = await asyncio.to_thread(
                 resolve_revision, binding, request.commit_sha, request.project_digest, run_dir / "source"
             )
             (run_dir / "project-path.json").write_text(json.dumps({"path": str(project)}), encoding="utf-8")
+            table_prefix = prepare_versioned_project(project, run_id, schema) if binding.schema_name else None
+            (run_dir / "namespace.json").write_text(
+                json.dumps({"schemaName": schema, "tablePrefix": table_prefix}), encoding="utf-8"
+            )
             self.store.transition_run(run_id, RunState.BUILDING)
             command = build_platform_command(project, self.profiles_dir, binding.profile_binding_id, schema)
             environment = {**os.environ, "DBT_PLATFORM_SCHEMA": schema, "DBT_SEND_ANONYMOUS_USAGE_STATS": "false"}
@@ -242,6 +257,13 @@ class PlatformRunCoordinator:
                     "--target", binding.profile_binding_id,
                 )
                 await asyncio.to_thread(self._execute, deps_command, project, environment)
+            if table_prefix is not None:
+                parse_command = (
+                    "dbt", "parse", "--project-dir", str(project), "--profiles-dir", str(self.profiles_dir),
+                    "--target", binding.profile_binding_id, "--target-path", str(project / "target"),
+                )
+                await asyncio.to_thread(self._execute, parse_command, project, environment)
+                validate_versioned_manifest(project / "target", schema, table_prefix)
             await asyncio.to_thread(self._execute, command, project, environment)
             run_results = (project / "target" / "run_results.json").read_bytes()
             docs_command = (
@@ -260,7 +282,8 @@ class PlatformRunCoordinator:
                 binding.profile_binding_id, probe_input, probe_output
             )
             validation = validate_artifacts(
-                project / "target", schema, query_probe_passed=probe.get("queryCapability") is True
+                project / "target", schema, query_probe_passed=probe.get("queryCapability") is True,
+                table_prefix=table_prefix,
             )
             validation.update({
                 "schemaName": schema,

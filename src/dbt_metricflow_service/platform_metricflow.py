@@ -9,6 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from uuid import UUID
 
 from dbt.adapters.factory import get_adapter_by_type
 from dbt.config.runtime import RuntimeConfig
@@ -19,6 +20,7 @@ from metricflow.engine.metricflow_engine import MetricFlowEngine, MetricFlowQuer
 
 from dbt_metricflow_service.platform_catalog import catalog_from_artifacts
 from dbt_metricflow_service.platform_models import PlatformQueryRequest, QueryMode
+from dbt_metricflow_service.platform_namespace import run_prefix, validate_schema_name
 from dbt_metricflow_service.platform_queries import _json_cell, query_options, serialize_rows, validate_query
 from dbt_metricflow_service.starrocks_metricflow import STARROCKS_ADAPTER, StarRocksSqlClient
 
@@ -29,6 +31,17 @@ INVALID_OPTIONS_CODE = "INVALID_QUERY"
 
 class InvalidOptions(ValueError):
     """已加载固定目录后确认的选项请求错误，不包括连接或初始化故障。"""
+
+
+def cleanup_versioned_relations(adapter: Any, schema: str, run_id: UUID) -> None:
+    """只删除固定 schema 中本 run 的关系，允许失败构建缺少 manifest。"""
+
+    validate_schema_name(schema)
+    prefix = run_prefix(run_id)
+    schema_relation = adapter.Relation.create(schema=schema)
+    for relation in adapter.list_relations_without_caching(schema_relation):
+        if relation.schema == schema and relation.identifier.startswith(prefix):
+            adapter.drop_relation(relation)
 
 
 def _literal(value: Any) -> str:
@@ -63,8 +76,11 @@ def execute_programmatic(project: Path, profiles: Path, input_data: dict[str, An
     configuration.setup(dbt_profiles_path=profiles, dbt_project_path=project, configure_file_logging=False)
     if input_data["mode"] == "CLEANUP":
         schema = input_data["schema"]
-        if not isinstance(schema, str) or not schema.startswith("run_"):
+        run_id = UUID(input_data["runId"]) if "runId" in input_data else None
+        if run_id is None and (not isinstance(schema, str) or not schema.startswith("run_")):
             raise ValueError("清理 schema 无效")
+        if run_id is not None and input_data.get("tablePrefix") != run_prefix(run_id):
+            raise ValueError("清理表前缀无效")
         # 清理只依赖项目连接配置；失败构建可能尚未产生 semantic manifest。
         metadata = configuration.dbt_project_metadata
         adapter = get_adapter_by_type(metadata.profile.credentials.type)
@@ -80,7 +96,10 @@ def execute_programmatic(project: Path, profiles: Path, input_data: dict[str, An
             adapter.set_macro_resolver(macros)
             adapter.set_macro_context_generator(generate_runtime_macro_context)
         with adapter.connection_named("platform_cleanup"):
-            adapter.drop_schema(adapter.Relation.create(schema=schema))
+            if run_id is None:
+                adapter.drop_schema(adapter.Relation.create(schema=schema))
+            else:
+                cleanup_versioned_relations(adapter, schema, run_id)
         return {"cleaned": True}
     # StarRocks 复用 dbt adapter 执行查询；其他 adapter 保持上游 MetricFlow 客户端。
     if configuration.dbt_artifacts.adapter.type() == STARROCKS_ADAPTER:

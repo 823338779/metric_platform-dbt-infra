@@ -16,6 +16,7 @@ from dbt_metricflow_service.job_artifacts import _is_link
 from dbt_metricflow_service.platform_bindings import _prefix
 from dbt_metricflow_service.platform_catalog import catalog_from_artifacts
 from dbt_metricflow_service.platform_models import PlatformQueryRequest, PlatformRunRequest
+from dbt_metricflow_service.platform_namespace import validate_schema_name
 from dbt_metricflow_service.platform_runs import validate_artifacts
 from dbt_metricflow_service.projects import PROJECT_NAME_PATTERN
 from dbt_metricflow_service.runtime import current_toolchain
@@ -52,7 +53,7 @@ SCHEMA_PREFIX = "run_"
 IMPORT_DIGEST = "legacyImportDigest"
 LEGACY_TABLES = (("platform_runs", BUILD), ("platform_queries", QUERY))
 BINDING_KEYS = frozenset({"projectId", "remote", "projectSubdir", "profileBindingId"})
-BINDING_OPTIONAL_KEYS = frozenset({"configVersion", "queryRetrySafe"})
+BINDING_OPTIONAL_KEYS = frozenset({"configVersion", "queryRetrySafe", "schemaName"})
 SQL_INSERT_PROJECT = """INSERT INTO runtime_project(project_id,config_version)
 VALUES (%s,%s) ON CONFLICT(project_id) DO NOTHING"""
 SQL_UPDATE_PROJECT = """UPDATE runtime_project SET source_set_id=%s,current_output_set_id=%s,
@@ -156,6 +157,8 @@ def register_bindings(db: Database, settings: Settings, path: Path) -> list[str]
             raise ValueError("Git remote must not contain credentials or query parameters")
         if not isinstance(record["profileBindingId"], str) or not record["profileBindingId"]:
             raise ValueError("profile binding identifier is required")
+        if "schemaName" in record:
+            validate_schema_name(record["schemaName"])
     jobs = JobStore(db)
     for record in records:
         jobs.register_project(record["projectId"], record, record.get("configVersion", settings.config_version))

@@ -12,6 +12,8 @@ from pathlib import Path
 
 import yaml
 
+from dbt_metricflow_service.platform_namespace import validate_schema_name
+
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
 DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 ROOT_INPUTS = frozenset({"dbt_project.yml", "packages.yml", "package-lock.yml", "dependencies.yml", "selectors.yml"})
@@ -32,6 +34,7 @@ class ProjectBinding:
     remote: str
     project_subdir: str
     profile_binding_id: str
+    schema_name: str | None = None
 
 
 def load_bindings(path: Path) -> dict[str, ProjectBinding]:
@@ -41,7 +44,8 @@ def load_bindings(path: Path) -> dict[str, ProjectBinding]:
     if not isinstance(records, list):
         raise ValueError("平台项目绑定配置无效")
     bindings = {item["projectId"]: ProjectBinding(
-        item["projectId"], item["remote"], item["projectSubdir"], item["profileBindingId"]
+        item["projectId"], item["remote"], item["projectSubdir"], item["profileBindingId"],
+        validate_schema_name(item["schemaName"]) if "schemaName" in item else None,
     ) for item in records}
     if len(bindings) != len(records):
         raise ValueError("平台项目绑定重复")

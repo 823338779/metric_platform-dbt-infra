@@ -7,11 +7,17 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from dbt_metricflow_service.jobs import JobRunner
 from dbt_metricflow_service.models import CommandSpec, DbtJobRequest, JobRecord, JobStatus, MetricFlowJobRequest
 from dbt_metricflow_service.platform_bindings import ProjectBinding, resolve_revision
 from dbt_metricflow_service.platform_catalog import catalog_from_artifacts
+from dbt_metricflow_service.platform_namespace import (
+    prepare_versioned_project,
+    run_prefix,
+    validate_versioned_manifest,
+)
 from dbt_metricflow_service.platform_runs import build_platform_command, validate_artifacts
 from dbt_metricflow_service.resource_commands import build_dbt_command, build_metricflow_command
 from dbt_metricflow_service.settings import Settings
@@ -51,6 +57,7 @@ CLEANUP_MODE = "CLEANUP"
 PROBE_MODE = "PROBE"
 DBT_EXECUTABLE = "dbt"
 DEPS_COMMAND = "deps"
+PARSE_COMMAND = "parse"
 DOCS_COMMAND = "docs"
 GENERATE_COMMAND = "generate"
 PROJECT_OPTION = "--project-dir"
@@ -164,6 +171,9 @@ class RuntimeExecutor:
                         body = {"mode": QUERY_MODE, "request": body}
                     elif job["kind"] == RUN_CLEANUP:
                         body = {"mode": CLEANUP_MODE, "schema": job["schema_name"]}
+                        parent_id = UUID(job["parent_run_id"])
+                        if job["schema_name"] != "run_" + parent_id.hex:
+                            body.update({"runId": str(parent_id), "tablePrefix": run_prefix(parent_id)})
                     payload = await self._programmatic(job, runner, project, attempt, body)
                     return ExecutionResult(payload)
                 request = {**job["request_json"], "resources": resources or {}}
@@ -214,7 +224,7 @@ class RuntimeExecutor:
             configured = request["binding"]
             binding = ProjectBinding(
                 configured["projectId"], configured["remote"], configured["projectSubdir"],
-                configured["profileBindingId"],
+                configured["profileBindingId"], configured.get("schemaName"),
             )
             project = await _thread(
                 resolve_revision, binding, request["commitSha"], request["projectDigest"],
@@ -233,6 +243,10 @@ class RuntimeExecutor:
         # 固定 build 使用既有 argv；所有命令由同一个 runner 管理进程树。
         profiles = self.settings.profiles_dir
         schema, target_name = job["schema_name"], job["profile_binding_id"]
+        table_prefix = (
+            await _thread(prepare_versioned_project, project, UUID(job["job_id"]), schema)
+            if schema == job["request_json"].get("binding", {}).get("schemaName") else None
+        )
         base = build_programmatic_command(project, profiles, schema, target_name, attempt / INPUT_FILE,
                                           attempt / OUTPUT_FILE)
         common = (PROJECT_OPTION, str(project), PROFILES_OPTION, str(profiles), TARGET_OPTION, target_name)
@@ -240,6 +254,12 @@ class RuntimeExecutor:
             await self._command(job, runner, CommandSpec(
                 (DBT_EXECUTABLE, DEPS_COMMAND, *common), project, base.environment, True,
             ), BUILDING)
+        if table_prefix is not None:
+            await self._command(job, runner, CommandSpec(
+                (DBT_EXECUTABLE, PARSE_COMMAND, *common, TARGET_PATH_OPTION, str(project / TARGET_DIRECTORY)),
+                project, base.environment, True,
+            ), BUILDING)
+            await _thread(validate_versioned_manifest, project / TARGET_DIRECTORY, schema, table_prefix)
         await self._command(job, runner, CommandSpec(
             build_platform_command(project, profiles, target_name, schema), project, base.environment, True,
         ), BUILDING)
@@ -260,6 +280,7 @@ class RuntimeExecutor:
         probe = await self._programmatic(job, runner, project, attempt, {"mode": PROBE_MODE})
         validation = await _thread(
             validate_artifacts, target, schema, query_probe_passed=probe.get("queryCapability") is True,
+            table_prefix=table_prefix,
         )
         validation.update({"schemaName": schema, "toolchainVersion": job["toolchain_version"]})
         catalog = await _thread(catalog_from_artifacts, target)
