@@ -9,7 +9,7 @@ import time
 
 from psycopg2 import Error as DatabaseError
 
-from dbt_metricflow_service.runtime_execution import ExecutionError, RuntimeExecutor
+from dbt_metricflow_service.runtime_execution import ERROR_COMMAND_FAILED, ExecutionError, RuntimeExecutor
 
 logger = logging.getLogger(__name__)
 POLL_SECONDS = 0.25
@@ -19,6 +19,7 @@ RESULT_TOO_LARGE = "RESULT_TOO_LARGE"
 WORKER_FAILED = "WORKER_FAILED"
 VOLATILE = "VOLATILE"
 FAILURE_LOG = "Runtime worker operation failed: %s"
+EXTERNAL_OUTCOME_UNKNOWN = "externalOutcomeUnknown"
 
 
 class Worker:
@@ -103,7 +104,9 @@ class Worker:
             if self._stopping:
                 raise
         except ExecutionError as error:
-            await self._fail(job, error.code, detail=error.payload, stopped=error.stopped)
+            code = INTERRUPTED if error.code == ERROR_COMMAND_FAILED and not error.stopped else error.code
+            detail = {**error.payload, EXTERNAL_OUTCOME_UNKNOWN: not error.stopped}
+            await self._fail(job, code, detail=detail, stopped=error.stopped)
         except Exception as error:
             # 不保存任意异常文本，其中可能含凭据或临时输入。
             await self._fail(job, WORKER_FAILED, detail={"type": type(error).__name__}, stopped=False)

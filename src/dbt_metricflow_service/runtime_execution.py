@@ -63,6 +63,7 @@ RUN_RESULTS_FILE = "run_results.json"
 SOURCE_DIRECTORY = "source"
 RESOURCE_REDACTION = "[resource content omitted]"
 OUTPUT_STREAMS = ("stdout", "stderr")
+LOCAL_DBT_COMMANDS = frozenset({"parse", "debug"})
 
 
 def build_programmatic_command(
@@ -277,10 +278,14 @@ class RuntimeExecutor:
         record = await runner.wait(submitted.id)
         if record.status is not JobStatus.SUCCEEDED:
             timed_out = record.status is JobStatus.TIMED_OUT
+            # parse/debug 的正常退出无需仓库写入核对，其他写命令失联不能据退出码释放保护。
+            may_write = job["kind"] in {BUILD_RUN, RUN_CLEANUP} or (
+                job["kind"] == DBT_COMMAND and job["request_json"].get("command") not in LOCAL_DBT_COMMANDS
+            )
             raise ExecutionError(
                 ERROR_COMMAND_TIMEOUT if timed_out else ERROR_COMMAND_FAILED,
                 record.model_dump(mode=JSON_MODE),
-                stopped=not timed_out and job["kind"] not in {BUILD_RUN, DBT_COMMAND, RUN_CLEANUP},
+                stopped=not timed_out and not may_write,
             )
         return record
 

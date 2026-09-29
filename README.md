@@ -230,6 +230,8 @@ uv run --frozen dbt-metricflow-service
 
 启动多个副本时，使用同一服务数据库、同一版本镜像和相同 profile/Secret 绑定，每个副本配置**不同的临时目录**。已发布版本查询不访问 Git，不要求共享磁盘。`dbt deps` 在构建阶段解析的依赖随执行产物一起保存。
 
+Windows 建议使用较短的临时根目录（如 `E:\dbt-tmp\node1`），避免项目包和编译产物的深层路径超过系统路径长度限制。运行中的 Windows 服务会锁住入口 exe；更新依赖时先停止该实例，或采用新目录部署后切换。仅运行测试时可使用 `uv run --no-sync pytest` 复用已安装依赖。
+
 | 配置 | 默认值与用途 |
 | --- | --- |
 | `SERVICE_DATABASE_URL` | 未设置时为兼容本地模式；设置后全部公开任务走 PostgreSQL |
@@ -272,6 +274,8 @@ uv run --frozen dbt-service-admin import-legacy path/to/platform-jobs.sqlite
 ```
 
 导入验证 READY 的完整产物和摘要，缺失或发生改变时拒绝；重复导入相同记录不会产生新的任务 ID。旧通用任务只存在旧进程内存中，已丢失历史无法从 SQLite 恢复。新系统受理新任务后回退必须先排空并核对新增状态，不能直接恢复旧 SQLite 覆盖新历史。
+
+旧失败任务缺少可靠的外部停止证据，导入后保留待核实 attempt；管理员确认目标库执行结束后再解除清理保护。历史请求文件仍需存在，已被旧清理流程删除的请求无法仅凭 SQLite 索引重建。
 
 ### 无状态验收测试
 

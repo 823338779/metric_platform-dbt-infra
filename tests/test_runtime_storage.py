@@ -262,3 +262,31 @@ def test_options_retry_rejects_elapsed_deadline(store):
         cursor.execute("UPDATE runtime_job SET deadline_at=clock_timestamp()-interval '1 second' WHERE job_id=%s",
                        (row["job_id"],))
     assert not store.requeue_options(row["job_id"])
+
+
+def test_cleanup_releases_artifact_references_but_preserves_tombstone(store, tmp_path):
+    from dbt_metricflow_service.storage.artifacts import ArtifactStore
+    name = project(store)
+    artifacts = ArtifactStore(store.db)
+    (tmp_path / "dbt_project.yml").write_text("name: cleanup\n", encoding="utf-8")
+    source = artifacts.capture(name, tmp_path)
+    parent = store.reserve(BUILD, name, {}, toolchain_version=VERSION)
+    attempt = claim(store)
+    store.attach_input(parent["job_id"], attempt["lease_token"], source)
+    store.fail(parent["job_id"], attempt["lease_token"], "PREPARATION_FAILED")
+    cleanup = store.reserve_cleanup(parent["job_id"])
+    execution = claim(store)
+    assert execution["job_id"] == cleanup["job_id"]
+    assert store.finish(execution["job_id"], execution["lease_token"], {"cleaned": True})
+    assert store.get(parent["job_id"])["run_lifecycle"] == "CLEANED"
+    assert artifacts.delete_unreferenced(source)
+
+
+def test_missing_source_cannot_report_clean_after_known_external_execution(store):
+    name = project(store)
+    parent = store.reserve(BUILD, name, {}, toolchain_version=VERSION)
+    attempt = claim(store)
+    store.phase(parent["job_id"], attempt["lease_token"], "BUILDING", external=True)
+    store.fail(parent["job_id"], attempt["lease_token"], "IMPORTED_FAILED", stopped=True)
+    with pytest.raises(CleanupBlocked):
+        store.reserve_cleanup(parent["job_id"])

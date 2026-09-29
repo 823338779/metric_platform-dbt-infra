@@ -69,6 +69,8 @@ SQL_INSERT_ATTEMPT = """INSERT INTO runtime_attempt
  (attempt_id,job_id,attempt_no,worker_id,lease_token,lease_expires_at,state,stop_confirmed_at,finished_at)
  VALUES (%s,%s,1,%s,%s,clock_timestamp(),%s,clock_timestamp(),clock_timestamp())"""
 SQL_ATTACH_ATTEMPT = "UPDATE runtime_job SET current_attempt_id=%s WHERE job_id=%s"
+SQL_UNCONFIRMED_IMPORT = """UPDATE runtime_attempt SET execution_stage='EXTERNAL',
+ state='EXPIRED_UNCONFIRMED',stop_confirmed_at=NULL WHERE attempt_id=%s"""
 SQL_INSERT_RESULT = "INSERT INTO runtime_job_result(job_id,attempt_id,payload_json) VALUES (%s,%s,%s)"
 SQL_ATTEMPT = "SELECT lease_token,state FROM runtime_attempt WHERE attempt_id=%s"
 SQL_GC = """SELECT set_id FROM runtime_artifact_set
@@ -177,6 +179,7 @@ def _legacy_row(db: Database, settings: Settings, row: dict, kind: str) -> str:
         raise ValueError("legacy request idempotency key mismatch")
     jobs, artifacts = JobStore(db), _artifacts(db, settings)
     output_id = None
+    source_id = None
     parent = None
     validation: dict = {}
     result: dict = {}
@@ -207,6 +210,13 @@ def _legacy_row(db: Database, settings: Settings, row: dict, kind: str) -> str:
                         "config_version": config_version,
                         "toolchain_version": settings.toolchain_version or current_toolchain()}
             output_id = artifacts.capture(project_id, project, kind=EXECUTION, metadata=metadata)
+        elif state == FAILED and (directory / PROJECT_PATH_FILE).is_file():
+            # 失败构建也可能创建了 schema；保存源码供人工核实结束后的清理使用。
+            location = _json(directory / PROJECT_PATH_FILE, settings.max_artifact_file_bytes)
+            project = Path(location["path"])
+            if _is_link(project) or not project.resolve().is_relative_to(directory.resolve()):
+                raise ValueError("legacy project path is outside the run directory")
+            source_id = artifacts.capture(project_id, project, metadata={"config_version": config_version})
     else:
         parent_id = str(parsed.run_id)
         if row.get("parent_run_id") not in (None, parent_id):
@@ -225,7 +235,8 @@ def _legacy_row(db: Database, settings: Settings, row: dict, kind: str) -> str:
     # 摘要覆盖可观察内容及原生字节，排除只能在旧机器使用的绝对路径。
     snapshot = {"request": request, "state": state, "errorCode": row.get("error_code"),
                 "fingerprint": row["fingerprint"], "validation": validation, "result": result,
-                "artifactDigest": artifacts.metadata(output_id)["content_digest"] if output_id else None}
+                "artifactDigest": artifacts.metadata(output_id or source_id)["content_digest"]
+                if output_id or source_id else None}
     fingerprint = hashlib.sha256(json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     attached = False
     try:
@@ -243,12 +254,15 @@ def _legacy_row(db: Database, settings: Settings, row: dict, kind: str) -> str:
             cursor.execute(SQL_INSERT_JOB, (
                 identifier, kind, project_id, parent["job_id"] if parent else None, kind,
                 row["idempotency_key"], row["fingerprint"], Json(request),
-                parent["output_set_id"] if parent else None, output_id, config_version,
+                parent["output_set_id"] if parent else source_id, output_id, config_version,
                 settings.toolchain_version or current_toolchain(), schema, profile, status, lifecycle,
                 row.get("error_code"), Json({IMPORT_DIGEST: fingerprint}),
             ))
             attempt_id = str(uuid4())
             cursor.execute(SQL_INSERT_ATTEMPT, (attempt_id, identifier, str(uuid4()), str(uuid4()), status))
+            if state == FAILED:
+                # SQLite 没有可靠的外部停止证据，迁移失败记录默认保留清理保护。
+                cursor.execute(SQL_UNCONFIRMED_IMPORT, (attempt_id,))
             cursor.execute(SQL_ATTACH_ATTEMPT, (attempt_id, identifier))
             if state == READY:
                 payload = validation if kind == BUILD else result
@@ -258,6 +272,8 @@ def _legacy_row(db: Database, settings: Settings, row: dict, kind: str) -> str:
     finally:
         if output_id and not attached:
             artifacts.delete_unreferenced(output_id)
+        if source_id and not attached:
+            artifacts.delete_unreferenced(source_id)
 
 
 def import_legacy(db: Database, settings: Settings, sqlite_path: Path) -> list[str]:

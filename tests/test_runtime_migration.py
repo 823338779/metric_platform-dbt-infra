@@ -195,6 +195,33 @@ def test_bindings_support_explicit_config_and_readonly_policy(database, tmp_path
     assert row["binding_config"]["queryRetrySafe"] is True
 
 
+def test_imported_idempotency_key_reuses_existing_run(database, legacy):
+    db, settings = database
+    sqlite_path, run_id, _, project_id, _, _ = legacy
+    import_legacy(db, settings, sqlite_path)
+    jobs = JobStore(db)
+    old = jobs.get(run_id)
+    request = {**old["request_json"], "binding": {"remote": "https://example.test/repo.git"}}
+    assert jobs.reserve("BUILD_RUN", project_id, request, idempotency_scope="BUILD_RUN",
+                        idempotency_key=old["idempotency_key"], config_version=old["config_version"],
+                        toolchain_version=settings.toolchain_version)["job_id"] == run_id
+
+
+def test_failed_legacy_build_keeps_source_and_unknown_execution_guard(database, legacy):
+    from dbt_metricflow_service.storage.jobs import CleanupBlocked
+    db, settings = database
+    sqlite_path, run_id, _, _, _, _ = legacy
+    with sqlite3.connect(sqlite_path) as connection:
+        connection.execute("DELETE FROM platform_queries")
+        connection.execute("UPDATE platform_runs SET state='FAILED',error_code='INTERRUPTED'")
+    import_legacy(db, settings, sqlite_path)
+    jobs = JobStore(db)
+    row = jobs.get(run_id)
+    assert row["input_set_id"] is not None
+    with pytest.raises(CleanupBlocked):
+        jobs.reserve_cleanup(run_id)
+
+
 def test_migrate_cli_uses_environment_without_exposing_database_url(database, monkeypatch, capsys):
     from dbt_metricflow_service.admin import main
 

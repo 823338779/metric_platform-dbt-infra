@@ -30,37 +30,47 @@
 接口：Database(dsn).transaction() 返回 RealDictCursor；migrate()/check()/close()。
 JobStore 提供受理、查找、认领、心跳、阶段、成功/失败提交、恢复、清理、项目注册；具体签名随实现固定并通知集成者。
 
-- [ ] 先写真实 PG 测试，验证并发幂等、领取、过期 token、INPUT_LOST、清理门禁失败。
-- [ ] 实现带注释的六表 schema 和事务仓储，运行相同测试通过。
+- [x] 先写真实 PG 测试，验证并发幂等、领取、过期 token、INPUT_LOST、清理门禁失败。
+- [x] 实现带注释的六表 schema 和事务仓储，运行相同测试通过。
 
 ## 任务 2：产物与工作目录
 
 文件：新增 storage/artifacts.py、workspace.py、tests/test_runtime_artifacts.py。
 接口：ArtifactStore(Database).capture(project_id, directory, *, producer_attempt_id=None, kind='SOURCE') -> str；materialize(set_id, destination)；metadata(set_id)；seal(set_id, cursor) 供完成事务调用。
 
-- [ ] 先验证字节摘要一致、非法路径拒绝、不可变集合及容量限制。
-- [ ] 实现有界逐文件保存、还原、发布与回收；排除凭据和临时文件。
+- [x] 先验证字节摘要一致、非法路径拒绝、不可变集合及容量限制。
+- [x] 实现有界逐文件保存、还原、发布与回收；排除凭据和临时文件。
 
 ## 任务 3：执行器与租约
 
 文件：新增 worker.py、runtime_execution.py、tests/test_runtime_worker.py。
 接口：Worker(runtime).start()/close()；RuntimeExecutor 执行已认领任务，沿用 CommandSpec 和 JobRunner 管理进程树；全部外部命令在持久外部执行标记之后运行。
 
-- [ ] 先验证持久任务跨实例执行、心跳丢失取消、只读安全重试与未知写入失败。
-- [ ] 实现构建、查询、选项、清理和通用 CLI；每次独立还原，提交时核对 token。
+- [x] 先验证持久任务跨实例执行、心跳丢失取消、只读安全重试与未知写入失败。
+- [x] 实现构建、查询、选项、清理和通用 CLI；每次独立还原，提交时核对 token。
 
 ## 任务 4：API、管理迁移与文档
 
 文件：新增 runtime.py、admin.py；修改 api.py、settings.py、pyproject.toml、uv.lock、README.md；新增 tests/test_runtime_api.py、tests/test_runtime_migration.py。
 
-- [ ] 先验证两个实例读取同一结果、resources 不入库、错误响应保持契约。
-- [ ] 接入全部接口、健康检查、管理 migrate/import-project/import-legacy 命令。
-- [ ] 旧 UUID 幂等导入，不重建 schema；导入前校验产物，不修改旧库和文件。
-- [ ] 文档记录配置、运行、备份迁移、故障处置及兼容边界。
+- [x] 先验证两个实例读取同一结果、resources 不入库、错误响应保持契约。
+- [x] 接入全部接口、健康检查、管理 migrate/import-project/import-legacy 命令。
+- [x] 旧 UUID 幂等导入，不重建 schema；导入前校验产物，不修改旧库和文件。
+- [x] 文档记录配置、运行、备份迁移、故障处置及兼容边界。
 
 ## 任务 5：整体验证与提交
 
-- [ ] 运行 README 支持的 pytest 和 ruff 命令，报告已有基线失败。
-- [ ] 使用真实 PostgreSQL、独立临时目录/进程完成构建查询和故障测试。
-- [ ] 独立代码审查后修复关键问题并回归。
-- [ ] 检查根仓库与子仓库状态，确认 vendor 未被本次修改，仅提交本计划相关变更。
+- [x] 运行 README 支持的 pytest 和 ruff 命令，报告已有基线失败。
+- [x] 使用真实 PostgreSQL、独立临时目录/进程完成构建查询和故障测试。
+- [x] 独立代码审查后修复关键问题并回归。
+- [x] 检查根仓库与子仓库状态，确认 vendor 未被本次修改，仅提交本计划相关变更。
+
+## 完成与验证记录
+
+- PostgreSQL 集成测试覆盖幂等、租约失效、临时输入丢失、产物完整性、迁移与清理保护。
+- 最终全量测试：255 passed、3 skipped、1 failed。唯一失败为既有 MetricFlow vendor HEAD 与 test_dependencies.py 中固定审计提交不一致；本次未改动 vendor 源码或修改该测试。
+- 真实双 HTTP 进程验收通过：独立临时目录、dbt build、停止受理实例后的查询、选项及清理。
+- 已有 StarRocks 发布版本导入专用测试库后，从空临时目录还原查询成功：96 行、2 列，原 runId 保留。业务服务尚未切换到 PostgreSQL 模式。
+- 本轮新增/修改代码通过 ruff；wheel 构建通过，包内包含迁移 SQL 和管理命令入口。
+- 仓储、执行器和集成代码经过子代理交叉审查；已修复项目版本竞争、迁移幂等、失败任务停止保护和清理后文件引用问题。收尾改动由主代理复核并完成回归。
+- 实施期间出现外部提交 0021ac8，已包含主体实现；后续表命名空间改动归其他进行中的工作，本轮提交仅包含无状态迁移与恢复相关的收尾修改。

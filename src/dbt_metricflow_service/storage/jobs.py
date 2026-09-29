@@ -199,7 +199,12 @@ SQL_OPTIONS_RETRY = """UPDATE runtime_job j SET status='QUEUED',current_attempt_
  AND deadline_at>clock_timestamp() AND error_code<>'INVALID_QUERY'
  AND NOT EXISTS(SELECT 1 FROM runtime_attempt a WHERE a.job_id=j.job_id
  AND a.execution_stage='EXTERNAL' AND a.stop_confirmed_at IS NULL)"""
+SQL_RELEASE_RUN_ARTIFACTS = """UPDATE runtime_job SET input_set_id=NULL,output_set_id=NULL
+ WHERE job_id=%s OR parent_run_id=%s"""
+SQL_EXTERNAL_ATTEMPT = "SELECT 1 FROM runtime_attempt WHERE job_id=%s AND execution_stage='EXTERNAL' LIMIT 1"
 FORBIDDEN_REQUEST_KEYS = frozenset({"resources", "credentials", "password", "token", "secret", "environment", "env"})
+LEGACY_IMPORT_DIGEST = "legacyImportDigest"
+BINDING_FIELD = "binding"
 
 
 class StoreConflict(ValueError):
@@ -367,6 +372,12 @@ class JobStore:
                 )
                 prior = cursor.fetchone()
                 if prior:
+                    # 旧库摘要算法不同；迁移任务按原公开请求比较，保留旧幂等语义。
+                    if (prior["error_detail"] or {}).get(LEGACY_IMPORT_DIGEST):
+                        comparable = {key: value for key, value in safe_request.items() if key != BINDING_FIELD}
+                        if (prior["kind"] == kind and prior["project_id"] == project_id
+                                and prior["request_json"] == comparable):
+                            return prior
                     if prior["request_fingerprint"] != fingerprint:
                         raise StoreConflict("Idempotency key belongs to another request")
                     return prior
@@ -589,6 +600,8 @@ class JobStore:
             )
             if job["kind"] == RUN_CLEANUP:
                 cursor.execute(SQL_UPDATE_RUNTIME_JOB_SET_8, (job["parent_run_id"],))
+                # schema 删除已经确认；保留任务/结果与幂等墓碑，将无引用文件交给 GC。
+                cursor.execute(SQL_RELEASE_RUN_ARTIFACTS, (job["parent_run_id"], job["parent_run_id"]))
             if job["kind"] == DBT_COMMAND and output_set_id is not None:
                 cursor.execute(
                     SQL_UPDATE_RUNTIME_PROJECT_SET_4,
@@ -716,6 +729,10 @@ class JobStore:
             )
             if cursor.fetchone():
                 raise CleanupBlocked("run_cleanup_blocked")
+            if not (parent["output_set_id"] or parent["input_set_id"]):
+                cursor.execute(SQL_EXTERNAL_ATTEMPT, (str(parent_run_id),))
+                if cursor.fetchone():
+                    raise CleanupBlocked("Restore source artifacts before cleaning a run that executed externally")
             cursor.execute(SQL_UPDATE_RUNTIME_JOB_SET_7, (str(parent_run_id),))
             cursor.execute(
                 SQL_INSERT_INTO_RUNTIME_JOB_2,
