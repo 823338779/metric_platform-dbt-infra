@@ -25,6 +25,24 @@ BUILD_TIMEOUT_SECONDS = 1800
 POSTGRES_ADAPTER = "postgres"
 QUERY_ADAPTERS = frozenset({POSTGRES_ADAPTER, STARROCKS_ADAPTER})
 
+# 空发布必须有明确的空定义，不能把缺失或损坏的产物当成清空指令。
+EMPTY_MANIFEST_SECTIONS = ("nodes", "sources", "semantic_models", "metrics")
+EMPTY_SEMANTIC_SECTIONS = ("semantic_models", "metrics")
+EMPTY_CATALOG_SECTIONS = ("nodes", "sources")
+
+
+def _empty_project(target: Path) -> bool:
+    manifest = _load_artifact(target, "manifest.json")
+    semantic = _load_artifact(target, "semantic_manifest.json")
+    catalog = _load_artifact(target, "catalog.json")
+    results = _load_artifact(target, "run_results.json")
+    return (
+        all(manifest.get(section) == {} for section in EMPTY_MANIFEST_SECTIONS)
+        and all(semantic.get(section) == [] for section in EMPTY_SEMANTIC_SECTIONS)
+        and all(catalog.get(section) == {} for section in EMPTY_CATALOG_SECTIONS)
+        and results.get("results") == []
+    )
+
 
 def validate_request_binding(request: PlatformRunRequest, binding: ProjectBinding) -> None:
     """调用方只能使用服务已登记的项目及 profile 绑定。"""
@@ -56,7 +74,8 @@ def validate_artifacts(
 ) -> dict[str, object]:
     """READY 之前核验完整测试、物理关系、原生产物和真实查询证明。"""
 
-    if not query_probe_passed:
+    empty_project = _empty_project(target)
+    if not empty_project and not query_probe_passed:
         raise ValueError("MetricFlow 查询证明缺失")
     manifest = _load_artifact(target, "manifest.json")
     semantic = _load_artifact(target, "semantic_manifest.json")
@@ -73,7 +92,7 @@ def validate_artifacts(
         raise ValueError("dbt 目录产物无版本元数据")
     nodes = manifest.get("nodes")
     records = results.get("results")
-    if not isinstance(nodes, dict) or not isinstance(records, list) or not records:
+    if not isinstance(nodes, dict) or not isinstance(records, list) or (not records and not empty_project):
         raise ValueError("dbt 构建结果不完整")
     if any(not isinstance(item, dict) or item.get("status") not in {"success", "pass"} for item in records):
         raise ValueError("dbt 构建或测试失败")
@@ -105,8 +124,8 @@ def validate_artifacts(
         "catalogDigest": _hash(target / "catalog.json"),
     }
     return {
-        **checksums, "allTestsPassed": True, "representativeQueryPassed": True,
-        "queryCapability": True, "relationsVerified": True,
+        **checksums, "allTestsPassed": True, "representativeQueryPassed": not empty_project,
+        "queryCapability": not empty_project, "relationsVerified": True,
     }
 
 
@@ -277,7 +296,8 @@ class PlatformRunCoordinator:
             probe_input = run_dir / "probe-input.json"
             probe_output = run_dir / "probe-output.json"
             probe_input.write_text(json.dumps({"mode": "PROBE"}), encoding="utf-8")
-            probe = await asyncio.to_thread(
+            # 空项目仍校验原生产物，但没有指标可执行探针，不宣称具备查询能力。
+            probe = {} if _empty_project(project / "target") else await asyncio.to_thread(
                 invoke_programmatic, project, self.profiles_dir, schema,
                 binding.profile_binding_id, probe_input, probe_output
             )

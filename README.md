@@ -100,6 +100,8 @@ uv run --frozen dbt-metricflow-service
 
 ## 平台固定版本任务
 
+完整且明确为空的定义允许发布为空目录：模型、source、语义模型、指标、物理目录和构建记录均为空时，跳过 MetricFlow 查询探针，READY 返回的 `queryCapability` 与 `representativeQueryPassed` 均为 false，其余产物版本、摘要和配置校验照常执行。产物缺失或非空项目查询失败仍拒绝发布。旧版本物理表由指标平台在切换活动版本并确认无在途查询后调用清理接口回收；服务不会删除原始 source 数据表。
+
 设置 `PLATFORM_BINDINGS_FILE` 为服务拥有的 JSON 文件路径，并设置 `PLATFORM_DB_PATH` 为服务独占的 SQLite 索引路径。绑定文件是数组，例如：
 
 ```json

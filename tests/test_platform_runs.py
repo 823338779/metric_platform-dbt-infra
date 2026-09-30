@@ -9,6 +9,75 @@ from dbt_metricflow_service.platform_catalog import CATALOG_SCHEMA, MANIFEST_SCH
 from dbt_metricflow_service.platform_runs import build_platform_command, validate_artifacts
 
 
+def empty_artifacts(target: Path) -> None:
+    target.mkdir(parents=True)
+    payloads = {
+        "manifest.json": {
+            "metadata": {"adapter_type": "postgres", "dbt_schema_version": MANIFEST_SCHEMA},
+            "nodes": {}, "sources": {}, "semantic_models": {}, "metrics": {},
+        },
+        "semantic_manifest.json": {"semantic_models": [], "metrics": []},
+        "run_results.json": {"results": []},
+        "catalog.json": {"metadata": {"dbt_schema_version": CATALOG_SCHEMA}, "nodes": {}, "sources": {}},
+    }
+    for name, payload in payloads.items():
+        (target / name).write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_empty_release_validates_without_claiming_query_capability(tmp_path: Path) -> None:
+    empty_artifacts(tmp_path / "target")
+    validation = validate_artifacts(tmp_path / "target", "run_empty", query_probe_passed=False)
+    assert validation["queryCapability"] is False
+    assert validation["representativeQueryPassed"] is False
+    assert validation["allTestsPassed"] is True
+    assert validation["relationsVerified"] is True
+    assert len(validation["manifestDigest"]) == 64
+
+
+@pytest.mark.parametrize("missing", ["nodes", "sources", "semantic_models", "metrics"])
+def test_incomplete_manifest_cannot_be_published_as_empty(tmp_path: Path, missing: str) -> None:
+    empty_artifacts(tmp_path / "target")
+    path = tmp_path / "target" / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    del manifest[missing]
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError):
+        validate_artifacts(tmp_path / "target", "run_empty", query_probe_passed=False)
+
+
+def test_empty_build_reaches_ready_without_metricflow_probe(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+
+    from dbt_metricflow_service.platform_bindings import ProjectBinding
+    from dbt_metricflow_service.platform_models import PlatformRunRequest
+    from dbt_metricflow_service.platform_runs import PlatformRunCoordinator
+    from dbt_metricflow_service.platform_store import PlatformJobStore, RunState
+
+    project = tmp_path / "project"
+    empty_artifacts(project / "target")
+    store = PlatformJobStore(tmp_path / "jobs.sqlite")
+    run_id = store.reserve_run("empty", "fingerprint")
+    run_dir = tmp_path / "artifacts" / str(run_id)
+    run_dir.mkdir(parents=True)
+    coordinator = PlatformRunCoordinator(store, {}, tmp_path / "artifacts", tmp_path / "profiles")
+    monkeypatch.setattr("dbt_metricflow_service.platform_runs.resolve_revision", lambda *args: project)
+    monkeypatch.setattr(coordinator, "_execute", lambda *args: None)
+
+    def unexpected_probe(*args):
+        raise AssertionError("Empty projects cannot execute a metric query")
+
+    monkeypatch.setattr("dbt_metricflow_service.platform_runs.invoke_programmatic", unexpected_probe)
+    request = PlatformRunRequest(
+        projectId="sample", commitSha="a" * 40, projectDigest="b" * 64,
+        profileBindingId="postgres", configVersion="1", idempotencyKey="empty",
+    )
+    asyncio.run(coordinator._build(
+        run_id, request, ProjectBinding("sample", "remote", ".", "postgres"), run_dir
+    ))
+    assert store.find_run(run_id).state is RunState.READY
+    assert coordinator.get(run_id)["queryCapability"] is False
+
+
 def test_run_builds_all_models_in_new_schema(tmp_path: Path) -> None:
     first = build_platform_command(tmp_path / "project", tmp_path / "profiles", "postgres", "run_a")
     assert first[1] == "build"
