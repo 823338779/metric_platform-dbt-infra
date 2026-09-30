@@ -1,4 +1,4 @@
-"""部署与迁移管理入口；只读旧库，连接信息仅从服务环境变量加载。"""
+"""部署与迁移管理入口；只读旧库，连接信息从服务配置和环境变量加载。"""
 
 from __future__ import annotations
 
@@ -322,7 +322,8 @@ def main(argv: list[str] | None = None) -> None:
     gc.add_argument("--older-than-hours", type=int, default=24)
     gc.add_argument("--limit", type=int, default=100)
     args = parser.parse_args(argv)
-    settings = Settings.from_environment()
+    # 管理操作与服务启动读取同一配置，避免迁移和运行连接到不同数据库。
+    settings = Settings.from_file()
     if not settings.database_url:
         parser.error("SERVICE_DATABASE_URL is required")
     db = Database(settings.database_url)

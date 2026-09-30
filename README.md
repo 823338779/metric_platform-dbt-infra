@@ -21,13 +21,15 @@ MetricFlow 上游分别发布 core `0.213.0` 和 CLI `0.15.0`。fork 的组合�
 
 ## 目录和配置
 
-设置 `SERVICE_DATABASE_URL` 后启用下文的 PostgreSQL 无状态模式；本节的本地目录、SQLite 和内存任务说明仅适用于未设置该变量的兼容开发模式。两种模式不共享任务历史，不应同时接收同一业务项目的请求。
+服务和 `dbt-service-admin` 默认读取 `config/service.yaml`，其中集中维护全部服务参数，包括监听地址、端口、存储连接、目录、并发、租约和产物大小限制。配置项名称与环境变量一致，**环境变量 > 配置文件 > 代码默认值**；可通过 `SERVICE_CONFIG_FILE` 指定其他配置文件。指定文件不存在、YAML 格式错误或包含未知配置项时，启动会报错。
 
-从仓库根目录启动时，服务默认使用三个本地目录，也可以用环境变量指定其他绝对路径：
+配置文件中的相对路径以配置文件所在目录为基准，环境变量中的相对路径仍以启动工作目录为基准。随仓库提供的配置沿用当前 IDEA 开发环境的 `../../tmp/metric-debug/` 路径（从 `config/` 解析）；独立部署时应编辑目录配置或指定自己的配置文件。`profiles.yml` 中的数据仓库连接仍由 dbt 管理，与服务存储连接分开。
 
-- `projects/`（`PROJECTS_ROOT`）：每个一级子目录是一个 dbt 项目；dbt 会在项目内写入 `target/` 和 `logs/`。
-- `profiles/`（`DBT_PROFILES_DIR`）：包含 `profiles.yml`。
-- `job-artifacts/`（`JOB_ARTIFACTS_ROOT`）：请求级 resources 的派生产物，由服务用户管理和清理；不要由多个服务实例共享。
+`SERVICE_DATABASE_URL` 配置为非空连接后启用下文的 PostgreSQL 无状态模式；默认 `null` 使用兼容开发模式的 SQLite 和内存任务。正式服务库设计名称为 `dbt_service`，必须提前创建，服务不会自动建库，也不会默认连接到测试库 `dbt_service_test`。两种模式不共享任务历史，不应同时接收同一业务项目的请求。真实数据库连接通过环境变量注入，勿写入版本库。
+
+- `PROJECTS_ROOT`：每个一级子目录是一个 dbt 项目；dbt 会在项目内写入 `target/` 和 `logs/`。
+- `DBT_PROFILES_DIR`：包含 `profiles.yml`。
+- `JOB_ARTIFACTS_ROOT`：请求级 resources 的派生产物，由服务用户管理和清理；不要由多个服务实例共享。
 
 项目通过安全的单段标识访问，例如 `projects/sales` 对应请求字段 `"project": "sales"`。服务拒绝路径、绝对路径和逃逸项目根目录的符号链接。
 
@@ -73,8 +75,7 @@ git submodule status
 ```powershell
 git submodule update --init --recursive
 uv sync --frozen --all-groups --python 3.12
-New-Item -ItemType Directory -Force projects, profiles, job-artifacts
-# 将自己的 profiles.yml 放在 profiles/ 下，将 dbt 项目放在 projects/<项目名>/ 下
+# 编辑 config/service.yaml 中的目录，将 profiles.yml 和项目放入对应目录
 uv run --frozen dbt-metricflow-service
 ```
 
@@ -83,18 +84,25 @@ macOS/Linux：
 ```bash
 git submodule update --init --recursive
 uv sync --frozen --all-groups --python 3.12
-mkdir -p projects profiles job-artifacts
-# 将自己的 profiles.yml 放在 profiles/ 下，将 dbt 项目放在 projects/<项目名>/ 下
+# 编辑 config/service.yaml 中的目录，将 profiles.yml 和项目放入对应目录
 uv run --frozen dbt-metricflow-service
 ```
 
-服务监听 `http://localhost:8000`。运行 `curl http://localhost:8000/health/ready` 可检查 CLI 与目录是否就绪；首次调用前应配置实际的 `profiles.yml` 和 dbt 项目。
+服务默认监听 `http://localhost:8000`，可在配置文件中修改 `SERVICE_HOST` 和 `SERVICE_PORT`。根工作区与子仓库的 IDEA 启动配置均已指定同一 `config/service.yaml`。运行 `curl http://localhost:8000/health/ready` 可检查 CLI 与目录是否就绪；首次调用前应配置实际的 `profiles.yml` 和 dbt 项目。
+
+指定部署配置文件（PowerShell）：
+
+```powershell
+$env:SERVICE_CONFIG_FILE = "E:/deployment/dbt-service/service.yaml"
+uv run --frozen dbt-service-admin migrate
+uv run --frozen dbt-metricflow-service
+```
 
 可选运行参数：
 
 - `COMMAND_TIMEOUT_SECONDS`：单个 CLI 子进程的最长运行时间，默认 `1800` 秒。
 - `MAX_OUTPUT_BYTES`：每个 stdout/stderr 流保留的尾部字节数，默认 `1048576`。
-- `JOB_ARTIFACTS_ROOT`：请求级任务派生产物根目录，默认当前工作目录下的 `job-artifacts/`。
+- `JOB_ARTIFACTS_ROOT`：请求级任务派生产物根目录，默认由 `config/service.yaml` 指定。
 
 `GET /health/live` 只检查 HTTP 进程；`GET /health/ready` 检查 `dbt`、`mf`、项目/profile 目录以及任务产物目录。
 
@@ -219,7 +227,7 @@ curl -sS -X POST http://127.0.0.1:8000/v1/metricflow/jobs \
 
 ### 初始化与启动
 
-先创建专用 PostgreSQL 数据库和服务账号，通过 Secret 设置 `SERVICE_DATABASE_URL`（libpq DSN 或 PostgreSQL URL）。不要将真实连接信息放入 Git、命令行参数或日志。安装并运行管理命令：
+先创建专用 PostgreSQL 数据库和服务账号，通过 Secret 设置 `SERVICE_DATABASE_URL`（libpq DSN 或 PostgreSQL URL），覆盖 `config/service.yaml` 中的 `null`。服务与管理命令必须使用同一配置文件和连接环境变量。不要将真实连接信息放入 Git、命令行参数或日志。安装并运行管理命令：
 
 ```powershell
 uv sync --frozen --all-groups
