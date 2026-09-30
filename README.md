@@ -25,7 +25,7 @@ MetricFlow 上游分别发布 core `0.213.0` 和 CLI `0.15.0`。fork 的组合�
 
 配置文件中的相对路径以配置文件所在目录为基准，环境变量中的相对路径仍以启动工作目录为基准。随仓库提供的配置沿用当前 IDEA 开发环境的 `../../tmp/metric-debug/` 路径（从 `config/` 解析）；独立部署时应编辑目录配置或指定自己的配置文件。`profiles.yml` 中的数据仓库连接仍由 dbt 管理，与服务存储连接分开。
 
-`SERVICE_DATABASE_URL` 配置为非空连接后启用下文的 PostgreSQL 无状态模式；默认 `null` 使用兼容开发模式的 SQLite 和内存任务。正式服务库设计名称为 `dbt_service`，必须提前创建，服务不会自动建库，也不会默认连接到测试库 `dbt_service_test`。两种模式不共享任务历史，不应同时接收同一业务项目的请求。真实数据库连接通过环境变量注入，勿写入版本库。
+当前 `config/service.yaml` 已直接配置本机 PostgreSQL 的 `dbt_service` 业务库，服务任务、项目绑定、构建产物和查询结果均保存到该库。数据库和业务表已初始化；后续普通启动仅检查结构，不自动建库或执行迁移。`dbt_service_test` 仅供独立测试。将 `SERVICE_DATABASE_URL` 显式改为 `null` 才会使用兼容开发模式的 SQLite 和内存任务；两种模式不共享任务历史，不应同时接收同一业务项目的请求。
 
 - `PROJECTS_ROOT`：每个一级子目录是一个 dbt 项目；dbt 会在项目内写入 `target/` 和 `logs/`。
 - `DBT_PROFILES_DIR`：包含 `profiles.yml`。
@@ -227,11 +227,11 @@ curl -sS -X POST http://127.0.0.1:8000/v1/metricflow/jobs \
 
 ### 初始化与启动
 
-先创建专用 PostgreSQL 数据库和服务账号，通过 Secret 设置 `SERVICE_DATABASE_URL`（libpq DSN 或 PostgreSQL URL），覆盖 `config/service.yaml` 中的 `null`。服务与管理命令必须使用同一配置文件和连接环境变量。不要将真实连接信息放入 Git、命令行参数或日志。安装并运行管理命令：
+首次部署时，先创建 PostgreSQL 数据库和服务账号，在 `config/service.yaml` 中直接填写 `SERVICE_DATABASE_URL`（libpq DSN 或 PostgreSQL URL）。服务与管理命令必须使用同一配置文件；环境变量仍可覆盖文件配置。当前本地业务库已完成初始化，只需正常启动。安装和首次初始化命令：
 
 ```powershell
 uv sync --frozen --all-groups
-# 由部署环境提前注入 SERVICE_DATABASE_URL 和 DBT_PROFILES_DIR
+# 先在 config/service.yaml 中填写数据库连接和 profiles 目录
 uv run --frozen dbt-service-admin migrate
 uv run --frozen dbt-service-admin register-bindings bindings.json
 uv run --frozen dbt-service-admin import-project sales projects/sales
@@ -244,12 +244,14 @@ uv run --frozen dbt-metricflow-service
 
 Windows 建议使用较短的临时根目录（如 `E:\dbt-tmp\node1`），避免项目包和编译产物的深层路径超过系统路径长度限制。运行中的 Windows 服务会锁住入口 exe；更新依赖时先停止该实例，或采用新目录部署后切换。仅运行测试时可使用 `uv run --no-sync pytest` 复用已安装依赖。
 
+当前本地 `SERVICE_TEMP_ROOT` 使用工作区 `tmp/dbt`，构建配置版本为 `local-debug-v8`，与指标平台及已登记绑定一致。切换 PostgreSQL 时采用空业务库重新发布项目，旧 SQLite 保留在 `tmp/metric-debug/postgres-switch-backup/`，旧任务历史未导入新库。
+
 | 配置 | 默认值与用途 |
 | --- | --- |
-| `SERVICE_DATABASE_URL` | 未设置时为兼容本地模式；设置后全部公开任务走 PostgreSQL |
-| `SERVICE_TEMP_ROOT` | `runtime-tmp`；实例独占的临时目录 |
-| `SERVICE_CONFIG_VERSION` | `1`；该实例支持的连接配置版本 |
-| `SERVICE_TOOLCHAIN_VERSION` | 默认由服务代码和安装包版本计算；部署可指定固定镜像标识 |
+| `SERVICE_DATABASE_URL` | 当前配置指向 `dbt_service`；全部公开任务走 PostgreSQL |
+| `SERVICE_TEMP_ROOT` | 当前为工作区 `tmp/dbt`；实例独占的临时目录 |
+| `SERVICE_CONFIG_VERSION` | 当前为 `local-debug-v8`；该实例支持的连接配置版本 |
+| `SERVICE_TOOLCHAIN_VERSION` | 当前与指标平台固定版本一致；设为 `null` 时由服务代码和安装包版本计算 |
 | `WORKER_CONCURRENCY` | `2`；每实例执行槽位 |
 | `JOB_LEASE_SECONDS` / `JOB_HEARTBEAT_SECONDS` | `90` / `15` 秒；租约至少覆盖三个心跳间隔 |
 | `MAX_ARTIFACT_FILE_BYTES` / `MAX_ARTIFACT_BYTES` | 单文件 `64 MiB` / 单集合 `256 MiB` |

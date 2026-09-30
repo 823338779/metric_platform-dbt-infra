@@ -7,9 +7,9 @@ SERVICE_PORT: 8000
 
 # PostgreSQL 服务存储连接（libpq DSN 或 PostgreSQL URL），不是 dbt 目标数据仓库连接。
 # null 表示继续使用兼容的 SQLite/内存模式；非空时启用 PostgreSQL 无状态模式。
-# 正式服务库设计名称为 dbt_service，需要提前创建；dbt_service_test 用于独立测试。
-# 部署时通过 SERVICE_DATABASE_URL 注入真实连接，勿将凭据写入版本库。
-SERVICE_DATABASE_URL: null
+# 当前业务库为本机 PostgreSQL 的 dbt_service，已由管理命令初始化业务表。
+# 连接直接配置在此；环境变量 SERVICE_DATABASE_URL 仍可覆盖本文件。
+SERVICE_DATABASE_URL: "host=localhost port=5432 user=data_agent password=data_agent_local_dev dbname=dbt_service connect_timeout=5"
 
 # dbt 项目目录、profiles.yml 所在目录及派生产物根目录。
 PROJECTS_ROOT: "../../tmp/metric-debug/projects"
@@ -20,8 +20,9 @@ JOB_ARTIFACTS_ROOT: "../../tmp/metric-debug/artifacts"
 PLATFORM_BINDINGS_FILE: "../../tmp/metric-debug/bindings.json"
 PLATFORM_DB_PATH: "../../tmp/metric-debug/jobs.sqlite"
 
-# PostgreSQL 模式可丢弃的实例工作目录；多副本必须使用各自独立目录。
-SERVICE_TEMP_ROOT: "../../tmp/metric-debug/runtime-tmp"
+# PostgreSQL 模式可丢弃的实例工作目录；使用短路径避免 Windows 的 260 字符限制。
+# 多副本必须使用各自独立目录。
+SERVICE_TEMP_ROOT: "../../tmp/dbt"
 
 # 单个 CLI 子进程超时（秒）与每个 stdout/stderr 保留的最大字节数。
 COMMAND_TIMEOUT_SECONDS: 1800
@@ -34,8 +35,8 @@ JOB_HEARTBEAT_SECONDS: 15
 
 # 当前实例支持的 profile/Secret 绑定配置版本和工具链标识。
 # 工具链标识为 null 时，根据安装版本和服务代码自动计算。
-SERVICE_CONFIG_VERSION: "1"
-SERVICE_TOOLCHAIN_VERSION: null
+SERVICE_CONFIG_VERSION: "local-debug-v8"
+SERVICE_TOOLCHAIN_VERSION: "dbt-core 1.12.5 / metricflow 0.213.0"
 
 # 单查询结果、单产物文件、单产物集的原始字节上限。
 MAX_RESULT_BYTES: 16777216

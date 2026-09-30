@@ -50,6 +50,19 @@ def runtime_pair(tmp_path):
         runtime.db.close()
 
 
+# 平台构建接口必须延续 PREPARING 状态契约，不能透出存储层的 QUEUED。
+def test_queued_build_reports_preparing_state(runtime_pair):
+    runtimes, project = runtime_pair
+    row = runtimes[0].jobs.reserve(
+        "BUILD_RUN", project, {"projectId": project},
+        idempotency_scope="BUILD_RUN", idempotency_key=str(uuid4()),
+    )
+
+    snapshot = runtimes[1].get_run(row["job_id"])
+
+    assert snapshot["state"] == "PREPARING"
+
+
 async def test_cli_acceptance_and_result_are_shared_without_local_project(runtime_pair):
     from dbt_metricflow_service.models import DbtJobRequest
     runtimes, project = runtime_pair

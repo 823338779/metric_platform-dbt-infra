@@ -34,6 +34,7 @@ CLEANUP = "RUN_CLEANUP"
 DBT = "DBT_COMMAND"
 MF = "MF_COMMAND"
 QUEUED = "QUEUED"
+PREPARING = "PREPARING"
 RUNNING = "RUNNING"
 SUCCEEDED = "SUCCEEDED"
 FAILED = "FAILED"
@@ -226,6 +227,9 @@ class Runtime:
             state = row["run_lifecycle"]
         elif state == SUCCEEDED:
             state = "READY"
+        elif state == QUEUED:
+            # 构建接口保持平台已有的准备状态契约，不暴露数据库队列状态。
+            state = PREPARING
         elif state == RUNNING:
             state = row["phase"]
         payload = {"runId": row["job_id"], "state": state}
