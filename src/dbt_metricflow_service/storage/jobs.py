@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from contextlib import nullcontext
 from uuid import uuid4
 
 from psycopg2.extras import Json
@@ -319,9 +320,10 @@ class JobStore:
         timeout_seconds=600,
         write=False,
         expected_revision=None,
+        _cursor=None,
     ):
         # 幂等作用域先串行化；parent 锁统一先于项目行和子任务，避免清理受理穿透。
-        with self.db.transaction() as cursor:
+        with nullcontext(_cursor) if _cursor is not None else self.db.transaction() as cursor:
             if idempotency_key is not None:
                 idempotency_scope = idempotency_scope or kind
                 cursor.execute(
@@ -499,6 +501,10 @@ class JobStore:
             if not job:
                 return False
             cursor.execute(SQL_UPDATE_RUNTIME_JOB_SET_3, (phase, str(job_id)))
+            if job["request_json"].get("releaseId"):
+                from .publications import SQL_PHASE
+
+                cursor.execute(SQL_PHASE, (phase, str(job_id)))
             if external:
                 cursor.execute(
                     SQL_UPDATE_RUNTIME_ATTEMPT_SET_5,
@@ -586,6 +592,14 @@ class JobStore:
                     or len(stderr_tail.encode()) > self.max_diagnostic_bytes,
                 ),
             )
+            # 业务发布与封存共用事务；兼容 BUILD_RUN 没有 releaseId 时仍只报告 READY。
+            if job["kind"] == BUILD_RUN and job["request_json"].get("releaseId"):
+                from .publications import PublicationStore
+
+                PublicationStore(self.db).publish_in_transaction(
+                    cursor, job_id=job_id, attempt_token=token,
+                    release_id=job["request_json"]["releaseId"], output_set_id=output_set_id,
+                )
             # 封存校验可能耗时；提交前重新 fencing，失效时连同已封存文件状态一起回滚。
             if not self._authorized(cursor, job_id, token):
                 cursor.connection.rollback()
@@ -626,6 +640,9 @@ class JobStore:
                 SQL_UPDATE_RUNTIME_JOB_SET_6,
                 (error_code, Json(detail or {}), str(job_id)),
             )
+            from .publications import SQL_FAIL
+
+            cursor.execute(SQL_FAIL, (error_code, str(job_id)))
             self._release_project(cursor, job_id)
             return True
 
@@ -671,6 +688,9 @@ class JobStore:
                         SQL_UPDATE_RUNTIME_JOB_SET_6,
                         (code, Json({"externalOutcomeUnknown": external}), job["job_id"]),
                     )
+                    from .publications import SQL_FAIL
+
+                    cursor.execute(SQL_FAIL, (code, job["job_id"]))
                     self._release_project(cursor, job["job_id"])
             return len(jobs)
 
@@ -701,6 +721,12 @@ class JobStore:
             parent = cursor.fetchone()
             if not parent or parent["kind"] != BUILD_RUN:
                 raise ValueError("Run does not exist")
+            # 首版保留发布历史，连同复用来源一起保护；旧 cleanup 接口不能绕过。
+            from .publications import SQL_PROTECTED_RUN
+
+            cursor.execute(SQL_PROTECTED_RUN, (str(parent_run_id), str(parent_run_id)))
+            if cursor.fetchone():
+                raise CleanupBlocked("run_cleanup_blocked")
             cursor.execute(SQL_SELECT_FROM_RUNTIME_JOB_5, (str(parent_run_id),))
             existing = cursor.fetchone()
             if existing:

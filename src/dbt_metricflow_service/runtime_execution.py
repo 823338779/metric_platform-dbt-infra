@@ -168,7 +168,7 @@ class RuntimeExecutor:
                 if job["kind"] in {METRIC_QUERY, QUERY_OPTIONS, RUN_CLEANUP}:
                     body = job["request_json"]
                     if job["kind"] == METRIC_QUERY:
-                        body = {"mode": QUERY_MODE, "request": body}
+                        body = {"mode": QUERY_MODE, "request": body.get("engineRequest", body)}
                     elif job["kind"] == RUN_CLEANUP:
                         body = {"mode": CLEANUP_MODE, "schema": job["schema_name"]}
                         parent_id = UUID(job["parent_run_id"])
@@ -240,6 +240,11 @@ class RuntimeExecutor:
             project = attempt / PROJECT_DIRECTORY
             await _thread(self.artifacts.materialize, job["input_set_id"], project)
 
+        if request.get("releaseId"):
+            # v2 发布独立处理完整覆盖证明，不弱化旧 v1 全构建验证。
+            from dbt_metricflow_service.publication_build import execute_publication
+
+            return await execute_publication(self, job, runner, attempt, project)
         # 固定 build 使用既有 argv；所有命令由同一个 runner 管理进程树。
         profiles = self.settings.profiles_dir
         schema, target_name = job["schema_name"], job["profile_binding_id"]

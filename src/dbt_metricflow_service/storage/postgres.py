@@ -8,8 +8,9 @@ from psycopg2 import OperationalError
 from psycopg2.extras import RealDictCursor
 from psycopg2.pool import ThreadedConnectionPool
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MIGRATION_PATH = Path(__file__).parent / "migrations" / "001_runtime.sql"
+MIGRATIONS = (MIGRATION_PATH, MIGRATION_PATH.with_name("002_publication.sql"))
 CHECK_SQL = "SELECT version FROM runtime_schema_version"
 MIGRATION_LOCK_SQL = "SELECT pg_advisory_xact_lock(609302026)"
 CONNECTION_OPTIONS = "-c statement_timeout=10000 -c lock_timeout=5000"
@@ -44,11 +45,15 @@ class Database:
         with self.transaction() as cursor:
             cursor.execute(MIGRATION_LOCK_SQL)
             cursor.execute(VERSION_TABLE_SQL)
+            version = 0
             if cursor.fetchone()["table_name"]:
                 cursor.execute(CHECK_SQL)
-                if [row["version"] for row in cursor.fetchall()] == [SCHEMA_VERSION]:
-                    return
-            cursor.execute(MIGRATION_PATH.read_text(encoding="utf-8"))
+                versions = [row["version"] for row in cursor.fetchall()]
+                if len(versions) != 1 or not 1 <= versions[0] <= SCHEMA_VERSION:
+                    raise RuntimeError("Unsupported runtime database schema")
+                version = versions[0]
+            for migration in MIGRATIONS[version:]:
+                cursor.execute(migration.read_text(encoding="utf-8"))
 
     def check(self):
         # 拒绝未迁移数据库以及当前代码不认识的 schema。

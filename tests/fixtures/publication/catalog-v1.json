@@ -1,0 +1,401 @@
+{
+  "schemaVersion": 1,
+  "projectId": "catalog-test",
+  "releaseId": "00000000-0000-0000-0000-000000000001",
+  "resources": [
+    {
+      "resourceId": "metric.sample.net",
+      "nativeId": "metric.sample.net",
+      "name": "net",
+      "displayName": "net",
+      "description": null,
+      "sourcePath": null,
+      "capabilities": [
+        "QUERY"
+      ],
+      "nativeDetails": {
+        "name": "net",
+        "type": "derived",
+        "type_params": {
+          "expr": "orders - returns",
+          "metrics": [
+            {
+              "name": "orders"
+            },
+            {
+              "name": "returns"
+            }
+          ]
+        }
+      },
+      "kind": "METRIC",
+      "attributes": {
+        "metricType": "derived",
+        "definitionSummary": "orders - returns",
+        "inputMetricIds": [
+          "metric.sample.orders",
+          "metric.sample.returns"
+        ],
+        "datasetIds": [
+          "semantic_model.sample.orders",
+          "semantic_model.sample.returns"
+        ],
+        "filters": null,
+        "timeConfig": {
+          "timeGranularity": null,
+          "window": null,
+          "cumulative": {},
+          "conversion": {}
+        }
+      }
+    },
+    {
+      "resourceId": "metric.sample.orders",
+      "nativeId": "metric.sample.orders",
+      "name": "orders",
+      "displayName": "展示 orders",
+      "description": null,
+      "sourcePath": null,
+      "capabilities": [
+        "QUERY"
+      ],
+      "nativeDetails": {
+        "name": "orders",
+        "label": "展示 orders",
+        "type": "simple",
+        "type_params": {
+          "metric_aggregation_params": {
+            "semantic_model": "orders",
+            "agg": "sum"
+          }
+        },
+        "depends_on": {
+          "nodes": [
+            "semantic_model.sample.orders"
+          ]
+        }
+      },
+      "kind": "METRIC",
+      "attributes": {
+        "metricType": "simple",
+        "definitionSummary": "simple: orders",
+        "inputMetricIds": [],
+        "datasetIds": [
+          "semantic_model.sample.orders"
+        ],
+        "filters": null,
+        "timeConfig": {
+          "timeGranularity": null,
+          "window": null,
+          "cumulative": {},
+          "conversion": {}
+        }
+      }
+    },
+    {
+      "resourceId": "metric.sample.returns",
+      "nativeId": "metric.sample.returns",
+      "name": "returns",
+      "displayName": "展示 returns",
+      "description": null,
+      "sourcePath": null,
+      "capabilities": [
+        "QUERY"
+      ],
+      "nativeDetails": {
+        "name": "returns",
+        "label": "展示 returns",
+        "type": "simple",
+        "type_params": {
+          "metric_aggregation_params": {
+            "semantic_model": "returns",
+            "agg": "sum"
+          }
+        },
+        "depends_on": {
+          "nodes": [
+            "semantic_model.sample.returns"
+          ]
+        }
+      },
+      "kind": "METRIC",
+      "attributes": {
+        "metricType": "simple",
+        "definitionSummary": "simple: returns",
+        "inputMetricIds": [],
+        "datasetIds": [
+          "semantic_model.sample.returns"
+        ],
+        "filters": null,
+        "timeConfig": {
+          "timeGranularity": null,
+          "window": null,
+          "cumulative": {},
+          "conversion": {}
+        }
+      }
+    },
+    {
+      "resourceId": "model.sample.orders",
+      "nativeId": "model.sample.orders",
+      "name": "orders",
+      "displayName": "orders",
+      "description": null,
+      "sourcePath": null,
+      "capabilities": [
+        "PREVIEW"
+      ],
+      "nativeDetails": {
+        "name": "orders",
+        "resource_type": "model"
+      },
+      "kind": "TABLE",
+      "attributes": {
+        "origin": "BUILT",
+        "relation": {
+          "database": "db",
+          "schema": "s",
+          "identifier": "orders"
+        },
+        "columns": {}
+      }
+    },
+    {
+      "resourceId": "model.sample.returns",
+      "nativeId": "model.sample.returns",
+      "name": "returns",
+      "displayName": "returns",
+      "description": null,
+      "sourcePath": null,
+      "capabilities": [
+        "PREVIEW"
+      ],
+      "nativeDetails": {
+        "name": "returns",
+        "resource_type": "model"
+      },
+      "kind": "TABLE",
+      "attributes": {
+        "origin": "BUILT",
+        "relation": {
+          "database": "db",
+          "schema": "s",
+          "identifier": "returns"
+        },
+        "columns": {}
+      }
+    },
+    {
+      "resourceId": "semantic_model.sample.orders",
+      "nativeId": "semantic_model.sample.orders",
+      "name": "orders",
+      "displayName": "orders",
+      "description": null,
+      "sourcePath": null,
+      "capabilities": [],
+      "nativeDetails": {
+        "name": "orders",
+        "dimensions": [
+          {
+            "name": "region",
+            "type": "categorical"
+          }
+        ],
+        "entities": [],
+        "measures": [],
+        "depends_on": {
+          "nodes": [
+            "model.sample.orders"
+          ]
+        }
+      },
+      "kind": "SEMANTIC_MODEL",
+      "attributes": {
+        "modelResourceId": "model.sample.orders",
+        "dimensionIds": [
+          "semantic_model.sample.orders.dimension.region"
+        ],
+        "entities": [],
+        "measures": [],
+        "defaultTimeDimension": null
+      }
+    },
+    {
+      "resourceId": "semantic_model.sample.orders.dimension.region",
+      "nativeId": "semantic_model.sample.orders.dimension.region",
+      "name": "region",
+      "displayName": "region",
+      "description": null,
+      "sourcePath": null,
+      "capabilities": [
+        "DIMENSION_VALUES"
+      ],
+      "nativeDetails": {
+        "name": "region",
+        "type": "categorical"
+      },
+      "kind": "DIMENSION",
+      "attributes": {
+        "datasetId": "semantic_model.sample.orders",
+        "dimensionType": "categorical",
+        "expression": null,
+        "timeGranularity": null
+      }
+    },
+    {
+      "resourceId": "semantic_model.sample.returns",
+      "nativeId": "semantic_model.sample.returns",
+      "name": "returns",
+      "displayName": "returns",
+      "description": null,
+      "sourcePath": null,
+      "capabilities": [],
+      "nativeDetails": {
+        "name": "returns",
+        "dimensions": [
+          {
+            "name": "region",
+            "type": "categorical"
+          }
+        ],
+        "entities": [],
+        "measures": [],
+        "depends_on": {
+          "nodes": [
+            "model.sample.returns"
+          ]
+        }
+      },
+      "kind": "SEMANTIC_MODEL",
+      "attributes": {
+        "modelResourceId": "model.sample.returns",
+        "dimensionIds": [
+          "semantic_model.sample.returns.dimension.region"
+        ],
+        "entities": [],
+        "measures": [],
+        "defaultTimeDimension": null
+      }
+    },
+    {
+      "resourceId": "semantic_model.sample.returns.dimension.region",
+      "nativeId": "semantic_model.sample.returns.dimension.region",
+      "name": "region",
+      "displayName": "region",
+      "description": null,
+      "sourcePath": null,
+      "capabilities": [
+        "DIMENSION_VALUES"
+      ],
+      "nativeDetails": {
+        "name": "region",
+        "type": "categorical"
+      },
+      "kind": "DIMENSION",
+      "attributes": {
+        "datasetId": "semantic_model.sample.returns",
+        "dimensionType": "categorical",
+        "expression": null,
+        "timeGranularity": null
+      }
+    }
+  ],
+  "relations": [
+    {
+      "upstreamResourceId": "metric.sample.orders",
+      "downstreamResourceId": "metric.sample.net",
+      "kind": "METRIC_INPUT"
+    },
+    {
+      "upstreamResourceId": "metric.sample.returns",
+      "downstreamResourceId": "metric.sample.net",
+      "kind": "METRIC_INPUT"
+    },
+    {
+      "upstreamResourceId": "model.sample.orders",
+      "downstreamResourceId": "semantic_model.sample.orders",
+      "kind": "DBT_DEPENDS_ON"
+    },
+    {
+      "upstreamResourceId": "model.sample.orders",
+      "downstreamResourceId": "semantic_model.sample.orders",
+      "kind": "MODEL_DATASET"
+    },
+    {
+      "upstreamResourceId": "model.sample.returns",
+      "downstreamResourceId": "semantic_model.sample.returns",
+      "kind": "DBT_DEPENDS_ON"
+    },
+    {
+      "upstreamResourceId": "model.sample.returns",
+      "downstreamResourceId": "semantic_model.sample.returns",
+      "kind": "MODEL_DATASET"
+    },
+    {
+      "upstreamResourceId": "semantic_model.sample.orders",
+      "downstreamResourceId": "metric.sample.net",
+      "kind": "METRIC_DATASET"
+    },
+    {
+      "upstreamResourceId": "semantic_model.sample.orders",
+      "downstreamResourceId": "metric.sample.orders",
+      "kind": "DBT_DEPENDS_ON"
+    },
+    {
+      "upstreamResourceId": "semantic_model.sample.orders",
+      "downstreamResourceId": "metric.sample.orders",
+      "kind": "METRIC_DATASET"
+    },
+    {
+      "upstreamResourceId": "semantic_model.sample.orders",
+      "downstreamResourceId": "semantic_model.sample.orders.dimension.region",
+      "kind": "SEMANTIC_DIMENSION"
+    },
+    {
+      "upstreamResourceId": "semantic_model.sample.returns",
+      "downstreamResourceId": "metric.sample.net",
+      "kind": "METRIC_DATASET"
+    },
+    {
+      "upstreamResourceId": "semantic_model.sample.returns",
+      "downstreamResourceId": "metric.sample.returns",
+      "kind": "DBT_DEPENDS_ON"
+    },
+    {
+      "upstreamResourceId": "semantic_model.sample.returns",
+      "downstreamResourceId": "metric.sample.returns",
+      "kind": "METRIC_DATASET"
+    },
+    {
+      "upstreamResourceId": "semantic_model.sample.returns",
+      "downstreamResourceId": "semantic_model.sample.returns.dimension.region",
+      "kind": "SEMANTIC_DIMENSION"
+    }
+  ],
+  "relationBindings": [
+    {
+      "nativeId": "model.sample.orders",
+      "relation": {
+        "database": "db",
+        "schema": "s",
+        "identifier": "orders"
+      },
+      "creatorRunId": "00000000-0000-0000-0000-000000000001",
+      "mode": "BUILT",
+      "definitionDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "verifiedAt": "2026-09-30T00:00:00Z"
+    },
+    {
+      "nativeId": "model.sample.returns",
+      "relation": {
+        "database": "db",
+        "schema": "s",
+        "identifier": "returns"
+      },
+      "creatorRunId": "00000000-0000-0000-0000-000000000001",
+      "mode": "BUILT",
+      "definitionDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "verifiedAt": "2026-09-30T00:00:00Z"
+    }
+  ]
+}

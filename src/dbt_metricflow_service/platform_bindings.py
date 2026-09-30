@@ -24,6 +24,52 @@ RESOURCE_PATHS = {
 }
 GIT_OPTIONS = ("-c", "protocol.ext.allow=never", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false")
 MAX_TREE_BYTES = 8 * 1024 * 1024
+GIT_INIT = "init"
+GIT_BARE = "--bare"
+GIT_FETCH = "fetch"
+GIT_MAIN = "refs/heads/main"
+GIT_HEAD = "FETCH_HEAD"
+GIT_REV_PARSE = "rev-parse"
+GIT_VERIFY = "--verify"
+GIT_NO_TAGS = "--no-tags"
+GIT_SEPARATOR = "--"
+GIT_TREE = "ls-tree"
+GIT_RECURSIVE = "-r"
+GIT_ZERO = "-z"
+GIT_BLOB = "blob"
+GIT_MODES = frozenset({"100644", "100755"})
+GIT_CACHE_PREFIX = "observe-"
+UTF8 = "utf-8"
+ROOT_PATH = "."
+
+
+def observe_revision(binding: ProjectBinding, work_root: Path) -> tuple[str, str]:
+    """从服务受控分支取得 SHA 与相同的项目树摘要；实际执行仍逐文件验证。"""
+    prefix = _prefix(binding.project_subdir)
+    work_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=GIT_CACHE_PREFIX, dir=work_root) as directory:
+        cache = Path(directory)
+        _git(cache, GIT_INIT, GIT_BARE)
+        _git(cache, GIT_FETCH, GIT_NO_TAGS, GIT_SEPARATOR, binding.remote, GIT_MAIN)
+        sha = _git(cache, GIT_REV_PARSE, GIT_VERIFY, GIT_HEAD).decode().strip()
+        if not SHA_PATTERN.fullmatch(sha):
+            raise ValueError("Git 版本无效")
+        raw = _git(cache, GIT_TREE, GIT_RECURSIVE, GIT_ZERO, sha, GIT_SEPARATOR, prefix[:-1] if prefix else ROOT_PATH)
+        entries = {}
+        for entry in raw.split(b"\0"):
+            if not entry:
+                continue
+            metadata, path = entry.decode(UTF8).split("\t", 1)
+            mode, kind, blob = metadata.split()
+            if kind != GIT_BLOB or mode not in GIT_MODES or not SHA_PATTERN.fullmatch(blob):
+                raise ValueError("dbt 项目输入无效")
+            relative = path[len(prefix):]
+            if _included(relative):
+                entries[relative] = (mode, blob)
+        digest = hashlib.sha256()
+        for relative, (mode, blob) in sorted(entries.items()):
+            digest.update(relative.encode(UTF8) + b"\0" + f"{mode} {blob}".encode(UTF8) + b"\0")
+        return sha, digest.hexdigest()
 
 
 @dataclass(frozen=True, slots=True)

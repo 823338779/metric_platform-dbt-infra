@@ -1,0 +1,326 @@
+"""服务拥有发布输入与查询映射。"""
+
+import hashlib
+import json
+from uuid import uuid4
+
+from .platform_bindings import ProjectBinding, observe_revision
+from .platform_models import PlatformQueryRequest, QueryMode
+from .platform_namespace import validate_schema_name
+from .publication_models import CATALOG_SCHEMA_VERSION, PublishedQueryRequest, QueryOptionsRequest, ResourceKind
+from .storage.jobs import SQL_SELECT_FROM_RUNTIME_JOB_2, SQL_SELECT_FROM_RUNTIME_JOB_4, StoreConflict
+from .storage.publications import (
+    CATALOG_PATH,
+    SQL_ATTACH_RUN,
+    SQL_BY_KEY,
+    SQL_PROJECT_LOCK,
+    PublicationStore,
+)
+
+BUILD = "BUILD_RUN"
+SCOPE = "PUBLICATION"
+SCHEMA_PREFIX = "run_"
+SQL_PROJECTS = "SELECT project_id FROM runtime_project ORDER BY project_id"
+SQL_RELEASES = "SELECT * FROM runtime_release WHERE project_id=%s ORDER BY sequence DESC"
+UTF8 = "utf-8"
+PUBLISHED = "PUBLISHED"
+CATALOG_SEARCH_FIELDS = ("name", "displayName", "description")
+QUERY_KIND = "METRIC_QUERY"
+QUERY_SCOPE = "PUBLISHED_QUERY:"
+JSON_MODE = "json"
+DESCENDING = "DESC"
+GRAIN_LABELS = {"second": "秒", "minute": "分钟", "hour": "小时", "day": "日", "week": "周",
+                "month": "月", "quarter": "季度", "year": "年"}
+PATH_SEPARATOR = "__"
+DISPLAY_SEPARATOR = " → "
+SQL_QUERY_ALIAS = """SELECT target_id FROM runtime_legacy_identity
+ WHERE project_id=%s AND kind='QUERY' AND legacy_id=%s"""
+SQL_QUERY_RELEASE = "SELECT * FROM runtime_release WHERE project_id=%s AND run_id=%s AND state='PUBLISHED'"
+
+
+class InvalidPublishedArtifact(RuntimeError):
+    """封存目录发生存储或协议异常，不能归因于用户查询参数。"""
+
+
+class ReleaseGone(ValueError):
+    """历史记录仍然存在，但不能用于新的目录操作或查询。"""
+
+
+def release_descriptor(row: dict) -> dict:
+    return {"projectId": row["project_id"], "releaseId": row["release_id"], "runId": row["run_id"],
+            "artifactSetId": row["artifact_set_id"], "publicationSequence": row["sequence"],
+            "publishedAt": row["published_at"], "sourceSha": row["request_json"].get("commitSha"),
+            "buildMode": row["build_mode"], "catalogSchemaVersion": CATALOG_SCHEMA_VERSION,
+            "catalogDigest": row["catalog_digest"], "state": row["state"], "errorCode": row["error_code"],
+            "createdAt": row["created_at"]}
+
+
+def query_receipt(row: dict, project_id: str, release_id) -> dict:
+    # 重试恢复身份后仍由查询读取端获取结果，受理响应保持可轮询状态。
+    return {"queryId": row["job_id"], "projectId": project_id,
+            "releaseId": str(release_id), "state": "QUEUED"}
+
+
+class PublicationService:
+    def __init__(self, runtime):
+        # 复用运行时连接池及工具链，管理入口不启动另一个 worker。
+        self.runtime = runtime
+        self.store = PublicationStore(runtime.db)
+
+    def submit(self, project_id: str, idempotency_key: str) -> dict:
+        # 既有幂等请求返回原版本，不因远端 main 已推进而创建另一候选。
+        with self.runtime.db.transaction() as cursor:
+            cursor.execute(SQL_BY_KEY, (project_id, idempotency_key))
+            existing = cursor.fetchone()
+            if existing:
+                return existing
+        project = self.runtime.jobs.project(project_id)
+        if not project:
+            raise KeyError(project_id)
+        binding = project["binding_config"]
+        configured = ProjectBinding(project_id, binding["remote"], binding["projectSubdir"],
+                                    binding["profileBindingId"], binding.get("schemaName"))
+        sha, digest = observe_revision(configured, self.runtime.settings.temp_root)
+        request = {"projectId": project_id, "commitSha": sha, "projectDigest": digest,
+                   "profileBindingId": configured.profile_binding_id, "configVersion": project["config_version"],
+                   "toolchainVersion": self.runtime.toolchain}
+        # 候选和可领取任务同事务出现，杜绝 worker 先完成再关联发布的竞态。
+        with self.runtime.db.transaction() as cursor:
+            release = self.store.create_candidate(project_id, request, idempotency_key, _cursor=cursor)
+            if release["run_id"]:
+                return release
+            run_id = uuid4()
+            schema = (
+                validate_schema_name(configured.schema_name) if configured.schema_name else SCHEMA_PREFIX + run_id.hex
+            )
+            job = self.runtime.jobs.reserve(
+                BUILD, project_id, {**request, "binding": binding, "releaseId": release["release_id"]},
+                job_id=str(run_id), idempotency_scope=SCOPE + project_id, idempotency_key=idempotency_key,
+                config_version=project["config_version"], toolchain_version=self.runtime.toolchain,
+                schema_name=schema, profile_binding_id=configured.profile_binding_id,
+                timeout_seconds=self.runtime.settings.command_timeout_seconds,
+                expected_revision=project["revision"], _cursor=cursor,
+            )
+            cursor.execute(SQL_ATTACH_RUN, (job["job_id"], release["release_id"]))
+            return {**release, "run_id": job["job_id"]}
+
+    def projects(self) -> list[dict]:
+        with self.runtime.db.transaction() as cursor:
+            cursor.execute(SQL_PROJECTS)
+            projects = cursor.fetchall()
+        return [self.publication(row["project_id"]) for row in projects]
+
+    def publication(self, project_id: str) -> dict:
+        result = self.store.get_publication(project_id)
+        if result["activePublication"]:
+            result["activePublication"] = release_descriptor(result["activePublication"])
+        return result
+
+    def releases(self, project_id: str) -> list[dict]:
+        self.store.get_publication(project_id)
+        with self.runtime.db.transaction() as cursor:
+            cursor.execute(SQL_RELEASES, (project_id,))
+            return [release_descriptor(row) for row in cursor.fetchall()]
+
+    def release(self, project_id: str, release_id: str) -> dict:
+        return release_descriptor(self.store.get_release(project_id, release_id))
+
+    def _active_release(self, project_id: str, release_id: str) -> dict:
+        release = self.store.get_release(project_id, release_id)
+        publication = self.store.get_publication(project_id)["activePublication"]
+        if release["state"] != PUBLISHED:
+            raise KeyError(release_id)
+        if not publication or publication["release_id"] != release["release_id"]:
+            raise ReleaseGone("发布版本已替代")
+        return release
+
+    def _catalog(self, project_id: str, release_id: str) -> tuple[dict, dict]:
+        release = self._active_release(project_id, release_id)
+        # 文件读取校验摘要；不在请求过程中重新解析原生 manifest 或建立投影。
+        try:
+            raw = self.runtime.artifacts.read_file(release["artifact_set_id"], CATALOG_PATH)
+            if hashlib.sha256(raw).hexdigest() != release["catalog_digest"]:
+                raise ValueError("发布目录摘要不匹配")
+            return release, json.loads(raw)
+        except (ValueError, KeyError) as error:
+            raise InvalidPublishedArtifact("无法读取已发布目录") from error
+
+    def catalog(self, project_id: str, release_id: str, q: str = "", kind: str | None = None,
+                page: int = 1, size: int = 50) -> dict:
+        _, catalog = self._catalog(project_id, release_id)
+        needle = q.casefold()
+        resources = [item for item in catalog["resources"] if (kind is None or item["kind"] == kind)
+                     and (not needle or any(needle in (item.get(field) or "").casefold()
+                                            for field in CATALOG_SEARCH_FIELDS))]
+        resources.sort(key=lambda item: item["resourceId"])
+        return {"releaseId": str(release_id), "page": page, "size": size, "total": len(resources),
+                "resources": resources[(page - 1) * size:page * size]}
+
+    def resource(self, project_id: str, release_id: str, resource_id: str, view: str | None = None) -> dict:
+        release, catalog = self._catalog(project_id, release_id)
+        resource = next((item for item in catalog["resources"] if item["resourceId"] == resource_id), None)
+        if resource is None:
+            raise KeyError(resource_id)
+        envelope = {"releaseId": str(release_id), "resourceId": resource_id}
+        if view == "lineage":
+            return {**envelope, "dependencies": [edge for edge in catalog["relations"]
+                                                 if resource_id in (edge["upstreamResourceId"],
+                                                                    edge["downstreamResourceId"])]}
+        if view == "native-details":
+            return {**envelope, "nativeDetails": resource["nativeDetails"]}
+        if view == "source":
+            path = resource.get("sourcePath")
+            if not path:
+                raise KeyError(resource_id)
+            run = self.runtime.jobs.get(release["run_id"])
+            content = self.runtime.artifacts.read_file(run["input_set_id"], path).decode(UTF8)
+            return {**envelope, "path": path, "content": content}
+        return {**envelope, **resource}
+
+    def _options(self, project_id: str, request: QueryOptionsRequest) -> tuple[dict, dict, dict]:
+        release, catalog = self._catalog(project_id, str(request.release_id))
+        indexed = {item["resourceId"]: item for item in catalog["resources"]}
+        selected = sorted(set(request.metric_resource_ids))
+        if any(key not in indexed or indexed[key]["kind"] != ResourceKind.METRIC
+               or "QUERY" not in indexed[key]["capabilities"] for key in selected):
+            raise ValueError("指标资源不可查询")
+        native = self.runtime.options(release["run_id"], tuple(indexed[key]["name"] for key in selected))
+        output, mapping = [], {}
+        # 原生路径只保存在服务映射内；每个 join 路径保持独立选项身份。
+        for entry in [*native["dimensions"], *native["timeDimensions"]]:
+            token = entry["token"]
+            canonical = json.dumps([str(request.release_id), selected, token], separators=(",", ":"))
+            option_id = hashlib.sha256(canonical.encode(UTF8)).hexdigest()
+            if option_id in mapping:
+                continue
+            grain = entry.get("granularity")
+            candidates = [item for item in indexed.values() if item["kind"] == ResourceKind.DIMENSION
+                          and item["name"] == entry.get("name")]
+            resource_id = candidates[0]["resourceId"] if len(candidates) == 1 and not grain else None
+            label = candidates[0]["displayName"] if resource_id else entry.get("name", token)
+            if grain:
+                label = "指标时间（" + GRAIN_LABELS.get(grain, grain) + "）"
+            elif PATH_SEPARATOR in token:
+                # 可见路径用于区分多种 join 选项；执行仍只接收不可伪造的选项映射。
+                label += "（" + DISPLAY_SEPARATOR.join(token.split(PATH_SEPARATOR)[:-1]) + "）"
+            output.append({"optionId": option_id, "resourceId": resource_id,
+                           "displayName": label,
+                           "granularities": [grain] if grain else [],
+                           "operators": [] if grain else native["allowedFilters"]})
+            mapping[option_id] = token
+        response = {"releaseId": str(request.release_id), "metricResourceIds": selected, "options": output}
+        return release, response, mapping
+
+    def query_options(self, project_id: str, request: QueryOptionsRequest) -> dict:
+        return self._options(project_id, request)[1]
+
+    def submit_query(self, project_id: str, request: PublishedQueryRequest, identity_scope: str) -> dict:
+        # 先恢复同键已受理结果，确保发布切换后重试不会错误创建新查询。
+        public = request.model_dump(mode=JSON_MODE, by_alias=True)
+        public["metricResourceIds"] = sorted(set(public["metricResourceIds"]))
+        # 模式专属参数必须显式拒绝，不能接受后在引擎层静默忽略。
+        if (request.mode != QueryMode.PREVIEW and request.dataset_resource_id
+                or request.mode != QueryMode.DIMENSION_VALUES and request.dimension_option_id):
+            raise ValueError("查询模式与资源参数不匹配")
+        scope = QUERY_SCOPE + json.dumps([project_id, identity_scope], separators=(",", ":"))
+
+        def recover(prior):
+            if prior["request_json"].get("publicationRequest") != public:
+                raise StoreConflict("查询幂等键已用于不同输入")
+            return query_receipt(prior, project_id, request.release_id)
+
+        prior = self.runtime.jobs.by_key(scope, request.idempotency_key)
+        if prior:
+            return recover(prior)
+        try:
+            release, catalog = self._catalog(project_id, str(request.release_id))
+            options, mapping = {"options": []}, {}
+            if request.mode != QueryMode.PREVIEW:
+                _, options, mapping = self._options(project_id, QueryOptionsRequest(
+                    release_id=request.release_id, metric_resource_ids=request.metric_resource_ids))
+        except ReleaseGone:
+            # 首次查键与版本读取之间可能发生同键受理和发布切换，再恢复一次已提交结果。
+            prior = self.runtime.jobs.by_key(scope, request.idempotency_key)
+            if prior:
+                return recover(prior)
+            raise
+        indexed = {item["resourceId"]: item for item in catalog["resources"]}
+        if request.mode == QueryMode.PREVIEW:
+            resource = indexed.get(request.dataset_resource_id)
+            if (not resource or "PREVIEW" not in resource["capabilities"] or request.metric_resource_ids
+                    or request.group_by or request.filters or request.order_by or request.dimension_option_id
+                    or request.start_time or request.end_time):
+                raise ValueError("资源不可预览或包含非法预览参数")
+        option_index = {item["optionId"]: item for item in options["options"]}
+        groups = []
+        for selection in request.group_by:
+            option = option_index.get(selection.option_id)
+            if not option or selection.grain and selection.grain not in option["granularities"]:
+                raise ValueError("维度选项或粒度无效")
+            groups.append(mapping[selection.option_id])
+        filters = []
+        for selection in request.filters:
+            option = option_index.get(selection.option_id)
+            if not option or selection.operator not in option["operators"]:
+                raise ValueError("筛选选项无效")
+            filters.append({"field": mapping[selection.option_id], "operator": selection.operator,
+                            "value": selection.value})
+        if request.mode == QueryMode.DIMENSION_VALUES and request.dimension_option_id not in mapping:
+            raise ValueError("维度值查询缺少合法选项")
+        order_fields = {key: indexed[key]["name"] for key in public["metricResourceIds"]}
+        order_fields.update({item.option_id: mapping[item.option_id] for item in request.group_by})
+        if any(item.field_id not in order_fields for item in request.order_by):
+            raise ValueError("排序字段未被选择")
+        engine = PlatformQueryRequest(
+            run_id=release["run_id"], idempotency_key=request.idempotency_key, mode=request.mode,
+            metrics=[indexed[key]["name"] for key in public["metricResourceIds"]], group_by=groups, filters=filters,
+            start_time=request.start_time, end_time=request.end_time, limit=request.limit,
+            order_by=[("-" if item.direction == DESCENDING else "") + order_fields[item.field_id]
+                      for item in request.order_by], dataset_resource_id=request.dataset_resource_id,
+            dimension=mapping.get(request.dimension_option_id),
+        )
+        if engine.start_time and engine.end_time and engine.start_time > engine.end_time:
+            raise ValueError("日期范围无效")
+        # 与发布共用项目行锁；parent 先锁保持现有 JobStore 与清理的锁顺序。
+        with self.runtime.db.transaction() as cursor:
+            cursor.execute(SQL_SELECT_FROM_RUNTIME_JOB_4, (release["run_id"],))
+            parent = cursor.fetchone()
+            cursor.execute(SQL_PROJECT_LOCK, (project_id,))
+            project = cursor.fetchone()
+            # 等锁期间另一请求可能已受理同一幂等键；先恢复它再判断版本。
+            cursor.execute(SQL_SELECT_FROM_RUNTIME_JOB_2, (scope, request.idempotency_key))
+            prior = cursor.fetchone()
+            if prior:
+                return recover(prior)
+            if project["active_published_release_id"] != release["release_id"]:
+                raise ReleaseGone("发布版本已替代")
+            row = self.runtime.jobs.reserve(
+                QUERY_KIND, project_id, {"publicationRequest": public,
+                                         "engineRequest": engine.model_dump(mode=JSON_MODE, by_alias=True)},
+                idempotency_scope=scope, idempotency_key=request.idempotency_key,
+                parent_run_id=parent["job_id"], input_set_id=parent["output_set_id"],
+                config_version=parent["config_version"], toolchain_version=parent["toolchain_version"],
+                profile_binding_id=parent["profile_binding_id"], schema_name=parent["schema_name"],
+                timeout_seconds=self.runtime.settings.command_timeout_seconds, _cursor=cursor,
+            )
+        return query_receipt(row, project_id, request.release_id)
+
+    def get_query(self, project_id: str, query_id: str) -> dict:
+        with self.runtime.db.transaction() as cursor:
+            cursor.execute(SQL_QUERY_ALIAS, (project_id, query_id))
+            alias = cursor.fetchone()
+        target_id = alias["target_id"] if alias else query_id
+        row = self.runtime.jobs.get(target_id)
+        if not row or row["project_id"] != project_id or row["kind"] != QUERY_KIND:
+            raise KeyError(query_id)
+        # 已受理查询只按其固定 run 读取，不重新检查当前活动指针。
+        with self.runtime.db.transaction() as cursor:
+            cursor.execute(SQL_QUERY_RELEASE, (project_id, row["parent_run_id"]))
+            release = cursor.fetchone()
+        if not release or not alias and not row["request_json"].get("publicationRequest"):
+            raise KeyError(query_id)
+        public = row["request_json"].get("publicationRequest") or {}
+        engine = row["request_json"].get("engineRequest", row["request_json"])
+        return {**self.runtime.get_query(target_id), "queryId": query_id, "projectId": project_id,
+                "releaseId": public.get("releaseId", release["release_id"]), "mode": engine.get("mode"),
+                "targetCommitSha": release["request_json"].get("commitSha")}

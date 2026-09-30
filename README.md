@@ -19,6 +19,47 @@
 
 MetricFlow 上游分别发布 core `0.213.0` 和 CLI `0.15.0`。fork 的组合提交 `05551f73` 以这两个稳定发布为基线，仅将 core 的版本元数据恢复为 `0.213.0`，使同一源码树可构建两个包；主仓固定该提交，不随 fork 分支自动移动。
 
+## 已发布目录与统一发布
+
+PostgreSQL 模式下，dbt-service 是发布权威。`runtime_release` 保存候选和发布历史，`runtime_project.active_published_release_id` 是唯一活动指针。生成 `target/published_catalog.json`、原生产物及完整验证证明之后，封存产物、记录发布和切换指针在同一事务提交。指标平台直接代理 `/v2/projects`，不存在发布后的平台导入步骤。平台断网会影响读取可用性，但不会改变已提交的发布状态。
+
+升级时先备份服务数据库，再由部署管理执行迁移；普通服务启动不自动迁移。项目绑定沿用 `register-bindings`。启动服务 worker 后，用管理入口提交发布：
+
+```powershell
+uv run --frozen dbt-service-admin migrate
+uv run --frozen dbt-service-admin register-bindings bindings.json
+uv run --frozen dbt-service-admin publish --project-id sales --idempotency-key sales-release-001
+```
+
+幂等键代表一次发布请求，重试沿用该键；新的发布使用新键。命令返回候选身份，最终状态通过 `GET /v2/projects/sales/releases` 查看。候选固定 Git `main` 的 SHA、项目摘要、配置版本和工具链；配置或 profile 中影响编译/目标关系的参数变化时，必须同步更新绑定的 `configVersion`。
+
+发布自动选择 `FULL_BUILD`、`SEMANTIC_ONLY` 或 `SELECTIVE_BUILD`。所有模式都发布完整目录；仅语义变更复用已验证物理对象，SQL 变更重建受影响下游，宏、source、配置变化或不能证明兼容时全量构建。模板使用 `env_var` 时保守全构建，不持久化环境变量值。首版不执行行级 incremental，不自动清理发布对象。
+
+构建只支持受控 SQL 项目：table、view、ephemeral 和不写失败表的测试；不支持 seed、snapshot、Python 模型、自定义物化、执行钩子、SQL header 或宏中的数据库命令。项目/依赖宏仅支持表达式模板，宏名称限定为字母数字且不能覆盖内置函数；动态调用、赋值、导入和不受支持的 Jinja 扩展会在 dbt 解析前被拒绝。编译 SQL 必须是单条只读取数语句，不能包含写入 CTE 或多语句。数据库函数仍属于受信任的部署能力，不能给项目使用具有写入副作用的 UDF。这是受控项目执行约束，不是运行任意不可信 dbt 项目的沙箱。
+
+配置了 source freshness 门槛的源每次发布都必须通过 freshness 检查。所有发布模型/测试均需完整执行证明，MetricFlow 查询探测和最终物理绑定验证通过才能发布。复用绑定直接引用创建该物理对象的 run；已发布或被引用的 run 受到 cleanup/GC 保护，首版保留全部发布历史，需为持续增长的存储预留容量。
+
+v2 目录和新查询只接受活动版本；历史版本返回 410，发布记录与已受理查询仍可读取。查询请求使用资源 ID、服务返回的选项 ID 和幂等键。服务在项目锁下固定查询 run，切换版本后同键同输入仍返回原查询身份，新键不能查询已替代版本。`/v2/projects/{projectId}/compatibility/*` 仅供平台 v1 兼容转接，名称转换仍在服务内完成。
+
+迁移旧身份只允许映射到已经完成本服务完整发布验证的同一 run：
+
+```powershell
+uv run --frozen dbt-service-admin import-publication --file publication-identities.json --dry-run
+uv run --frozen dbt-service-admin import-publication --file publication-identities.json
+```
+
+文件包含 `projectId`、`legacyReleaseId`、`runId` 和 `queries: [{legacyQueryId, queryId}]`。dry-run 不写库，重复实际导入幂等，冲突和跨项目映射拒绝。未具备服务发布证明的旧 READY run 不会被伪装为已发布；此时先完成服务新发布，旧平台发布/查询记录保留只读历史，不把旧 ID 映射到内容不同的新版本。
+
+真实发布验收同时需要独立 `SERVICE_TEST_DATABASE_URL`、`PLATFORM_TEST_POSTGRES=1` 和本文的 `PLATFORM_TEST_PG*` 参数：
+
+```powershell
+uv run --frozen pytest -q tests/integration/test_publication_proxy_flow.py
+uv run --frozen pytest -q
+uv run --frozen ruff check src tests
+```
+
+该集成场景验证 PostgreSQL adapter；不能将它视为 StarRocks 物理隔离验收。生产切换前应在目标 adapter、权限和受控项目模板上执行同等验收。
+
 ## 目录和配置
 
 服务和 `dbt-service-admin` 默认读取 `config/service.yaml`，其中集中维护全部服务参数，包括监听地址、端口、存储连接、目录、并发、租约和产物大小限制。配置项名称与环境变量一致，**环境变量 > 配置文件 > 代码默认值**；可通过 `SERVICE_CONFIG_FILE` 指定其他配置文件。指定文件不存在、YAML 格式错误或包含未知配置项时，启动会报错。

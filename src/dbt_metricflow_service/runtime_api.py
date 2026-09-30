@@ -44,6 +44,10 @@ def create_runtime_app(settings):
     app.state.runtime = runtime
     app.state.settings = settings
     register_exception_handlers(app)
+    # v2 直接公开服务发布目录；不依赖平台导入确认。
+    from dbt_metricflow_service.publication_api import create_publication_router
+
+    app.include_router(create_publication_router(runtime))
 
     # 错误响应不输出数据库驱动异常正文或连接凭据。
     async def unavailable(_request, _error):

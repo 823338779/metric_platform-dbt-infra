@@ -32,6 +32,8 @@ REGISTER_BINDINGS = "register-bindings"
 IMPORT_LEGACY = "import-legacy"
 RECONCILE = "reconcile-attempt"
 GC = "gc"
+PUBLISH = "publish"
+IMPORT_PUBLICATION = "import-publication"
 UTF8 = "utf-8"
 BUILD = "BUILD_RUN"
 QUERY = "METRIC_QUERY"
@@ -308,6 +310,12 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="PostgreSQL 运行时管理及旧记录只读迁移")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser(MIGRATE)
+    publish = commands.add_parser(PUBLISH)
+    publish.add_argument("--project-id", required=True)
+    publish.add_argument("--idempotency-key", required=True)
+    publication_import = commands.add_parser(IMPORT_PUBLICATION)
+    publication_import.add_argument("--file", type=Path, required=True)
+    publication_import.add_argument("--dry-run", action="store_true")
     project = commands.add_parser(IMPORT_PROJECT)
     project.add_argument("project_id")
     project.add_argument("directory", type=Path)
@@ -333,7 +341,22 @@ def main(argv: list[str] | None = None) -> None:
             result = {"migrated": True}
         else:
             db.check()
-            if args.command == IMPORT_PROJECT:
+            if args.command == IMPORT_PUBLICATION:
+                from dbt_metricflow_service.publication_migration import import_publication
+
+                result = import_publication(db, _artifacts(db, settings),
+                                            _json(args.file, settings.max_artifact_file_bytes), dry_run=args.dry_run)
+            elif args.command == PUBLISH:
+                # 管理入口只受理服务绑定，不启动 worker、不读取平台数据库。
+                from types import SimpleNamespace
+
+                from dbt_metricflow_service.publication import PublicationService
+
+                runtime = SimpleNamespace(db=db, jobs=JobStore(db), settings=settings,
+                                          toolchain=settings.toolchain_version or current_toolchain())
+                release = PublicationService(runtime).submit(args.project_id, args.idempotency_key)
+                result = {"releaseId": release["release_id"], "runId": release["run_id"], "state": release["state"]}
+            elif args.command == IMPORT_PROJECT:
                 result = import_project(db, settings, args.project_id, args.directory)
             elif args.command == REGISTER_BINDINGS:
                 result = register_bindings(db, settings, args.path)

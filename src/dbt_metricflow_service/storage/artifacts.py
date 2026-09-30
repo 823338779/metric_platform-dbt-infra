@@ -39,7 +39,11 @@ EXCLUDED_PARTS = frozenset({
     ".git", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache", "logs", "profiles.yml",
     "partial_parse.msgpack", "request.json", "project-path.json", ".env",
 })
-TARGET_FILES = frozenset({"manifest.json", "semantic_manifest.json", "run_results.json", "catalog.json"})
+TARGET_FILES = frozenset({
+    "manifest.json", "semantic_manifest.json", "run_results.json", "catalog.json",
+    "published_catalog.json", "publication_evidence.json", "publication_state.json",
+    "sources.json",
+})
 TARGET_SUBDIRECTORIES = frozenset({"compiled", "run"})
 SQL_INSERT_SET = """
 INSERT INTO runtime_artifact_set
@@ -65,6 +69,7 @@ SQL_GC_ELIGIBLE = """
 SELECT NOT EXISTS(SELECT 1 FROM runtime_job WHERE input_set_id=%s OR output_set_id=%s)
  AND NOT EXISTS(SELECT 1 FROM runtime_project WHERE source_set_id=%s OR current_output_set_id=%s)
  AND NOT EXISTS(SELECT 1 FROM runtime_artifact_set WHERE source_set_id=%s)
+ AND NOT EXISTS(SELECT 1 FROM runtime_release WHERE artifact_set_id=%s)
  AND NOT EXISTS(SELECT 1 FROM runtime_attempt a JOIN runtime_artifact_set s
    ON a.attempt_id=s.producer_attempt_id WHERE s.set_id=%s
    AND a.state IN ('EXECUTING','EXPIRED_UNCONFIRMED')) AS eligible
@@ -322,7 +327,7 @@ class ArtifactStore:
                 cursor.execute(SQL_GC_LOCK, (set_id,))
                 if cursor.fetchone() is None:
                     return False
-                cursor.execute(SQL_GC_ELIGIBLE, (set_id,) * 6)
+                cursor.execute(SQL_GC_ELIGIBLE, (set_id,) * 7)
                 if not cursor.fetchone()["eligible"]:
                     return False
                 cursor.execute(SQL_DELETING, (set_id,))
