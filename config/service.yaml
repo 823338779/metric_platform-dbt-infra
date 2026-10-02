@@ -11,10 +11,30 @@ SERVICE_PORT: 8000
 # 连接直接配置在此；环境变量 SERVICE_DATABASE_URL 仍可覆盖本文件。
 SERVICE_DATABASE_URL: "host=localhost port=5432 user=data_agent password=data_agent_local_dev dbname=dbt_service connect_timeout=5"
 
-# dbt 项目目录、profiles.yml 所在目录及派生产物根目录。
+# dbt 项目目录及派生产物根目录；PostgreSQL 模式的项目源码保存在服务数据库中。
 PROJECTS_ROOT: "../../tmp/metric-debug/projects"
-DBT_PROFILES_DIR: "../../tmp/metric-debug/profiles"
 JOB_ARTIFACTS_ROOT: "../../tmp/metric-debug/artifacts"
+
+# dbt 数据仓库连接也在本文件维护；启动时自动生成 dbt CLI 要求的 profiles.yml。
+# 生成文件位于 SERVICE_TEMP_ROOT 下，无需手动维护；环境变量 DBT_PROFILES_DIR 可切换到外部配置。
+DBT_PROFILES:
+  # 与项目 dbt_project.yml 的 profile 及受控绑定保持一致。
+  ecommerce_metrics:
+    target: starrocks
+    outputs:
+      starrocks:
+        # 默认连接根工作区 compose 的本机 StarRocks，部署时可通过环境变量覆盖。
+        type: starrocks
+        host: "{{ env_var('DBT_STARROCKS_HOST', '127.0.0.1') }}"
+        port: "{{ env_var('DBT_STARROCKS_PORT', '9030') | int }}"
+        username: "{{ env_var('DBT_STARROCKS_USER', 'root') }}"
+        password: "{{ env_var('DBT_ENV_SECRET_STARROCKS_PASSWORD', '') }}"
+        catalog: default_catalog
+        # 平台任务传入受控 schema；手工检查默认使用当前绑定的 dbt_ecom。
+        schema: "{{ env_var('DBT_PLATFORM_SCHEMA', 'dbt_ecom') }}"
+        threads: 1
+        # StarRocks 适配器要求字符串值。
+        use_pure: 'true'
 
 # 兼容模式的项目绑定 JSON 文件和服务独占的 SQLite 任务索引。
 PLATFORM_BINDINGS_FILE: "../../tmp/metric-debug/bindings.json"

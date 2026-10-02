@@ -37,6 +37,9 @@ TEST = "test"
 COMPILE = "compile"
 SOURCE = "source"
 FRESHNESS = "freshness"
+FRESHNESS_THRESHOLDS = ("warn_after", "error_after")
+COUNT = "count"
+PERIOD = "period"
 SOURCES_FILE = "sources.json"
 STORE_FAILURES = "store_failures"
 STORE_FAILURES_AS = "store_failures_as"
@@ -62,10 +65,14 @@ MAPPING_TEMPLATE = """{% macro generate_alias_name(custom_alias_name=none, node=
     {%- endif -%}
 {%- endmacro %}
 """
+# dbt 测试默认配置 dbt_test__audit，即使 store_failures=false 也会传入此值。
+# 测试统一解析到受控 schema；validate_bound_manifest 会在执行前拒绝写入失败结果表。
 SCHEMA_TEMPLATE = """{% macro generate_schema_name(custom_schema_name=none, node=none) -%}
     {%- set bindings = BINDINGS -%}
     {%- if node.unique_id in bindings -%}
         {{ return(bindings[node.unique_id]['schema']) }}
+    {%- elif node.resource_type == 'test' -%}
+        {{ return(target.schema) }}
     {%- elif custom_schema_name is not none -%}
         {{ exceptions.raise_compiler_error('Custom schema is not supported for publication') }}
     {%- else -%}
@@ -108,7 +115,9 @@ def validate_bound_manifest(target: Path, schema: str, prefix: str, bindings: li
             raise ValueError("发布构建禁止执行 SQL header")
         if node.get("resource_type") not in (MODEL, TEST):
             raise ValueError("发布暂不支持 seed、snapshot 或自定义执行节点")
-        if node.get("resource_type") == TEST and (config.get(STORE_FAILURES) or config.get(STORE_FAILURES_AS)):
+        # dbt 将显式 store_failures=false 归一化为 ephemeral；该值代表不持久化，不能按非空字符串拒绝。
+        if node.get("resource_type") == TEST and (
+                config.get(STORE_FAILURES) or config.get(STORE_FAILURES_AS) not in (None, EPHEMERAL)):
             raise ValueError("发布测试禁止写入失败结果表")
         if node.get("resource_type") != MODEL:
             continue
@@ -141,6 +150,14 @@ def validate_readonly_sql(sql: str, dialect: str) -> None:
     if (len(statements) != 1 or not isinstance(statements[0], exp.Query)
             or any(isinstance(node, (exp.DDL, exp.DML, exp.Command, exp.Into)) for node in statements[0].walk())):
         raise ValueError("发布 SQL 必须为单条只读查询")
+
+
+def requires_source_freshness(node: dict) -> bool:
+    """只对有效阈值要求 freshness 证明，兼容 dbt 为未配置阈值生成的空对象。"""
+    freshness = node.get(FRESHNESS) or {}
+    # count=0 是合法阈值，因此不能使用布尔判断；count/period 都存在才构成可执行规则。
+    return any(threshold.get(COUNT) is not None and threshold.get(PERIOD) is not None
+               for key in FRESHNESS_THRESHOLDS if (threshold := freshness.get(key)))
 
 
 async def execute_publication(executor, job, runner, attempt: Path, project: Path):
@@ -218,8 +235,7 @@ async def execute_publication(executor, job, runner, attempt: Path, project: Pat
     # 新版 dbt 把 freshness/loaded_at_query 放入 config；保留旧产物顶层字段兼容。
     configured_sources = {key: {**node, **node.get("config", {})}
                           for key, node in compiled.get("sources", {}).items()}
-    fresh_sources = {key for key, node in configured_sources.items()
-                     if node.get(FRESHNESS) and any(node[FRESHNESS].get(key) for key in ("warn_after", "error_after"))}
+    fresh_sources = {key for key, node in configured_sources.items() if requires_source_freshness(node)}
     for node in configured_sources.values():
         if node.get("loaded_at_query"):
             validate_readonly_sql(node["loaded_at_query"], dialect)

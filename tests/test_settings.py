@@ -4,10 +4,23 @@ import logging
 from pathlib import Path
 
 import pytest
+import yaml
 
 from dbt_metricflow_service.settings import Settings
 
 logger = logging.getLogger(__name__)
+
+# 内联 profile 保留 dbt 模板，加载服务配置时不展开连接密码或任务 schema。
+INLINE_PROFILES = {
+    "ecommerce_metrics": {
+        "target": "starrocks",
+        "outputs": {"starrocks": {
+            "type": "starrocks", "host": "127.0.0.1", "port": 9030,
+            "schema": "{{ env_var('DBT_PLATFORM_SCHEMA', 'dbt_ecom') }}",
+            "password": "{{ env_var('DBT_ENV_SECRET_STARROCKS_PASSWORD', '') }}",
+        }},
+    },
+}
 
 
 def test_settings_reads_paths_and_limits(monkeypatch, tmp_path: Path) -> None:
@@ -103,3 +116,77 @@ def test_settings_rejects_invalid_file(tmp_path: Path, content: str) -> None:
 def test_settings_requires_explicit_config_file(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         Settings.from_file(tmp_path / "missing.yaml")
+
+
+def test_inline_profiles_are_generated_from_single_file(monkeypatch, tmp_path: Path) -> None:
+    # 切换工作目录也必须按服务文件位置生成，并保留后续 dbt 才展开的模板。
+    config = tmp_path / "service.yaml"
+    config.write_text(yaml.safe_dump({"SERVICE_TEMP_ROOT": "scratch", "DBT_PROFILES": INLINE_PROFILES}))
+    monkeypatch.chdir(tmp_path.parent)
+    monkeypatch.setenv("DBT_ENV_SECRET_STARROCKS_PASSWORD", "must-not-be-materialized")
+
+    settings = Settings.from_file(config)
+    generated = settings.profiles_dir / "profiles.yml"
+
+    assert generated.is_relative_to(tmp_path / "scratch")
+    assert yaml.safe_load(generated.read_text(encoding="utf-8")) == INLINE_PROFILES
+    assert "must-not-be-materialized" not in generated.read_text(encoding="utf-8")
+    assert not (tmp_path / "profiles.yml").exists()
+    timestamp = generated.stat().st_mtime_ns
+    assert Settings.from_file(config).profiles_dir == settings.profiles_dir
+    assert generated.stat().st_mtime_ns == timestamp
+
+
+def test_inline_profile_update_preserves_running_instance_file(tmp_path: Path) -> None:
+    # 配置编辑生成新快照，不改写仍在运行的任务所持有的 profile。
+    config = tmp_path / "service.yaml"
+    content = {"SERVICE_TEMP_ROOT": "scratch", "DBT_PROFILES": INLINE_PROFILES}
+    config.write_text(yaml.safe_dump(content))
+    old = Settings.from_file(config)
+    changed = yaml.safe_load(config.read_text())
+    changed["DBT_PROFILES"]["ecommerce_metrics"]["outputs"]["starrocks"]["host"] = "localhost"
+    config.write_text(yaml.safe_dump(changed))
+    new = Settings.from_file(config)
+
+    assert old.profiles_dir != new.profiles_dir
+    assert yaml.safe_load((old.profiles_dir / "profiles.yml").read_text()) == INLINE_PROFILES
+    assert yaml.safe_load((new.profiles_dir / "profiles.yml").read_text()) == changed["DBT_PROFILES"]
+
+
+def test_profiles_directory_environment_override_does_not_overwrite_external_file(monkeypatch, tmp_path):
+    # 现有部署显式指定外部目录时，不生成也不覆盖用户维护的文件。
+    external = tmp_path / "external"
+    external.mkdir()
+    original = "external-profile: unchanged\n"
+    (external / "profiles.yml").write_text(original)
+    config = tmp_path / "service.yaml"
+    config.write_text(yaml.safe_dump({"SERVICE_TEMP_ROOT": "scratch", "DBT_PROFILES": INLINE_PROFILES}))
+    monkeypatch.setenv("DBT_PROFILES_DIR", str(external))
+
+    settings = Settings.from_file(config)
+
+    assert settings.profiles_dir == external
+    assert (external / "profiles.yml").read_text() == original
+    assert not (tmp_path / "scratch").exists()
+
+
+@pytest.mark.parametrize("profiles", [
+    {}, [], "secret-marker", {"demo": None},
+    {"demo": {"target": "dev", "outputs": []}},
+    {"demo": {"target": "dev", "outputs": {"dev": {"password": "secret-marker"}}}},
+])
+def test_invalid_inline_profiles_fail_without_leaking_values(tmp_path, profiles):
+    # 缺少可用 profile 时必须拒绝启动，不能靠写空文件通过就绪检查。
+    config = tmp_path / "service.yaml"
+    config.write_text(yaml.safe_dump({"SERVICE_TEMP_ROOT": "scratch", "DBT_PROFILES": profiles}))
+    with pytest.raises(ValueError) as error:
+        Settings.from_file(config)
+    assert "secret-marker" not in str(error.value)
+    assert not (tmp_path / "scratch").exists()
+
+
+def test_inline_profiles_and_file_directory_are_rejected_as_ambiguous(tmp_path):
+    config = tmp_path / "service.yaml"
+    config.write_text(yaml.safe_dump({"DBT_PROFILES_DIR": "external", "DBT_PROFILES": INLINE_PROFILES}))
+    with pytest.raises(ValueError):
+        Settings.from_file(config)

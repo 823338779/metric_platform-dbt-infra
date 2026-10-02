@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
-from dataclasses import dataclass, field
+import tempfile
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import yaml
@@ -21,13 +23,58 @@ MAX_OUTPUT_BYTES_ENV = "MAX_OUTPUT_BYTES"
 CONFIG_FILE_ENV = "SERVICE_CONFIG_FILE"
 DEFAULT_CONFIG_FILE = Path(__file__).resolve().parents[2] / "config" / "service.yaml"
 UTF8 = "utf-8"
+INLINE_PROFILES_KEY = "DBT_PROFILES"
+PROFILES_DIR_KEY = "DBT_PROFILES_DIR"
+PROFILES_FILENAME = "profiles.yml"
+GENERATED_PROFILES_DIR = "profiles"
+PROFILE_TARGET_KEY, PROFILE_OUTPUTS_KEY, ADAPTER_TYPE_KEY = "target", "outputs", "type"
+WRITE_MODE = "wb"
 CONFIG_KEYS = frozenset({
     "SERVICE_HOST", "SERVICE_PORT", "PROJECTS_ROOT", "DBT_PROFILES_DIR", "COMMAND_TIMEOUT_SECONDS",
     "MAX_OUTPUT_BYTES", "JOB_ARTIFACTS_ROOT", "PLATFORM_BINDINGS_FILE", "PLATFORM_DB_PATH",
     "SERVICE_DATABASE_URL", "SERVICE_TEMP_ROOT", "WORKER_CONCURRENCY", "JOB_LEASE_SECONDS",
     "JOB_HEARTBEAT_SECONDS", "SERVICE_CONFIG_VERSION", "SERVICE_TOOLCHAIN_VERSION", "MAX_RESULT_BYTES",
-    "MAX_ARTIFACT_FILE_BYTES", "MAX_ARTIFACT_BYTES", "SYNCHRONOUS_WAIT_SECONDS",
+    "MAX_ARTIFACT_FILE_BYTES", "MAX_ARTIFACT_BYTES", "SYNCHRONOUS_WAIT_SECONDS", INLINE_PROFILES_KEY,
 })
+
+
+def _validate_profiles(profiles: object) -> None:
+    # 仅校验 dbt profile 必需结构；具体适配器字段仍由 dbt 校验，不输出连接内容。
+    if not isinstance(profiles, dict) or not profiles:
+        raise ValueError("DBT_PROFILES 必须是非空的 profile 映射")
+    for name, profile in profiles.items():
+        if not isinstance(name, str) or not name or not isinstance(profile, dict):
+            raise ValueError("DBT_PROFILES 的名称和 profile 结构无效")
+        target = profile.get(PROFILE_TARGET_KEY)
+        outputs = profile.get(PROFILE_OUTPUTS_KEY)
+        if not isinstance(target, str) or not target or not isinstance(outputs, dict) or not outputs:
+            raise ValueError("DBT_PROFILES 的每个 profile 必须提供 target 和非空 outputs")
+        for output_name, output in outputs.items():
+            if (not isinstance(output_name, str) or not output_name or not isinstance(output, dict)
+                    or not isinstance(output.get(ADAPTER_TYPE_KEY), str) or not output[ADAPTER_TYPE_KEY]):
+                raise ValueError("DBT_PROFILES 的每个 output 必须提供适配器 type")
+
+
+def _materialize_profiles(profiles: dict, temp_root: Path) -> Path:
+    # 保留 Jinja 模板，密码和任务 schema 仍由 dbt 进程从环境读取。
+    content = yaml.safe_dump(profiles, allow_unicode=True, sort_keys=True).encode(UTF8)
+    # 内容变化使用新目录，避免管理命令或另一实例改写正在执行任务的连接配置。
+    directory = temp_root / GENERATED_PROFILES_DIR / hashlib.sha256(content).hexdigest()
+    directory.mkdir(parents=True, exist_ok=True)
+    destination = directory / PROFILES_FILENAME
+    if destination.exists() and destination.read_bytes() == content:
+        return directory
+    # 同目录临时文件原子替换，防止并发加载时 dbt 读取半写入的 YAML。
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode=WRITE_MODE, dir=directory, delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(content)
+        temporary.replace(destination)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return directory
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,7 +83,7 @@ class Settings:
 
     # Root containing dbt project directories addressable by project ID.
     projects_root: Path
-    # Directory containing the mounted dbt profiles.yml file.
+    # dbt profiles.yml 所在目录，可来自部署挂载或服务配置生成的临时快照。
     profiles_dir: Path
     # Maximum wall-clock duration allowed for one CLI subprocess.
     command_timeout_seconds: int
@@ -95,7 +142,7 @@ class Settings:
     @classmethod
     def from_environment(cls, *, config_file: Path | None = None) -> Settings:
         """Build settings from environment, optionally over a YAML configuration file."""
-        # 安全读取单层配置；拒绝拼错的 key 和复合类型，不在错误中输出配置内容。
+        # 服务参数保持标量，仅 DBT_PROFILES 允许嵌套的标准 dbt profile。
         config = {}
         base_dir = Path.cwd()
         if config_file is not None:
@@ -107,8 +154,14 @@ class Settings:
                 raise ValueError("服务配置文件不是有效 YAML") from None
             if not isinstance(config, dict) or not config.keys() <= CONFIG_KEYS:
                 raise ValueError("服务配置必须是配置项映射，且不能包含未知配置项")
-            if any(value is not None and type(value) not in (str, int) for value in config.values()):
+            if any(value is not None and type(value) not in (str, int)
+                   for key, value in config.items() if key != INLINE_PROFILES_KEY):
                 raise ValueError("服务配置值只能是字符串、整数或 null")
+        profiles = config.get(INLINE_PROFILES_KEY)
+        if profiles is not None:
+            _validate_profiles(profiles)
+            if config.get(PROFILES_DIR_KEY) is not None:
+                raise ValueError("配置文件不能同时指定 DBT_PROFILES 和 DBT_PROFILES_DIR")
 
         # 环境变量具有最高优先级；文件中的 null 使用该配置项的默认值。
         def value(name: str, default: str | None = None) -> str | None:
@@ -120,7 +173,7 @@ class Settings:
             configured = Path(value(name, default))
             return (configured if name in os.environ else base_dir / configured).resolve()
 
-        return cls(
+        settings = cls(
             projects_root=path("PROJECTS_ROOT", DEFAULT_PROJECTS_ROOT),
             profiles_dir=path("DBT_PROFILES_DIR", DEFAULT_PROFILES_DIR),
             command_timeout_seconds=int(
@@ -146,3 +199,7 @@ class Settings:
             server_host=value("SERVICE_HOST", "0.0.0.0"),
             server_port=int(value("SERVICE_PORT", "8000")),
         )
+        # 显式环境变量可切换到外部 profile；仅在全部服务参数校验完成后生成文件。
+        if profiles is not None and PROFILES_DIR_KEY not in os.environ:
+            settings = replace(settings, profiles_dir=_materialize_profiles(profiles, settings.temp_root))
+        return settings

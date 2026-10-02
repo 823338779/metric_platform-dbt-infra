@@ -64,12 +64,16 @@ uv run --frozen ruff check src tests
 
 服务和 `dbt-service-admin` 默认读取 `config/service.yaml`，其中集中维护全部服务参数，包括监听地址、端口、存储连接、目录、并发、租约和产物大小限制。配置项名称与环境变量一致，**环境变量 > 配置文件 > 代码默认值**；可通过 `SERVICE_CONFIG_FILE` 指定其他配置文件。指定文件不存在、YAML 格式错误或包含未知配置项时，启动会报错。
 
-配置文件中的相对路径以配置文件所在目录为基准，环境变量中的相对路径仍以启动工作目录为基准。随仓库提供的配置沿用当前 IDEA 开发环境的 `../../tmp/metric-debug/` 路径（从 `config/` 解析）；独立部署时应编辑目录配置或指定自己的配置文件。`profiles.yml` 中的数据仓库连接仍由 dbt 管理，与服务存储连接分开。
+配置文件中的相对路径以配置文件所在目录为基准，环境变量中的相对路径仍以启动工作目录为基准。数据仓库连接统一在 `service.yaml` 的 `DBT_PROFILES` 中维护，其结构与标准 dbt profile 相同。服务和管理命令加载配置时，会在 `SERVICE_TEMP_ROOT/profiles/<内容摘要>/profiles.yml` 自动生成 dbt CLI 所需的文件；保留 Jinja 模板，由 dbt 在执行时读取环境变量。该文件是可重建的运行产物，无需手动维护。配置变化会生成新快照，不覆盖正在执行任务使用的旧文件。兼容模式目录沿用 `../../tmp/metric-debug/`，独立部署时应按实际目录调整。
+
+随仓库提供的 profile 名称为 `ecommerce_metrics`，target 为 `starrocks`，与当前项目和受控绑定一致。默认连接根工作区 compose 的本机 StarRocks；可通过 `DBT_STARROCKS_HOST`、`DBT_STARROCKS_PORT`、`DBT_STARROCKS_USER`、`DBT_ENV_SECRET_STARROCKS_PASSWORD` 覆盖连接参数。平台任务通过 `DBT_PLATFORM_SCHEMA` 指定 schema，手工检查默认使用 `dbt_ecom`。这些参数是 dbt 目标数据仓库连接，与 `SERVICE_DATABASE_URL` 的服务存储连接用途不同。修改配置后需重启服务，IDE 和中控均读取同一份 `service.yaml`。
+
+已有部署可继续只配置 `DBT_PROFILES_DIR`，使用自行维护的外部 `profiles.yml`。文件内的 `DBT_PROFILES` 和 `DBT_PROFILES_DIR` 不能同时非空；环境变量 `DBT_PROFILES_DIR` 可以覆盖内联模式，且服务不会写入该外部目录。
 
 当前 `config/service.yaml` 已直接配置本机 PostgreSQL 的 `dbt_service` 业务库，服务任务、项目绑定、构建产物和查询结果均保存到该库。数据库和业务表已初始化；后续普通启动仅检查结构，不自动建库或执行迁移。`dbt_service_test` 仅供独立测试。将 `SERVICE_DATABASE_URL` 显式改为 `null` 才会使用兼容开发模式的 SQLite 和内存任务；两种模式不共享任务历史，不应同时接收同一业务项目的请求。
 
 - `PROJECTS_ROOT`：每个一级子目录是一个 dbt 项目；dbt 会在项目内写入 `target/` 和 `logs/`。
-- `DBT_PROFILES_DIR`：包含 `profiles.yml`。
+- `DBT_PROFILES`：内联的数据仓库 profile；使用外部文件的部署可改用 `DBT_PROFILES_DIR`。
 - `JOB_ARTIFACTS_ROOT`：请求级 resources 的派生产物，由服务用户管理和清理；不要由多个服务实例共享。
 
 项目通过安全的单段标识访问，例如 `projects/sales` 对应请求字段 `"project": "sales"`。服务拒绝路径、绝对路径和逃逸项目根目录的符号链接。
@@ -116,7 +120,7 @@ git submodule status
 ```powershell
 git submodule update --init --recursive
 uv sync --frozen --all-groups --python 3.12
-# 编辑 config/service.yaml 中的目录，将 profiles.yml 和项目放入对应目录
+# 编辑 config/service.yaml 中的 DBT_PROFILES 和目录，并准备 dbt 项目
 uv run --frozen dbt-metricflow-service
 ```
 
@@ -125,11 +129,11 @@ macOS/Linux：
 ```bash
 git submodule update --init --recursive
 uv sync --frozen --all-groups --python 3.12
-# 编辑 config/service.yaml 中的目录，将 profiles.yml 和项目放入对应目录
+# 编辑 config/service.yaml 中的 DBT_PROFILES 和目录，并准备 dbt 项目
 uv run --frozen dbt-metricflow-service
 ```
 
-服务默认监听 `http://localhost:8000`，可在配置文件中修改 `SERVICE_HOST` 和 `SERVICE_PORT`。根工作区与子仓库的 IDEA 启动配置均已指定同一 `config/service.yaml`。运行 `curl http://localhost:8000/health/ready` 可检查 CLI 与目录是否就绪；首次调用前应配置实际的 `profiles.yml` 和 dbt 项目。
+服务默认监听 `http://localhost:8000`，可在配置文件中修改 `SERVICE_HOST` 和 `SERVICE_PORT`。根工作区与子仓库的 IDEA 启动配置均已指定同一 `config/service.yaml`。运行 `curl http://localhost:8000/health/ready` 可检查 CLI 与目录是否就绪；首次调用前应配置实际的数据仓库连接和 dbt 项目。
 
 指定部署配置文件（PowerShell）：
 
