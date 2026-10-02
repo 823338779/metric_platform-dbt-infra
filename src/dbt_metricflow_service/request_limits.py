@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -8,6 +9,9 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 logger = logging.getLogger(__name__)
 DEFAULT_MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024
 LIMITED_PATHS = frozenset({"/v1/dbt/jobs", "/v1/metricflow/jobs"})
+V2_WRITE_PATH = re.compile(
+    r"^/v2/projects/[^/]+/(validations|queries|query-options|query-option-jobs|compatibility/(queries|query-options))$"
+)
 
 
 class RequestBodyLimitMiddleware:
@@ -21,7 +25,7 @@ class RequestBodyLimitMiddleware:
         if (
             scope["type"] != "http"
             or scope.get("method") != "POST"
-            or scope.get("path") not in LIMITED_PATHS
+            or (scope.get("path") not in LIMITED_PATHS and not V2_WRITE_PATH.fullmatch(scope.get("path", "")))
         ):
             await self._app(scope, receive, send)
             return

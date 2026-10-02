@@ -298,13 +298,20 @@ class Runtime:
         raise RuntimeUnavailable("persistent task has not finished; retry the request")
 
     def options(self, run_id: str, metrics: tuple[str, ...]):
+        row = self.submit_options(run_id, metrics)
+        return self._wait(row["job_id"])
+
+    def submit_options(self, run_id: str, metrics: tuple[str, ...]):
+        """同步与异步入口共用受理身份；冷请求不等待 worker 完成。"""
         if not metrics:
             raise ValueError("metrics are required")
+        metrics = tuple(sorted(set(metrics)))
         key = hashlib.sha256(json.dumps([run_id, metrics]).encode()).hexdigest()
         row = self._submit_child(run_id, OPTIONS, {"mode": "OPTIONS", "metrics": list(metrics)}, key)
         if row["status"] == FAILED:
             self.jobs.requeue_options(row["job_id"])
-        return self._wait(row["job_id"])
+            row = self.jobs.get(row["job_id"])
+        return row
 
     def cleanup(self, run_id: str):
         parent = self._run(run_id)

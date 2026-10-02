@@ -388,3 +388,20 @@ uv run pytest tests/test_starrocks_e2e.py -v
 先验证目标稳定 tag 与当前 adapter 兼容。dbt fork 保留官方仓库为 upstream，从目标官方 tag 建内部维护分支。MetricFlow fork 在分别发布的 core 与 CLI 版本上创建可同时构建两个包的组合提交，并验证两个 wheel 的版本及依赖；主仓只移动对应的两个 gitlink。
 
 更新 gitlink 后，同步 `pyproject.toml` 中的精确版本，重新生成 `uv.lock`，然后运行完整测试、CLI 冒烟测试和本地 HTTP 健康检查。不得只移动 submodule 指针而保留旧锁文件，也不得直接修改 `vendor/` 内的上游源码。
+
+## Agent 协议接入（agent-dbt-v1）
+
+在既有固定项目 Git/profile 绑定上，`GET /v2/projects/{projectId}/publication` 增加协议能力、业务时区和项目子目录。agent 可直接访问本服务；现有平台同步 options 和完整 query 接口保留。
+
+- `POST /validations` / `GET /validations/{validationId}`：固定基线与 YAML 增改删的耐久定义验证。正文按 UTF-8 计算旧文件摘要，单文件 512 KiB、总计 5 MiB、最多 100 个文件。路径相对绑定 dbt 项目，只能位于其 model-paths。
+- `POST /query-option-jobs` / `GET /query-option-jobs/{optionsJobId}`：异步准备合法选项，复用原 QUERY_OPTIONS 任务与 optionId。
+- `GET /queries/{queryId}/status`：轻量轮询，不读取结果正文。
+- `GET /queries/{queryId}/results?offset=0&limit=100`：读取固定查询结果，每页最多 200 行、8 MiB，超限按整行缩小；`nextOffset` 为实际游标。
+
+上述相对路由均位于 `/v2/projects/{projectId}` 下。验证只执行 YAML、模板、deps/parse、锁定版本语义校验，不执行 build/run，也不更改活动发布指针。`SUCCEEDED + valid=false` 是定义错误，`FAILED` 是任务/基础设施失败；配置在受理后变化会拒绝该尝试，重试应新建尝试键。同键同输入恢复原任务，不同输入返回冲突。旧 main 祖先基线可验证，不要求等于最新 main。
+
+服务数据迁移增加 schema version 3；先升级服务并完成迁移，再开启 agent 的 dbt 配置。agent 与服务必须绑定相同 Git 仓库和子目录；发布继续走原管理命令。不要把 profile、仓库凭据或数据库地址交给模型。
+
+带 offset 时间按发布记录的业务时区转换，无 offset 的历史平台输入不二次转换。响应给出 `normalizedTimeRange` 和 MetricFlow 粒度对齐策略。`availableRows` 是保留行数，`resultTruncated` 表示执行截断；读完分页不意味着获取了数据库全量。
+
+协议样例和 SHA-256 清单位于 `tests/fixtures/agent_contract/`，消费端独立保存相同版本，不需要跨仓库导入。新增验证可运行 `uv run --frozen pytest -q tests/test_draft_validation_execution.py tests/test_agent_response_contract.py`；数据库测试需设置既有 `SERVICE_TEST_DATABASE_URL`，必须指向隔离测试库。

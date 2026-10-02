@@ -27,6 +27,7 @@ from dbt_metricflow_service.workspace import attempt_workspace
 
 # 任务类型与持久阶段使用固定协议值，避免执行器扩展公开队列状态。
 BUILD_RUN = "BUILD_RUN"
+DRAFT_VALIDATION = "DRAFT_VALIDATION"
 DBT_COMMAND = "DBT_COMMAND"
 MF_COMMAND = "MF_COMMAND"
 METRIC_QUERY = "METRIC_QUERY"
@@ -160,6 +161,10 @@ class RuntimeExecutor:
             try:
                 if job["kind"] == BUILD_RUN:
                     return await self._build(job, runner, attempt)
+                if job["kind"] == DRAFT_VALIDATION:
+                    from .draft_validation_execution import execute_draft_validation
+
+                    return await execute_draft_validation(self, job, runner, attempt)
                 # 构建在源码固定前失败时尚未执行任何仓库命令，无目录可还原。
                 if job["kind"] == RUN_CLEANUP and job["input_set_id"] is None:
                     return ExecutionResult({})

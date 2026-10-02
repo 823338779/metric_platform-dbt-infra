@@ -7,7 +7,15 @@ from fastapi import APIRouter, HTTPException, Query
 
 from .publication import InvalidPublishedArtifact, PublicationService, ReleaseGone
 from .publication_compatibility import legacy_selection, submit_legacy
-from .publication_models import PublishedQueryRequest, QueryOptionsRequest, ResourceKind
+from .publication_errors import PublicationError
+from .publication_models import (
+    OptionsTask,
+    PublishedQueryRequest,
+    QueryOptionsRequest,
+    QueryResultPage,
+    QueryStatus,
+    ResourceKind,
+)
 from .storage.jobs import StoreConflict
 
 PREFIX = "/v2/projects"
@@ -18,23 +26,34 @@ CATALOG = RELEASE + "/catalog"
 RESOURCE = RELEASE + "/resources/{resource_id}"
 VIEWS = ("lineage", "source", "native-details")
 QUERY_OPTIONS = "/{project_id}/query-options"
+QUERY_OPTION_JOBS = "/{project_id}/query-option-jobs"
 QUERIES = "/{project_id}/queries"
 PLATFORM_IDENTITY = "platform"
+
+
+def public_error(status, code, message, recovery, retryable=False):
+    """旧 code 不变，增量诊断使用固定文案，不复制异常正文。"""
+    return HTTPException(status, detail=PublicationError(
+        code, code, None, message, retryable, recovery, status).detail())
 
 
 async def call(function, *args):
     try:
         return await asyncio.to_thread(function, *args)
+    except PublicationError as error:
+        raise HTTPException(error.status_code, detail=error.detail()) from error
     except ReleaseGone as error:
-        raise HTTPException(410, detail={"code": "release_gone"}) from error
+        raise public_error(410, "release_gone", "发布已被替代，请重新读取目录。", "reload_catalog") from error
     except StoreConflict as error:
-        raise HTTPException(409, detail={"code": "idempotency_conflict"}) from error
+        raise public_error(409, "idempotency_conflict", "同一受理键不能用于不同输入。",
+                           "fix_query_selection") from error
     except InvalidPublishedArtifact as error:
-        raise HTTPException(503, detail={"code": "published_artifact_unavailable"}) from error
+        raise public_error(503, "published_artifact_unavailable", "发布产物暂不可用。",
+                           "retry_same_key", True) from error
     except KeyError as error:
-        raise HTTPException(404, detail={"code": "not_found"}) from error
+        raise public_error(404, "not_found", "项目、资源或任务不存在。", "reload_catalog") from error
     except ValueError as error:
-        raise HTTPException(422, detail={"code": "invalid_query_selection"}) from error
+        raise public_error(422, "invalid_query_selection", "请求参数或定义无效。", "fix_query_selection") from error
 
 
 def create_publication_router(runtime) -> APIRouter:
@@ -83,6 +102,24 @@ def create_publication_router(runtime) -> APIRouter:
     async def submit(project_id: str, request: PublishedQueryRequest):
         # 当前服务仅面向受控平台绑定；不接受客户端伪造身份作为幂等域。
         return await call(service.submit_query, project_id, request, PLATFORM_IDENTITY)
+
+    @router.post(QUERY_OPTION_JOBS, status_code=202, response_model=OptionsTask, response_model_exclude_unset=True)
+    async def submit_options(project_id: str, request: QueryOptionsRequest):
+        return await call(service.submit_options, project_id, request)
+
+    @router.get(QUERY_OPTION_JOBS + "/{options_job_id}", response_model=OptionsTask, response_model_exclude_unset=True)
+    async def get_options(project_id: str, options_job_id: UUID):
+        return await call(service.get_options, project_id, str(options_job_id))
+
+    @router.get(QUERIES + "/{query_id}/status", response_model=QueryStatus, response_model_exclude_unset=True)
+    async def query_status(project_id: str, query_id: UUID):
+        return await call(service.query_status, project_id, str(query_id))
+
+    @router.get(QUERIES + "/{query_id}/results", response_model=QueryResultPage | QueryStatus,
+                response_model_exclude_unset=True)
+    async def query_results(project_id: str, query_id: UUID, offset: int = Query(0, ge=0),
+                            limit: int = Query(100, ge=1, le=200)):
+        return await call(service.query_result_page, project_id, str(query_id), offset, limit)
 
     @router.get(QUERIES + "/{query_id}")
     async def query(project_id: str, query_id: UUID):

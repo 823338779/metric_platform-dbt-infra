@@ -193,3 +193,52 @@ class PublishedQueryRequest(Contract):
     limit: int = Field(default=1000, ge=1, le=10000)
     dataset_resource_id: str | None = None
     dimension_option_id: str | None = None
+
+
+TaskState = Literal["QUEUED", "RUNNING", "READY", "FAILED", "CANCELLED"]
+
+
+class OptionsTask(Contract):
+    """选项任务身份固定到发布，READY 后才提供合法选项。"""
+
+    options_job_id: UUID
+    release_id: UUID
+    state: TaskState
+    metric_resource_ids: list[str] | None = None
+    options: list[dict[str, Any]] | None = None
+    error_code: str | None = None
+    error: dict[str, Any] | None = None
+
+
+class QueryMetadata(Contract):
+    """查询身份及受理时冻结的时间解释，历史查询不随活动发布改变。"""
+
+    query_id: UUID
+    project_id: str
+    release_id: UUID
+    mode: QueryMode | None
+    target_commit_sha: str | None
+    business_timezone: str | None = None
+    normalized_time_range: dict[str, str | None] | None = None
+    boundary_policy: str | None = None
+
+
+class QueryStatus(QueryMetadata):
+    state: TaskState
+    result_available: bool
+    error_code: str | None = None
+    error: dict[str, Any] | None = None
+
+
+class QueryResultPage(QueryMetadata):
+    """游标只覆盖已保存结果，不能把 availableRows 解释为数据库总量。"""
+
+    state: Literal["READY"]
+    columns: list[dict[str, Any]]
+    rows: list[list[Any]]
+    offset: int
+    returned_rows: int
+    next_offset: int | None
+    available_rows: int
+    result_truncated: bool
+    sql: str | None = None

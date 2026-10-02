@@ -58,6 +58,20 @@ def test_resolve_fixed_sha_and_digest(repository: Path, tmp_path: Path) -> None:
     assert (project / "models" / "a.sql").read_text(encoding="utf-8") == "select 1 as value\n"
 
 
+def test_draft_resolves_exact_old_main_commit_without_published_digest(repository, tmp_path):
+    from dbt_metricflow_service import platform_bindings
+
+    assert hasattr(platform_bindings, "resolve_draft_revision"), "draft baseline resolver is not implemented"
+    old = git(repository, "rev-parse", "HEAD")
+    expected = digest(repository, old)
+    (repository / "models/a.sql").write_text("select 2\n", encoding="utf-8")
+    git(repository, "commit", "-am", "newer unpublished source")
+    project, actual = platform_bindings.resolve_draft_revision(
+        ProjectBinding("sample", str(repository), ".", "postgres"), old, tmp_path / "draft")
+    assert actual == expected
+    assert (project / "models/a.sql").read_text("utf-8") == "select 1 as value\n"
+
+
 def test_reject_unsafe_sha_subdir_symlink_and_digest(repository: Path, tmp_path: Path) -> None:
     sha = git(repository, "rev-parse", "HEAD")
     expected = digest(repository, sha)

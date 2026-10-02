@@ -20,6 +20,9 @@ MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_SET_BYTES = 256 * 1024 * 1024
 SOURCE = "SOURCE"
 EXECUTION = "EXECUTION"
+VALIDATION_INPUT = "VALIDATION_INPUT"
+VALIDATION_INPUT_FILE = "changes.json"
+MAX_VALIDATION_INPUT_BYTES = 8 * 1024 * 1024
 STAGING = "STAGING"
 SEALED = "SEALED"
 RAW = "raw"
@@ -250,6 +253,28 @@ class ArtifactStore:
             cursor.execute(SQL_DIGEST, (_digest(files), set_id))
             if producer_attempt_id is None:
                 self.seal(set_id, cursor)
+        return set_id
+
+    def capture_validation_input(self, project_id: str, payload: bytes, cursor) -> str:
+        """与 job 受理共用事务；专用输入不放宽普通项目快照的文件白名单。"""
+        if len(payload) > min(MAX_VALIDATION_INPUT_BYTES, self.max_file_bytes, self.max_set_bytes):
+            raise ValueError("validation input exceeds byte limit")
+        # artifact 即使被其他内部调用者提交，也必须符合公开草稿协议。
+        from dbt_metricflow_service.draft_validation_models import DraftValidationRequest
+
+        DraftValidationRequest.model_validate_json(payload)
+        set_id = str(uuid4())
+        item = {"relative_path": VALIDATION_INPUT_FILE, "raw_sha256": hashlib.sha256(payload).hexdigest(),
+                "raw_size": len(payload)}
+        cursor.execute(SQL_INSERT_SET, (
+            set_id, project_id, None, VALIDATION_INPUT, STAGING, None, None, None,
+            "1", "1", "1", _digest([item]), 1, len(payload), Json({}), Json({}), Json({}),
+        ))
+        cursor.execute(SQL_INSERT_FILE, (
+            set_id, VALIDATION_INPUT_FILE, psycopg2.Binary(payload), RAW, item["raw_sha256"],
+            len(payload), len(payload), DEFAULT_MEDIA_TYPE, False,
+        ))
+        self.seal(set_id, cursor)
         return set_id
 
     def metadata(self, set_id: str) -> dict:

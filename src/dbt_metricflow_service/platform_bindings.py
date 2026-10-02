@@ -126,9 +126,19 @@ def _included(path: str) -> bool:
 
 def resolve_revision(binding: ProjectBinding, commit_sha: str, expected_digest: str, work_root: Path) -> Path:
     """从受控 remote 读取 main 祖先的固定 Git 树，核对摘要后安全写入任务目录。"""
-
     if not SHA_PATTERN.fullmatch(commit_sha) or not DIGEST_PATTERN.fullmatch(expected_digest):
         raise ValueError("固定版本或项目摘要无效")
+    return _resolve_revision(binding, commit_sha, expected_digest, work_root)[0]
+
+
+def resolve_draft_revision(binding: ProjectBinding, commit_sha: str, work_root: Path) -> tuple[Path, str]:
+    """草稿不依赖已发布摘要，仍只能读取受控 main 祖先并执行相同树检查。"""
+    if not SHA_PATTERN.fullmatch(commit_sha):
+        raise ValueError("固定版本无效")
+    return _resolve_revision(binding, commit_sha, None, work_root)
+
+
+def _resolve_revision(binding, commit_sha, expected_digest, work_root):
     prefix = _prefix(binding.project_subdir)
     if not binding.remote or not binding.project_id or not binding.profile_binding_id:
         raise ValueError("平台项目绑定无效")
@@ -172,8 +182,12 @@ def resolve_revision(binding: ProjectBinding, commit_sha: str, expected_digest: 
         digest = hashlib.sha256()
         for relative, (mode, blob) in sorted(entries.items()):
             digest.update(relative.encode("utf-8") + b"\0" + f"{mode} {blob}".encode("utf-8") + b"\0")
-        if digest.hexdigest() != expected_digest:
+        if expected_digest is not None and digest.hexdigest() != expected_digest:
             raise ValueError("dbt 项目摘要不匹配")
+        # Git 允许跨平台不安全的路径；在任何落盘之前执行 artifact 相同边界检查。
+        from .storage.artifacts import _check_paths
+
+        _check_paths(list(entries))
         destination = Path(tempfile.mkdtemp(prefix="run-", dir=root))
         try:
             for relative, (mode, blob) in entries.items():
@@ -182,7 +196,7 @@ def resolve_revision(binding: ProjectBinding, commit_sha: str, expected_digest: 
                 target.write_bytes(_git(cache, "cat-file", "-p", blob))
                 if mode == "100755":
                     target.chmod(0o755)
-            return destination
+            return destination, digest.hexdigest()
         except Exception:
             shutil.rmtree(destination)
             raise
