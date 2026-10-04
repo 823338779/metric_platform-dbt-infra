@@ -20,6 +20,8 @@ worker 启动即核对 main 及已登记分支，随后周期扫描弥补事件�
 
 分支发布记录提供脱敏 `validationSummary`，固定版本 `/diff` 比较创建基线与该版本封存输入，超限时明确返回 `truncated`。只有当前活动版本可受理新的目录和查询请求；已受理查询与同键重试继续使用原 run，不受其他分支发布或本分支后续切换影响。
 
+分支 `/publication` 另返回当前 `configVersion` 与 `toolchainVersion`，供 Agent 核对草稿校验证据。它们描述当前服务上下文，不从历史活动发布推断；配置或工具链变化后需重新验证。旧无分支响应保持原字段。
+
 使用独立 `SERVICE_TEST_DATABASE_URL` 运行新增契约与真实 PostgreSQL 验收；真实库测试还要求 `PLATFORM_TEST_POSTGRES=1`。该集成测试在测试库创建随机 schema 和低权限临时账号，要求测试库管理员具备创建角色权限，结束时仅清理本次创建的对象。
 
 ```powershell
@@ -410,6 +412,14 @@ uv run pytest tests/test_starrocks_e2e.py -v
 ```
 
 请只使用可安全清理的专用 schema。没有显式开关或缺少连接参数时，测试报告为 `SKIPPED`，不会伪造成功结果。
+
+分支发布与查询的真实 StarRocks 回归使用本地 Git fixture 和随机数据库，不会创建 Forgejo 业务仓库。设置上述连接变量及指向独立服务测试库的 `SERVICE_TEST_DATABASE_URL` 后运行：
+
+```bash
+uv run --frozen pytest -q tests/integration/test_branch_starrocks_flow.py
+```
+
+该回归需要测试实例上可创建、授权及清理随机数据库和临时用户的管理身份；实际构建使用分开的低权限生产与开发用户。它验证 main/A/B 结果隔离、失败保留旧版、发布后生产结果、raw 保持不变及开发账号不能写 raw/生产空间。清理仅覆盖本次创建的随机对象。
 
 ## 升级上游版本
 

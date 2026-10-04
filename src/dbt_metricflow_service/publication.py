@@ -187,6 +187,9 @@ class PublicationService:
                       businessTimezone=binding.get("businessTimezone", DEFAULT_TIMEZONE))
         if self.branch_id:
             result.update(branchId=branch["branch_id"], gitRef=branch["git_ref"])
+            # Agent 必须将校验证据与当前配置比较，不能把旧发布的配置当成当前配置。
+            result.update(configVersion=branch["config_version"],
+                          toolchainVersion=getattr(self.runtime, "toolchain", None))
         if result["activePublication"]:
             result["activePublication"] = self._descriptor(result["activePublication"])
         return result
