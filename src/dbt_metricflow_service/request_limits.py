@@ -10,7 +10,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024
 LIMITED_PATHS = frozenset({"/v1/dbt/jobs", "/v1/metricflow/jobs"})
 V2_WRITE_PATH = re.compile(
-    r"^/v2/projects/[^/]+/(validations|queries|query-options|query-option-jobs|compatibility/(queries|query-options))$"
+    r"^/v2/projects/[^/]+/(branches(?::register)?|(?:branches/[^/]+/)?"
+    r"(validations|releases|queries|query-options|query-option-jobs)|compatibility/(queries|query-options))$"
 )
 
 

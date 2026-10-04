@@ -73,6 +73,7 @@ SELECT NOT EXISTS(SELECT 1 FROM runtime_job WHERE input_set_id=%s OR output_set_
  AND NOT EXISTS(SELECT 1 FROM runtime_project WHERE source_set_id=%s OR current_output_set_id=%s)
  AND NOT EXISTS(SELECT 1 FROM runtime_artifact_set WHERE source_set_id=%s)
  AND NOT EXISTS(SELECT 1 FROM runtime_release WHERE artifact_set_id=%s)
+ AND NOT EXISTS(SELECT 1 FROM runtime_branch WHERE base_input_set_id=%s)
  AND NOT EXISTS(SELECT 1 FROM runtime_attempt a JOIN runtime_artifact_set s
    ON a.attempt_id=s.producer_attempt_id WHERE s.set_id=%s
    AND a.state IN ('EXECUTING','EXPIRED_UNCONFIRMED')) AS eligible
@@ -255,14 +256,16 @@ class ArtifactStore:
                 self.seal(set_id, cursor)
         return set_id
 
-    def capture_validation_input(self, project_id: str, payload: bytes, cursor) -> str:
+    def capture_validation_input(self, project_id: str, payload: bytes, cursor, *, version: int = 1) -> str:
         """与 job 受理共用事务；专用输入不放宽普通项目快照的文件白名单。"""
         if len(payload) > min(MAX_VALIDATION_INPUT_BYTES, self.max_file_bytes, self.max_set_bytes):
             raise ValueError("validation input exceeds byte limit")
         # artifact 即使被其他内部调用者提交，也必须符合公开草稿协议。
-        from dbt_metricflow_service.draft_validation_models import DraftValidationRequest
+        from dbt_metricflow_service.draft_validation_models import BranchDraftValidationRequest, DraftValidationRequest
 
-        DraftValidationRequest.model_validate_json(payload)
+        # 受理端显式选择协议版本；旧接口不因载荷包含新字段而自动升级。
+        model = BranchDraftValidationRequest if version == 2 else DraftValidationRequest
+        model.model_validate_json(payload)
         set_id = str(uuid4())
         item = {"relative_path": VALIDATION_INPUT_FILE, "raw_sha256": hashlib.sha256(payload).hexdigest(),
                 "raw_size": len(payload)}
@@ -352,7 +355,7 @@ class ArtifactStore:
                 cursor.execute(SQL_GC_LOCK, (set_id,))
                 if cursor.fetchone() is None:
                     return False
-                cursor.execute(SQL_GC_ELIGIBLE, (set_id,) * 7)
+                cursor.execute(SQL_GC_ELIGIBLE, (set_id,) * 8)
                 if not cursor.fetchone()["eligible"]:
                     return False
                 cursor.execute(SQL_DELETING, (set_id,))

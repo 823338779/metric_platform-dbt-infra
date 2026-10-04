@@ -9,7 +9,7 @@ import time
 
 from psycopg2 import Error as DatabaseError
 
-from dbt_metricflow_service.runtime_execution import ERROR_COMMAND_FAILED, ExecutionError, RuntimeExecutor
+from dbt_metricflow_service.runtime_execution import ERROR_COMMAND_FAILED, ExecutionError, RuntimeExecutor, _thread
 
 logger = logging.getLogger(__name__)
 POLL_SECONDS = 0.25
@@ -35,6 +35,20 @@ class Worker:
     def start(self):
         self._tasks = [asyncio.create_task(self._slot()) for _ in range(self.runtime.settings.worker_concurrency)]
         self._tasks.append(asyncio.create_task(self._maintain()))
+        if self.runtime.settings.branch_events_enabled:
+            self._tasks.append(asyncio.create_task(self._sync_branches()))
+
+    async def _sync_branches(self):
+        # 使用现有 worker 生命周期，慢 Git 核对不能阻塞任务和输入的续租循环。
+        from dbt_metricflow_service.branch_sync import BranchSynchronizer
+
+        synchronizer = BranchSynchronizer(self.runtime)
+        while not self._stopping:
+            try:
+                await _thread(synchronizer.scan)
+            except (DatabaseError, RuntimeError) as error:
+                logger.warning(FAILURE_LOG, type(error).__name__)
+            await asyncio.sleep(self.runtime.settings.branch_poll_seconds)
 
     async def close(self):
         # 取消执行会先由执行器终止子进程树；数据库失联时等待租约恢复。

@@ -2,6 +2,30 @@
 
 这是一个可在本地运行的 Python HTTP 服务。它通过只读 Git submodule 携带固定版本的 dbt 与 MetricFlow 源码，使用 `uv` 安装对应 Python 包，并通过官方公开 CLI 包装能力；服务不修改上游源码，也不跨源码目录导入内部实现。服务提供结构化命令白名单、异步任务状态、项目级写互斥、超时控制、输出截断和 dbt secret 环境变量遮盖。
 
+## 分支开发与自动发布
+
+先按本文迁移命令升级数据库到 schema version 5，再重启 API 与 worker。迁移将已有生产发布和查询归入唯一 main 分支，保持原 UUID 和封存文件字节；旧无分支 API 仍固定读取生产。新分支入口为 `/v2/projects/{projectId}/branches`，目录、查询和版本接口在其下显式携带 `branchId`。
+
+部署通过 `BRANCH_SERVICE_TOKEN` 为 Agent 配置分支创建、登记、删除和显式构建凭据，HTTP 使用 `Authorization: Bearer ...`。凭据不可交给模型。`BRANCH_PREVIEW_PROFILE_BINDING_ID` 指定开发连接；未配置时拒绝创建预览分支。开发 schema 为 `dbt_dev_<branchId无连字符>`，每次运行另有独立表名前缀。部署必须保证开发账号只读原始数据、只能写受控开发空间，生产使用原绑定。项目受控绑定可配置 `gitWebUrl` 为 Forgejo 仓库网页地址，用于生成合并比较链接。
+
+`BRANCH_EVENTS_ENABLED` 默认 `false`，设为 `true` 时同时开启 webhook 和补偿扫描，必须通过部署 Secret 提供 `BRANCH_EVENT_SECRET`。`BRANCH_POLL_SECONDS` 默认 30 秒。Forgejo 配置 Push/Delete webhook 到 `/internal/git-branch-events`；服务验证原始请求体的 HMAC-SHA256 `X-Forgejo-Signature`、`X-Forgejo-Event` 和受控仓库 clone URL，只持久化核对信号后返回 202。未登记引用返回 204，不自动接管。
+
+worker 启动即核对 main 及已登记分支，随后周期扫描弥补事件遗漏。重复或乱序事件不重复创建同一输入候选；同一输入失败不会自动重试，需以新幂等键显式构建。创建/删除中断使用已持久化意图恢复。删除后同名引用需显式重新登记，得到新 `branchId`；逻辑删除不会清理已发布物理结果。关闭事件开关后停止自动核对，显式构建接口仍可使用。
+
+远端必须支持 atomic push，并允许服务维护 `refs/agent-branches/<branchId>`：分支与归属标记同时创建，标记保留用于中断恢复，不能手动复用。项目配置升级会同步开发绑定并保持分支 schema；在途旧配置候选不能发布。历史差异读取数据库中的封存基线，找不到同 SHA 的资源发布时返回 `resourceBaselineAvailable=false`，不以当前生产目录代替。
+
+删除事件必须携带 `X-Forgejo-Delivery` 或 `X-Gitea-Delivery`；同 delivery 持久去重。Forgejo 删除正文没有分支实例代次，因此首次收到的迟到删除会保守关闭当时登记的身份，可能需要显式重新登记；它不会使旧身份复活。若删除与同名重建都发生在两次扫描间且删除事件也永久丢失，单凭 Git 当前 ref 无法识别这段历史；受控部署应通过本服务删除并可靠投递 webhook。
+
+分支 `/validations` 使用 `workspaceId`、`draftRevision`、`baseCommitSha` 和 `changes` 固定草稿证据，接受 `models/` 和 `tests/` 下的 SQL/YAML。v2 使用 `dbt-changes-v2` 摘要，跨语言样例为 `tests/fixtures/agent_contract/changes-v2.json`。校验只在任务副本执行受控模板检查、dbt parse/compile、只读 SQL 检查和语义验证，不构建数据表、不推进发布。旧 YAML v1 路由和摘要不变。
+
+分支发布记录提供脱敏 `validationSummary`，固定版本 `/diff` 比较创建基线与该版本封存输入，超限时明确返回 `truncated`。只有当前活动版本可受理新的目录和查询请求；已受理查询与同键重试继续使用原 run，不受其他分支发布或本分支后续切换影响。
+
+使用独立 `SERVICE_TEST_DATABASE_URL` 运行新增契约与真实 PostgreSQL 验收；真实库测试还要求 `PLATFORM_TEST_POSTGRES=1`。该集成测试在测试库创建随机 schema 和低权限临时账号，要求测试库管理员具备创建角色权限，结束时仅清理本次创建的对象。
+
+```powershell
+uv run --frozen pytest -q tests/test_branch_draft_validation.py tests/integration/test_branch_publication_flow.py
+```
+
 ## 版本基线
 
 - Python `3.11` 至 `3.14`；本地推荐 Python `3.12`

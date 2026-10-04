@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from psycopg2.extras import Json
 
+from .branches import BranchStore
 from .postgres import Database
 
 # SQL 统一作为静态常量，数据全部由绑定参数传入。
@@ -33,7 +34,11 @@ SQL_UPDATE_RUNTIME_PROJECT_SET_2 = (
     "ASE WHEN %s THEN NULL ELSE current_output_set_id END,revision=revision+1 WHERE project_id=%s "
     "RETURNING *"
 )
-SQL_SELECT_FROM_RUNTIME_PROJECT_2 = "SELECT * FROM runtime_project WHERE project_id=%s"
+SQL_SELECT_FROM_RUNTIME_PROJECT_2 = """SELECT p.*,
+ COALESCE(b.publication_sequence,0) AS publication_sequence,
+ b.active_release_id AS active_published_release_id
+ FROM runtime_project p LEFT JOIN runtime_branch b ON b.project_id=p.project_id AND b.mode='PRODUCTION'
+ WHERE p.project_id=%s"""
 SQL_SELECT_FROM_RUNTIME_JOB = "SELECT * FROM runtime_job WHERE job_id=%s"
 SQL_SELECT_FROM_RUNTIME_JOB_2 = "SELECT * FROM runtime_job WHERE idempotency_scope=%s AND idempotency_key=%s"
 SQL_SELECT_FROM_RUNTIME_JOB_RESULT = "SELECT * FROM runtime_job_result WHERE job_id=%s"
@@ -206,6 +211,9 @@ SQL_EXTERNAL_ATTEMPT = "SELECT 1 FROM runtime_attempt WHERE job_id=%s AND execut
 FORBIDDEN_REQUEST_KEYS = frozenset({"resources", "credentials", "password", "token", "secret", "environment", "env"})
 LEGACY_IMPORT_DIGEST = "legacyImportDigest"
 BINDING_FIELD = "binding"
+RELEASE_FIELD = "releaseId"
+SQL_RELEASE_BRANCH = "SELECT branch_id FROM runtime_release WHERE project_id=%s AND release_id=%s"
+SQL_ASSIGN_BRANCH = "UPDATE runtime_job SET branch_id=%s WHERE job_id=%s RETURNING *"
 
 
 class StoreConflict(ValueError):
@@ -245,7 +253,8 @@ class JobStore:
         self.max_result_bytes = max_result_bytes
         self.max_diagnostic_bytes = max_diagnostic_bytes
 
-    def register_project(self, project_id, binding_config=None, config_version="1", source_set_id=None):
+    def register_project(self, project_id, binding_config=None, config_version="1", source_set_id=None,
+                         preview_profile=None):
         # 项目导入与普通任务受理锁同一项目行，换源时立即移除旧输出指针。
         with self.db.transaction() as cursor:
             cursor.execute(
@@ -275,7 +284,9 @@ class JobStore:
                     project_id,
                 ),
             )
-            return dict(cursor.fetchone())
+            result = dict(cursor.fetchone())
+            BranchStore.ensure_production(cursor, project_id, preview_profile)
+            return result
 
     def project(self, project_id):
         with self.db.transaction() as cursor:
@@ -320,6 +331,7 @@ class JobStore:
         timeout_seconds=600,
         write=False,
         expected_revision=None,
+        branch_id=None,
         _cursor=None,
     ):
         # 幂等作用域先串行化；parent 锁统一先于项目行和子任务，避免清理受理穿透。
@@ -352,6 +364,7 @@ class JobStore:
             safe_request = _safe_request(request_json)
             encoded = json.dumps(
                 [
+                    {"input": fingerprint or safe_request, "branchId": branch_id} if branch_id else
                     fingerprint or safe_request,
                     kind,
                     project_id,
@@ -422,6 +435,19 @@ class JobStore:
                 ),
             )
             result = cursor.fetchone()
+            # 发布类任务继承固定候选或父 run 的分支，普通任务保持无分支。
+            if parent and branch_id is not None and parent["branch_id"] != branch_id:
+                raise ValueError("父任务与分支归属不匹配")
+            branch_id = parent["branch_id"] if parent else branch_id
+            if safe_request.get(RELEASE_FIELD):
+                cursor.execute(SQL_RELEASE_BRANCH, (project_id, safe_request[RELEASE_FIELD]))
+                release = cursor.fetchone()
+                if not release or branch_id is not None and branch_id != release["branch_id"]:
+                    raise ValueError("任务与发布分支归属不匹配")
+                branch_id = release["branch_id"]
+            if branch_id is not None:
+                cursor.execute(SQL_ASSIGN_BRANCH, (branch_id, identifier))
+                result = cursor.fetchone()
             if write:
                 cursor.execute(SQL_UPDATE_RUNTIME_PROJECT_SET_3, (identifier, project_id))
             return result

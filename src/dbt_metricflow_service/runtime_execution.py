@@ -11,7 +11,7 @@ from uuid import UUID
 
 from dbt_metricflow_service.jobs import JobRunner
 from dbt_metricflow_service.models import CommandSpec, DbtJobRequest, JobRecord, JobStatus, MetricFlowJobRequest
-from dbt_metricflow_service.platform_bindings import ProjectBinding, resolve_revision
+from dbt_metricflow_service.platform_bindings import GIT_MAIN, ProjectBinding, resolve_revision
 from dbt_metricflow_service.platform_catalog import catalog_from_artifacts
 from dbt_metricflow_service.platform_namespace import (
     prepare_versioned_project,
@@ -233,7 +233,7 @@ class RuntimeExecutor:
             )
             project = await _thread(
                 resolve_revision, binding, request["commitSha"], request["projectDigest"],
-                attempt / SOURCE_DIRECTORY,
+                attempt / SOURCE_DIRECTORY, git_ref=request.get("gitRef", GIT_MAIN),
             )
             source_set = await _thread(
                 self.artifacts.capture, job["project_id"], project, kind=SOURCE, metadata=self._metadata(job),

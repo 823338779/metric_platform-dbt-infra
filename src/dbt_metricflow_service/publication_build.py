@@ -108,21 +108,10 @@ def validate_bound_manifest(target: Path, schema: str, prefix: str, bindings: li
     reused = {item.native_id: item for item in map(RelationBinding.model_validate, bindings)}
     observed = set()
     for native_id, node in manifest["nodes"].items():
+        validate_execution_policy(node)
         config = node.get("config") or {}
-        if node.get("resource_type") == OPERATION or any(config.get(key) for key in HOOK_KEYS):
-            raise ValueError("发布构建禁止写入钩子")
-        if config.get("sql_header"):
-            raise ValueError("发布构建禁止执行 SQL header")
-        if node.get("resource_type") not in (MODEL, TEST):
-            raise ValueError("发布暂不支持 seed、snapshot 或自定义执行节点")
-        # dbt 将显式 store_failures=false 归一化为 ephemeral；该值代表不持久化，不能按非空字符串拒绝。
-        if node.get("resource_type") == TEST and (
-                config.get(STORE_FAILURES) or config.get(STORE_FAILURES_AS) not in (None, EPHEMERAL)):
-            raise ValueError("发布测试禁止写入失败结果表")
         if node.get("resource_type") != MODEL:
             continue
-        if config.get("materialized") not in SAFE_MATERIALIZATIONS:
-            raise ValueError("发布暂不支持此物化策略")
         if config.get("materialized") == EPHEMERAL:
             continue
         actual = (node.get("database"), node.get("schema"), node.get("alias"))
@@ -139,6 +128,22 @@ def validate_bound_manifest(target: Path, schema: str, prefix: str, bindings: li
         observed.add(actual)
     if not reused.keys() <= manifest["nodes"].keys():
         raise ValueError("复用绑定包含不属于当前模型的节点")
+
+
+def validate_execution_policy(node: dict) -> None:
+    # 草稿与发布共用定义边界；此检查不连接数据库、不执行 hook。
+    config = node.get("config") or {}
+    if node.get("resource_type") == OPERATION or any(config.get(key) for key in HOOK_KEYS):
+        raise ValueError("发布构建禁止写入钩子")
+    if config.get("sql_header"):
+        raise ValueError("发布构建禁止执行 SQL header")
+    if node.get("resource_type") not in (MODEL, TEST):
+        raise ValueError("发布暂不支持 seed、snapshot 或自定义执行节点")
+    if node.get("resource_type") == TEST and (
+            config.get(STORE_FAILURES) or config.get(STORE_FAILURES_AS) not in (None, EPHEMERAL)):
+        raise ValueError("发布测试禁止写入失败结果表")
+    if node.get("resource_type") == MODEL and config.get("materialized") not in SAFE_MATERIALIZATIONS:
+        raise ValueError("发布暂不支持此物化策略")
 
 
 def validate_readonly_sql(sql: str, dialect: str) -> None:
@@ -181,7 +186,15 @@ async def execute_publication(executor, job, runner, attempt: Path, project: Pat
         # deps 不支持 target-path，沿用既有执行器的命令参数边界。
         options = common[:-2] if args[0] == DEPS else common
         spec = CommandSpec((DBT, *args, *options), project, base.environment, True)
-        await executor._command(job, runner, spec, BUILDING)
+        from .branch_validation_summary import failure_summary
+        from .runtime_execution import ExecutionError
+
+        try:
+            await executor._command(job, runner, spec, BUILDING)
+        except ExecutionError as error:
+            # 摘要与当前租约失败事务一起保存；不复制 stderr、SQL 或数据库异常。
+            summary = failure_summary(target, args[0], settings.max_artifact_file_bytes)
+            raise ExecutionError(error.code, {"validationSummary": summary}, stopped=error.stopped) from error
 
     # 依赖安装后先做无版本前缀的逻辑解析，保存比较输入而非整个易变 manifest。
     await asyncio.to_thread(validate_templates, project)
@@ -210,6 +223,9 @@ async def execute_publication(executor, job, runner, attempt: Path, project: Pat
     baseline = None
     if release["baseline_release_id"]:
         prior = await asyncio.to_thread(releases.get_release, job["project_id"], release["baseline_release_id"])
+        # 物理复用只能沿本分支固定基线，禁止跨分支引用 creator run。
+        if prior["branch_id"] != release["branch_id"]:
+            raise ValueError("构建基线不属于当前分支")
         # 较早全构建版本可能没有逻辑比较状态，显式回退全构建。
         try:
             raw = await asyncio.to_thread(

@@ -6,7 +6,8 @@ from .publication_models import PublishedCatalog
 from .storage.publications import CATALOG_PATH
 
 SQL_PROJECT_LOCK = "SELECT project_id FROM runtime_project WHERE project_id=%s FOR UPDATE"
-SQL_RELEASE_BY_RUN = "SELECT * FROM runtime_release WHERE project_id=%s AND run_id=%s AND state='PUBLISHED'"
+SQL_RELEASE_BY_RUN = """SELECT r.* FROM runtime_release r JOIN runtime_branch b USING(project_id,branch_id)
+ WHERE project_id=%s AND run_id=%s AND r.state='PUBLISHED' AND b.mode='PRODUCTION'"""
 SQL_QUERY = "SELECT * FROM runtime_job WHERE project_id=%s AND job_id=%s AND kind='METRIC_QUERY'"
 SQL_ALIAS = "SELECT target_id FROM runtime_legacy_identity WHERE project_id=%s AND kind=%s AND legacy_id=%s"
 SQL_INSERT_ALIAS = """INSERT INTO runtime_legacy_identity(project_id,kind,legacy_id,target_id)

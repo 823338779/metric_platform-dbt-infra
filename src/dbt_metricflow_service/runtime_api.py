@@ -48,6 +48,12 @@ def create_runtime_app(settings):
     from dbt_metricflow_service.publication_api import create_publication_router
 
     app.include_router(create_publication_router(runtime))
+    from dbt_metricflow_service.branch_api import create_branch_router
+
+    app.include_router(create_branch_router(runtime))
+    from dbt_metricflow_service.branch_events import create_branch_event_router
+
+    app.include_router(create_branch_event_router(runtime))
     from dbt_metricflow_service.draft_validation_api import create_draft_validation_router
 
     app.include_router(create_draft_validation_router(runtime))

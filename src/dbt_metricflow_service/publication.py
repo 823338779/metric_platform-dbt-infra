@@ -10,12 +10,12 @@ from .platform_namespace import validate_schema_name
 from .publication_errors import INVALID_SELECTION, PublicationError
 from .publication_models import CATALOG_SCHEMA_VERSION, PublishedQueryRequest, QueryOptionsRequest, ResourceKind
 from .query_time import DEFAULT_TIMEZONE, canonical_query, normalize_query_time, query_time_metadata
+from .storage.branches import SQL_BRANCH_LOCK, SQL_PARENT_LOCK, BranchStore
 from .storage.jobs import SQL_SELECT_FROM_RUNTIME_JOB_2, SQL_SELECT_FROM_RUNTIME_JOB_4, StoreConflict
 from .storage.publications import (
     CATALOG_PATH,
     SQL_ATTACH_RUN,
-    SQL_BY_KEY,
-    SQL_PROJECT_LOCK,
+    SQL_BRANCH_BY_KEY,
     PublicationStore,
 )
 
@@ -23,9 +23,11 @@ BUILD = "BUILD_RUN"
 SCOPE = "PUBLICATION"
 SCHEMA_PREFIX = "run_"
 SQL_PROJECTS = "SELECT project_id FROM runtime_project ORDER BY project_id"
-SQL_RELEASES = "SELECT * FROM runtime_release WHERE project_id=%s ORDER BY sequence DESC"
+SQL_RELEASES = "SELECT * FROM runtime_release WHERE project_id=%s AND branch_id=%s ORDER BY sequence DESC"
 UTF8 = "utf-8"
 PUBLISHED = "PUBLISHED"
+ACTIVE_BRANCH = "ACTIVE"
+PRODUCTION = "PRODUCTION"
 CATALOG_SEARCH_FIELDS = ("name", "displayName", "description")
 QUERY_KIND = "METRIC_QUERY"
 QUERY_SCOPE = "PUBLISHED_QUERY:"
@@ -39,7 +41,13 @@ SQL_QUERY_ALIAS = """SELECT target_id FROM runtime_legacy_identity
  WHERE project_id=%s AND kind='QUERY' AND legacy_id=%s"""
 SQL_QUERY_RELEASE = "SELECT * FROM runtime_release WHERE project_id=%s AND run_id=%s AND state='PUBLISHED'"
 PROTOCOL_VERSION = "agent-dbt-v1"
-AGENT_CAPABILITIES = ["draft-validation-v1", "query-options-async-v1", "query-results-page-v1", "query-time-v1"]
+AGENT_CAPABILITIES = ["draft-validation-v1", "query-options-async-v1", "query-results-page-v1", "query-time-v1",
+                      "branch-development-v1", "draft-validation-v2"]
+VALIDATION_CHECKS = ("allTestsPassed", "representativeQueryPassed", "relationsVerified")
+CHECK_PASSED = "PASSED"
+CHECK_FAILED = "FAILED"
+SQL_SCAN_OWNED = """SELECT 1 FROM runtime_branch WHERE project_id=%s AND branch_id=%s
+ AND scan_token=%s AND scan_expires_at>clock_timestamp() AND status='ACTIVE'"""
 
 
 def invalid_selection(reason, field, message, recovery="fix_query_selection"):
@@ -72,33 +80,72 @@ def query_receipt(row: dict, project_id: str, release_id) -> dict:
 
 
 class PublicationService:
-    def __init__(self, runtime):
+    def __init__(self, runtime, *, branch_id: str | None = None):
         # 复用运行时连接池及工具链，管理入口不启动另一个 worker。
         self.runtime = runtime
         self.store = PublicationStore(runtime.db)
+        # 每个请求固定分支，未指定时始终选择 main；不能修改此值切换在途请求。
+        self.branch_id = branch_id
 
-    def submit(self, project_id: str, idempotency_key: str) -> dict:
+    def _branch(self, project_id):
+        # UUID 还必须属于当前项目，显式 main 与旧无分支入口使用相同身份。
+        branches = BranchStore(self.runtime.db)
+        return branches.get(project_id, self.branch_id) if self.branch_id else branches.production(project_id)
+
+    def _release(self, project_id, release_id):
+        # 封存目录原始字节不改变，归属由外层发布记录验证。
+        release = self.store.get_release(project_id, release_id)
+        if release["branch_id"] != self._branch(project_id)["branch_id"]:
+            raise KeyError(release_id)
+        return release
+
+    def submit(self, project_id: str, idempotency_key: str, *, branch_id: str | None = None,
+               _observed: tuple[str, str] | None = None, _scan_token: str | None = None,
+               _expected_sequence: int | None = None) -> dict:
         # 既有幂等请求返回原版本，不因远端 main 已推进而创建另一候选。
+        branches = BranchStore(self.runtime.db)
+        branch = branches.get(project_id, branch_id) if branch_id else self._branch(project_id)
         with self.runtime.db.transaction() as cursor:
-            cursor.execute(SQL_BY_KEY, (project_id, idempotency_key))
+            cursor.execute(SQL_BRANCH_BY_KEY, (project_id, branch["branch_id"], idempotency_key))
             existing = cursor.fetchone()
             if existing:
                 return existing
         project = self.runtime.jobs.project(project_id)
         if not project:
             raise KeyError(project_id)
-        binding = project["binding_config"]
+        binding = {**branch["binding_config"], "projectId": project_id}
         configured = ProjectBinding(project_id, binding["remote"], binding["projectSubdir"],
                                     binding["profileBindingId"], binding.get("schemaName"))
-        sha, digest = observe_revision(configured, self.runtime.settings.temp_root)
+        sha, digest = (_observed if _observed is not None else
+                       observe_revision(configured, self.runtime.settings.temp_root, git_ref=branch["git_ref"]))
         request = {"projectId": project_id, "commitSha": sha, "projectDigest": digest,
-                   "profileBindingId": configured.profile_binding_id, "configVersion": project["config_version"],
+                   "profileBindingId": configured.profile_binding_id, "configVersion": branch["config_version"],
                    "toolchainVersion": self.runtime.toolchain,
                    "businessTimezone": binding.get("businessTimezone", DEFAULT_TIMEZONE),
-                   "projectSubdir": configured.project_subdir}
+                   "projectSubdir": configured.project_subdir, "gitRef": branch["git_ref"]}
         # 候选和可领取任务同事务出现，杜绝 worker 先完成再关联发布的竞态。
         with self.runtime.db.transaction() as cursor:
-            release = self.store.create_candidate(project_id, request, idempotency_key, _cursor=cursor)
+            # Git I/O 前的序号必须仍有效；扫描和显式入口共用同一个受理 CAS。
+            cursor.execute(SQL_PARENT_LOCK, (project_id,))
+            cursor.execute(SQL_BRANCH_LOCK, (project_id, branch["branch_id"], branch["branch_id"]))
+            current = cursor.fetchone()
+            expected = branch["publication_sequence"] if _expected_sequence is None else _expected_sequence
+            if (current["publication_sequence"] != expected
+                    or current["config_version"] != branch["config_version"]
+                    or current["binding_config"] != branch["binding_config"]):
+                # 并发同键可恢复原受理；其他旧观测必须重试并重新读取 Git。
+                cursor.execute(SQL_BRANCH_BY_KEY, (project_id, branch["branch_id"], idempotency_key))
+                prior = cursor.fetchone()
+                if prior:
+                    return prior
+                raise StoreConflict("分支在源码观察期间已变化，请重新受理")
+            release = self.store.create_candidate(project_id, request, idempotency_key,
+                                                  branch_id=branch["branch_id"], _cursor=cursor)
+            # 扫描在外部 Git I/O 期间失去租约时，回滚候选及序号，不能迟到受理。
+            if _scan_token is not None:
+                cursor.execute(SQL_SCAN_OWNED, (project_id, branch["branch_id"], _scan_token))
+                if not cursor.fetchone():
+                    raise StoreConflict("分支扫描租约已失效")
             if release["run_id"]:
                 return release
             run_id = uuid4()
@@ -107,8 +154,9 @@ class PublicationService:
             )
             job = self.runtime.jobs.reserve(
                 BUILD, project_id, {**request, "binding": binding, "releaseId": release["release_id"]},
-                job_id=str(run_id), idempotency_scope=SCOPE + project_id, idempotency_key=idempotency_key,
-                config_version=project["config_version"], toolchain_version=self.runtime.toolchain,
+                job_id=str(run_id), idempotency_scope=SCOPE + project_id + branch["branch_id"],
+                idempotency_key=idempotency_key,
+                config_version=branch["config_version"], toolchain_version=self.runtime.toolchain,
                 schema_name=schema, profile_binding_id=configured.profile_binding_id,
                 timeout_seconds=self.runtime.settings.command_timeout_seconds,
                 expected_revision=project["revision"], _cursor=cursor,
@@ -122,31 +170,58 @@ class PublicationService:
             projects = cursor.fetchall()
         return [self.publication(row["project_id"]) for row in projects]
 
+    def _descriptor(self, row):
+        # 新分支契约携带固定上下文；旧生产协议保持原响应形状。
+        result = release_descriptor(row)
+        if self.branch_id:
+            branch = self._branch(row["project_id"])
+            result.update(branchId=branch["branch_id"], gitRef=branch["git_ref"])
+        return result
+
     def publication(self, project_id: str) -> dict:
-        result = self.store.get_publication(project_id)
-        binding = self.runtime.jobs.project(project_id)["binding_config"]
+        branch = self._branch(project_id)
+        result = self.store.get_publication(project_id, branch_id=branch["branch_id"])
+        binding = branch["binding_config"]
         result.update(protocolVersion=PROTOCOL_VERSION, capabilities=AGENT_CAPABILITIES,
                       projectSubdir=binding.get("projectSubdir", "."),
                       businessTimezone=binding.get("businessTimezone", DEFAULT_TIMEZONE))
+        if self.branch_id:
+            result.update(branchId=branch["branch_id"], gitRef=branch["git_ref"])
         if result["activePublication"]:
-            result["activePublication"] = release_descriptor(result["activePublication"])
+            result["activePublication"] = self._descriptor(result["activePublication"])
         return result
 
     def releases(self, project_id: str) -> list[dict]:
-        self.store.get_publication(project_id)
+        branch = self._branch(project_id)
         with self.runtime.db.transaction() as cursor:
-            cursor.execute(SQL_RELEASES, (project_id,))
-            return [release_descriptor(row) for row in cursor.fetchall()]
+            cursor.execute(SQL_RELEASES, (project_id, branch["branch_id"]))
+            rows = cursor.fetchall()
+        return [self._descriptor(row) for row in rows]
 
     def release(self, project_id: str, release_id: str) -> dict:
-        return release_descriptor(self.store.get_release(project_id, release_id))
+        row = self._release(project_id, release_id)
+        # 只展示封存的布尔证明和固定文案，不回显数据库、SQL 或 CLI 异常正文。
+        checks = []
+        if row["artifact_set_id"]:
+            evidence = self.runtime.artifacts.metadata(row["artifact_set_id"])["validation_json"]
+            checks = [{"name": name, "status": CHECK_PASSED if evidence.get(name) is True else CHECK_FAILED,
+                       "message": None} for name in VALIDATION_CHECKS]
+        elif row["run_id"]:
+            job = self.runtime.jobs.get(row["run_id"])
+            summary = (job.get("error_detail") or {}).get("validationSummary") if job else None
+            if summary:
+                return {**self._descriptor(row), "validationSummary": summary}
+        return {**self._descriptor(row), "validationSummary": {
+            "phase": row["state"], "checks": checks, "truncated": False}}
 
     def _active_release(self, project_id: str, release_id: str) -> dict:
-        release = self.store.get_release(project_id, release_id)
-        publication = self.store.get_publication(project_id)["activePublication"]
+        release = self._release(project_id, release_id)
+        branch = self._branch(project_id)
+        publication = self.store.get_publication(project_id, branch_id=branch["branch_id"])["activePublication"]
         if release["state"] != PUBLISHED:
             raise KeyError(release_id)
-        if not publication or publication["release_id"] != release["release_id"]:
+        if (branch["status"] != ACTIVE_BRANCH or not publication
+                or publication["release_id"] != release["release_id"]):
             raise ReleaseGone("发布版本已替代")
         return release
 
@@ -253,7 +328,8 @@ class PublicationService:
 
     def get_options(self, project_id: str, options_job_id: str) -> dict:
         row = self.runtime.jobs.get(options_job_id)
-        if not row or row["kind"] != "QUERY_OPTIONS" or row["project_id"] != project_id:
+        if (not row or row["kind"] != "QUERY_OPTIONS" or row["project_id"] != project_id
+                or row["branch_id"] != self._branch(project_id)["branch_id"]):
             raise KeyError(options_job_id)
         with self.runtime.db.transaction() as cursor:
             cursor.execute(SQL_QUERY_RELEASE, (project_id, row["parent_run_id"]))
@@ -281,7 +357,11 @@ class PublicationService:
         if (request.mode != QueryMode.PREVIEW and request.dataset_resource_id
                 or request.mode != QueryMode.DIMENSION_VALUES and request.dimension_option_id):
             raise invalid_selection("invalid_mode_fields", "mode", "查询模式与资源参数不匹配。")
-        scope = QUERY_SCOPE + json.dumps([project_id, identity_scope], separators=(",", ":"))
+        branch = self._branch(project_id)
+        identity = [project_id, identity_scope]
+        if branch["mode"] != PRODUCTION:
+            identity.append(branch["branch_id"])
+        scope = QUERY_SCOPE + json.dumps(identity, separators=(",", ":"))
 
         def recover(prior):
             snapshot = prior["request_json"]
@@ -354,14 +434,15 @@ class PublicationService:
         with self.runtime.db.transaction() as cursor:
             cursor.execute(SQL_SELECT_FROM_RUNTIME_JOB_4, (release["run_id"],))
             parent = cursor.fetchone()
-            cursor.execute(SQL_PROJECT_LOCK, (project_id,))
+            cursor.execute(SQL_PARENT_LOCK, (project_id,))
+            cursor.execute(SQL_BRANCH_LOCK, (project_id, branch["branch_id"], branch["branch_id"]))
             project = cursor.fetchone()
             # 等锁期间另一请求可能已受理同一幂等键；先恢复它再判断版本。
             cursor.execute(SQL_SELECT_FROM_RUNTIME_JOB_2, (scope, request.idempotency_key))
             prior = cursor.fetchone()
             if prior:
                 return recover(prior)
-            if project["active_published_release_id"] != release["release_id"]:
+            if project["status"] != ACTIVE_BRANCH or project["active_release_id"] != release["release_id"]:
                 raise ReleaseGone("发布版本已替代")
             row = self.runtime.jobs.reserve(
                 QUERY_KIND, project_id, {"publicationRequest": public, "businessTimezone": timezone,
@@ -385,7 +466,8 @@ class PublicationService:
             alias = cursor.fetchone()
         target_id = alias["target_id"] if alias else query_id
         row = self.runtime.jobs.get(target_id)
-        if not row or row["project_id"] != project_id or row["kind"] != QUERY_KIND:
+        if (not row or row["project_id"] != project_id or row["kind"] != QUERY_KIND
+                or row["branch_id"] != self._branch(project_id)["branch_id"]):
             raise KeyError(query_id)
         # 已受理查询只按其固定 run 读取，不重新检查当前活动指针。
         with self.runtime.db.transaction() as cursor:

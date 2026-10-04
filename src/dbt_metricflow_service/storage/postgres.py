@@ -8,10 +8,12 @@ from psycopg2 import OperationalError
 from psycopg2.extras import RealDictCursor
 from psycopg2.pool import ThreadedConnectionPool
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 MIGRATION_PATH = Path(__file__).parent / "migrations" / "001_runtime.sql"
 MIGRATIONS = (MIGRATION_PATH, MIGRATION_PATH.with_name("002_publication.sql"),
-              MIGRATION_PATH.with_name("003_agent_draft_validation.sql"))
+              MIGRATION_PATH.with_name("003_agent_draft_validation.sql"),
+              MIGRATION_PATH.with_name("004_branch_publications.sql"),
+              MIGRATION_PATH.with_name("005_branch_baselines.sql"))
 CHECK_SQL = "SELECT version FROM runtime_schema_version"
 MIGRATION_LOCK_SQL = "SELECT pg_advisory_xact_lock(609302026)"
 CONNECTION_OPTIONS = "-c statement_timeout=10000 -c lock_timeout=5000"

@@ -163,7 +163,8 @@ def register_bindings(db: Database, settings: Settings, path: Path) -> list[str]
             validate_schema_name(record["schemaName"])
     jobs = JobStore(db)
     for record in records:
-        jobs.register_project(record["projectId"], record, record.get("configVersion", settings.config_version))
+        jobs.register_project(record["projectId"], record, record.get("configVersion", settings.config_version),
+                              preview_profile=settings.branch_preview_profile_binding_id)
     return [record["projectId"] for record in records]
 
 

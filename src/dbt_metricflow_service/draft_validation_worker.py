@@ -20,6 +20,11 @@ SEMANTIC_MANIFEST = "target/semantic_manifest.json"
 MODEL_PATHS = "model-paths"
 PROJECT_FILE = "dbt_project.yml"
 DEPS_FILES = ("packages.yml", "dependencies.yml")
+SQL_DEFINITION = "SQL_DEFINITION"
+COMPILED_MANIFEST = "target/manifest.json"
+SQL_RESOURCES = frozenset({"model", "test"})
+COMPILE_ARGS = ("compile", "--no-introspect", "--no-populate-cache", "--write-json")
+V2_OPTION = "--branch-v2"
 
 
 class UniqueKeyLoader(yaml.SafeLoader):
@@ -45,7 +50,7 @@ def result(levels, diagnostics):
             "checkedLevels": levels, "phase": levels[-1], "diagnostics": diagnostics[:100]}
 
 
-def validate_project(project: Path, profiles: Path, target: str) -> dict:
+def validate_project(project: Path, profiles: Path, target: str, *, validate_sql: bool = False) -> dict:
     """dbt 自身负责解析，锁定版本语义验证器负责引用规则，禁止自造规则替代。"""
     from dbt.cli.main import dbtRunner
     from dbt.exceptions import CompilationError, EnvVarMissingError, ParsingError
@@ -54,7 +59,10 @@ def validate_project(project: Path, profiles: Path, target: str) -> dict:
 
     levels, diagnostics = [YAML], []
     config = yaml.safe_load((project / PROJECT_FILE).read_text(UTF8))
-    for directory in config.get(MODEL_PATHS, ["models"]):
+    directories = config.get(MODEL_PATHS, ["models"])
+    if validate_sql:
+        directories = [*directories, "tests"]
+    for directory in directories:
         for path in sorted((project / directory).rglob("*")):
             if path.suffix not in (".yml", ".yaml"):
                 continue
@@ -94,6 +102,38 @@ def validate_project(project: Path, profiles: Path, target: str) -> dict:
             return result(levels, [diagnostic("invalid_dbt_definition", "dbt 解析失败，请检查定义及引用。",
                                               path=path, resource_name=getattr(node, "name", None))])
         raise RuntimeError("dbt parse infrastructure failed")
+    if validate_sql:
+        # 受控模板已排除执行 SQL 的宏；compile 关闭数据库 introspection 和 cache 填充。
+        # 只验证模型及测试的单条只读 SQL，绝不调用 run/build/test。
+        from .publication_build import validate_execution_policy, validate_readonly_sql
+
+        levels.append(SQL_DEFINITION)
+        # parse 产物先核实执行策略，明确不支持的配置不能获得 valid=true。
+        parsed_document = json.loads((project / COMPILED_MANIFEST).read_text(UTF8))
+        for node in parsed_document["nodes"].values():
+            try:
+                validate_execution_policy(node)
+            except ValueError:
+                diagnostics.append(diagnostic("unsupported_execution_policy", "定义包含不支持的执行策略。",
+                                              path=node.get("original_file_path")))
+        if diagnostics:
+            return result(levels, diagnostics)
+        compiled = dbtRunner().invoke([*COMPILE_ARGS, *common])
+        if not compiled.success:
+            if isinstance(compiled.exception, (CompilationError, ParsingError)):
+                return result(levels, [diagnostic("invalid_model_sql", "SQL 定义编译失败，请检查引用与表达式。")])
+            raise RuntimeError("dbt compile infrastructure failed")
+        document = json.loads((project / COMPILED_MANIFEST).read_text(UTF8))
+        dialect = document["metadata"]["adapter_type"]
+        for node in document["nodes"].values():
+            if node.get("resource_type") in SQL_RESOURCES:
+                try:
+                    validate_readonly_sql(node.get("compiled_code", ""), dialect)
+                except ValueError:
+                    diagnostics.append(diagnostic("invalid_model_sql", "模型和测试必须为单条受支持的只读查询。",
+                                                  path=node.get("original_file_path")))
+        if diagnostics:
+            return result(levels, diagnostics)
     levels.append(SEMANTIC)
     manifest = parse_manifest_from_dbt_generated_manifest((project / SEMANTIC_MANIFEST).read_text(UTF8))
     validation = SemanticManifestValidator().validate_semantic_manifest(manifest, multi_process=False)
@@ -108,9 +148,9 @@ def validate_project(project: Path, profiles: Path, target: str) -> dict:
 
 def main():
     # 参数只由父 worker 生成；失败不输出异常或 profile 正文。
-    project, profiles, target, output = sys.argv[1:]
+    project, profiles, target, output = sys.argv[1:5]
     try:
-        value = validate_project(Path(project), Path(profiles), target)
+        value = validate_project(Path(project), Path(profiles), target, validate_sql=sys.argv[5:] == [V2_OPTION])
         Path(output).write_text(json.dumps(value, ensure_ascii=False), encoding=UTF8)
     except Exception:
         return 1

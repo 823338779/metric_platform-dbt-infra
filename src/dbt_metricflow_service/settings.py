@@ -35,6 +35,8 @@ CONFIG_KEYS = frozenset({
     "SERVICE_DATABASE_URL", "SERVICE_TEMP_ROOT", "WORKER_CONCURRENCY", "JOB_LEASE_SECONDS",
     "JOB_HEARTBEAT_SECONDS", "SERVICE_CONFIG_VERSION", "SERVICE_TOOLCHAIN_VERSION", "MAX_RESULT_BYTES",
     "MAX_ARTIFACT_FILE_BYTES", "MAX_ARTIFACT_BYTES", "SYNCHRONOUS_WAIT_SECONDS", INLINE_PROFILES_KEY,
+    "BRANCH_SERVICE_TOKEN", "BRANCH_PREVIEW_PROFILE_BINDING_ID",
+    "BRANCH_EVENTS_ENABLED", "BRANCH_POLL_SECONDS", "BRANCH_EVENT_SECRET",
 })
 
 
@@ -97,6 +99,16 @@ class Settings:
     platform_db_path: Path = Path(DEFAULT_PLATFORM_DB_PATH)
     # 启用 PostgreSQL 运行时的连接信息；repr 不包含凭据。
     database_url: str | None = field(default=None, repr=False)
+    # 分支写入口部署凭据；禁止进入 repr、API、模型参数或持久任务。
+    branch_service_token: str | None = field(default=None, repr=False)
+    # 开发分支使用独立受控 profile，未配置时拒绝创建和登记。
+    branch_preview_profile_binding_id: str | None = None
+    # 控制事件接收和补偿扫描，默认关闭；关闭后仍可显式请求构建。
+    branch_events_enabled: bool = False
+    # 已登记分支的远端核对周期，单位秒。
+    branch_poll_seconds: int = 30
+    # Forgejo HMAC 签名密钥，只由部署注入且不进入 repr。
+    branch_event_secret: str | None = field(default=None, repr=False)
     # 可丢弃的实例本地工作目录，不作为持久产物定位符。
     temp_root: Path = Path("runtime-tmp")
     # 本机同时执行的任务数，临时 resources 同样受此上限约束。
@@ -119,6 +131,9 @@ class Settings:
     server_port: int = 8000
 
     def __post_init__(self) -> None:
+        # 核对周期必须为正，开启事件时必须配置 Secret。
+        if self.branch_poll_seconds <= 0 or self.branch_events_enabled and not self.branch_event_secret:
+            raise ValueError("branch polling requires a positive interval and events require a secret")
         # 监听配置错误应在创建服务前暴露。
         if not self.server_host or not 1 <= self.server_port <= 65535:
             raise ValueError("server host must be nonempty and port must be between 1 and 65535")
@@ -155,7 +170,7 @@ class Settings:
             if not isinstance(config, dict) or not config.keys() <= CONFIG_KEYS:
                 raise ValueError("服务配置必须是配置项映射，且不能包含未知配置项")
             if any(value is not None and type(value) not in (str, int)
-                   for key, value in config.items() if key != INLINE_PROFILES_KEY):
+                   for key, value in config.items() if key not in (INLINE_PROFILES_KEY, "BRANCH_EVENTS_ENABLED")):
                 raise ValueError("服务配置值只能是字符串、整数或 null")
         profiles = config.get(INLINE_PROFILES_KEY)
         if profiles is not None:
@@ -186,6 +201,11 @@ class Settings:
             ),
             platform_db_path=path("PLATFORM_DB_PATH", DEFAULT_PLATFORM_DB_PATH),
             database_url=value("SERVICE_DATABASE_URL") or None,
+            branch_service_token=value("BRANCH_SERVICE_TOKEN") or None,
+            branch_preview_profile_binding_id=value("BRANCH_PREVIEW_PROFILE_BINDING_ID") or None,
+            branch_events_enabled=str(value("BRANCH_EVENTS_ENABLED", "false")).lower() in ("true", "1"),
+            branch_poll_seconds=int(value("BRANCH_POLL_SECONDS", "30")),
+            branch_event_secret=value("BRANCH_EVENT_SECRET") or None,
             temp_root=path("SERVICE_TEMP_ROOT", "runtime-tmp"),
             worker_concurrency=int(value("WORKER_CONCURRENCY", "2")),
             lease_seconds=int(value("JOB_LEASE_SECONDS", "90")),

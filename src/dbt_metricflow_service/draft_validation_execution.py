@@ -10,10 +10,16 @@ from uuid import UUID
 import yaml
 
 from .draft_validation import binding_digest
-from .draft_validation_models import DraftValidationRequest, changes_digest
+from .draft_validation_models import (
+    BranchDraftValidationRequest,
+    DraftValidationRequest,
+    changes_digest,
+    changes_digest_v2,
+)
 from .models import CommandSpec
-from .platform_bindings import ProjectBinding, resolve_draft_revision
+from .platform_bindings import GIT_MAIN, ProjectBinding, resolve_draft_revision
 from .storage.artifacts import VALIDATION_INPUT_FILE, _check_paths
+from .storage.branches import BranchStore
 
 CREATE = "CREATE"
 DELETE = "DELETE"
@@ -23,12 +29,14 @@ PROJECT_FILE = "dbt_project.yml"
 WORKER_MODULE = "dbt_metricflow_service.draft_validation_worker"
 VALIDATING = "VALIDATING"
 VALIDATION_OUTPUT = "validation.json"
+V2_ROOTS = ["models", "tests"]
+V2_OPTION = "--branch-v2"
 
 
-def apply_changes(project: Path, changes: list) -> str:
+def apply_changes(project: Path, changes: list, *, version: int = 1) -> str:
     """先检查完整操作集，再修改副本；不按 basename 猜测目标。"""
     config = yaml.safe_load((project / PROJECT_FILE).read_text(UTF8))
-    roots = config.get(MODEL_PATHS, ["models"])
+    roots = V2_ROOTS if version == 2 else config.get(MODEL_PATHS, ["models"])
     existing = {path.relative_to(project).as_posix() for path in project.rglob("*") if path.is_file()}
     _check_paths(list(existing | {change.path for change in changes}))
     for change in changes:
@@ -61,18 +69,28 @@ async def execute_draft_validation(executor, job: dict, runner, attempt: Path):
 
     request = job["request_json"]
     project_record = await _thread(executor.jobs.project, job["project_id"])
+    version2 = job["branch_id"] is not None
+    if version2:
+        project_record = await _thread(BranchStore(executor.jobs.db).execution_binding,
+                                       job["project_id"], job["branch_id"])
     binding = project_record["binding_config"]
     if project_record["config_version"] != job["config_version"] or binding_digest(binding) != request["bindingDigest"]:
         raise ExecutionError("VALIDATION_CONFIGURATION_CHANGED")
     payload = await _thread(executor.artifacts.read_file, job["input_set_id"], VALIDATION_INPUT_FILE)
-    draft = DraftValidationRequest.model_validate_json(payload)
-    if draft.base_commit_sha != request["baseCommitSha"] or changes_digest(draft.changes) != request["changesDigest"]:
+    model = BranchDraftValidationRequest if version2 else DraftValidationRequest
+    draft = model.model_validate_json(payload)
+    digest = changes_digest_v2(draft.changes) if version2 else changes_digest(draft.changes)
+    if (draft.base_commit_sha != request["baseCommitSha"] or digest != request["changesDigest"]
+            or version2 and (draft.workspace_id != request["workspaceId"]
+                             or draft.draft_revision != request["draftRevision"]
+                             or job["branch_id"] != request["branchId"])):
         raise ExecutionError("VALIDATION_INPUT_MISMATCH")
     configured = ProjectBinding(job["project_id"], binding["remote"], binding["projectSubdir"],
                                 binding["profileBindingId"], binding.get("schemaName"))
-    project, _ = await _thread(resolve_draft_revision, configured, draft.base_commit_sha, attempt)
+    project, _ = await _thread(resolve_draft_revision, configured, draft.base_commit_sha, attempt,
+                               git_ref=request.get("gitRef", GIT_MAIN))
     try:
-        digest = await _thread(apply_changes, project, draft.changes)
+        digest = await _thread(apply_changes, project, draft.changes, version=2 if version2 else 1)
     except ValueError:
         return ExecutionResult(result(["BASELINE"], [diagnostic("invalid_draft_changes",
                                       "操作路径或旧文件摘要与固定基线不一致。")]))
@@ -85,8 +103,9 @@ async def execute_draft_validation(executor, job: dict, runner, attempt: Path):
                    "DBT_PLATFORM_SCHEMA": configured.schema_name or "validation_" + UUID(job["job_id"]).hex,
                    "DBT_TARGET": job["profile_binding_id"],
                    "DBT_SEND_ANONYMOUS_USAGE_STATS": "false", "PYTHONUTF8": "1"}
-    spec = CommandSpec((sys.executable, "-m", WORKER_MODULE, str(project), str(executor.settings.profiles_dir),
-                        job["profile_binding_id"], str(output)), project, environment, False)
+    argv = (sys.executable, "-m", WORKER_MODULE, str(project), str(executor.settings.profiles_dir),
+            job["profile_binding_id"], str(output))
+    spec = CommandSpec(argv + ((V2_OPTION,) if version2 else ()), project, environment, False)
     try:
         await executor._command(job, runner, spec, VALIDATING)
     except ExecutionError as error:
