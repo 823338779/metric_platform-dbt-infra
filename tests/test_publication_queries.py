@@ -9,7 +9,9 @@ from uuid import uuid4
 import pytest
 
 from dbt_metricflow_service.publications.models import PublishedQueryRequest, QueryOptionsRequest
-from dbt_metricflow_service.publications.service import PublicationService, ReleaseGone
+from dbt_metricflow_service.publications.queries import QueryService
+from dbt_metricflow_service.publications.service import ReleaseGone
+from dbt_metricflow_service.runtime.completion import complete_job
 from dbt_metricflow_service.storage.jobs import StoreConflict
 from tests.test_publication_catalog import build
 from tests.test_publication_storage import store as store
@@ -18,7 +20,7 @@ from tests.test_publication_transaction import prepared
 
 def query_service(store, tmp_path):
     jobs, job, release, output, artifacts = prepared(store, tmp_path)
-    jobs.finish(job["job_id"], job["lease_token"], output_set_id=output)
+    complete_job(jobs, job["job_id"], job["lease_token"], output_set_id=output)
     catalog = build().model_dump(mode="json", by_alias=True)
     catalog["projectId"], catalog["releaseId"] = job["project_id"], release["release_id"]
     runtime = SimpleNamespace(db=store.db, jobs=jobs, artifacts=artifacts,
@@ -30,9 +32,9 @@ def query_service(store, tmp_path):
         "timeDimensions": [{"token": "metric_time__month", "granularity": "month"}],
         "allowedFilters": ["=", "IN"],
     }
-    service = PublicationService(runtime)
-    original = service._active_release
-    service._catalog = lambda project, version: (original(project, version), deepcopy(catalog))
+    service = QueryService(runtime)
+    original = service.publications._active_release
+    service.catalogs._catalog = lambda project, version: (original(project, version), deepcopy(catalog))
     return service, job, release
 
 
@@ -68,7 +70,7 @@ def test_query_pins_run_and_retry_survives_replacement(store, tmp_path):
     assert saved["parent_run_id"] == job["job_id"]
     assert saved["request_json"]["engineRequest"]["metrics"] == ["orders"]
     next_jobs, next_job, _, output, _ = prepared(store, tmp_path, job["project_id"])
-    next_jobs.finish(next_job["job_id"], next_job["lease_token"], output_set_id=output)
+    complete_job(next_jobs, next_job["job_id"], next_job["lease_token"], output_set_id=output)
     assert service.submit_query(job["project_id"], request, "platform") == accepted
     with pytest.raises(ReleaseGone):
         service.submit_query(job["project_id"], request.model_copy(update={"idempotency_key": uuid4().hex}), "platform")
@@ -101,7 +103,7 @@ def test_retry_recovers_admission_committed_between_initial_lookup_and_version_c
                                     mode="QUERY", metricResourceIds=["metric.sample.orders"])
     accepted = service.submit_query(job["project_id"], request, "platform")
     jobs, candidate, _, output, _ = prepared(store, tmp_path, job["project_id"])
-    jobs.finish(candidate["job_id"], candidate["lease_token"], output_set_id=output)
+    complete_job(jobs, candidate["job_id"], candidate["lease_token"], output_set_id=output)
     original = service.runtime.jobs.by_key
     lookups = 0
 

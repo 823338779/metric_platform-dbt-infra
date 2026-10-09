@@ -11,11 +11,10 @@ import yaml
 from resource_helpers import make_resource_project
 
 from dbt_metricflow_service.publications.build import (
-    apply_relation_bindings,
+    prepare_publication_project,
     validate_bound_manifest,
     validate_readonly_sql,
 )
-from tests.test_publication_catalog import package
 
 
 @pytest.mark.parametrize(("freshness", "expected"), [
@@ -32,24 +31,19 @@ def test_only_configured_freshness_thresholds_require_execution(freshness, expec
     assert requires_source_freshness({"freshness": freshness}) is expected
 
 
-def test_reused_view_and_final_binding_agree(tmp_path):
-    _, _, bindings = package()
-    reused = bindings[0]
-    apply_relation_bindings(tmp_path, uuid4(), "candidate", [reused])
-    macro = (tmp_path / "macros" / "generate_alias_name.sql").read_text()
-    assert reused["nativeId"] in macro
-    assert reused["relation"]["identifier"] in macro
+def test_manifest_cannot_bind_a_previous_run(tmp_path):
+    prefix = prepare_publication_project(tmp_path, uuid4(), "candidate")
     target = tmp_path / "target"
     target.mkdir()
-    manifest = {"nodes": {reused["nativeId"]: {
-        "resource_type": "model", "config": {"materialized": "table"},
-        "database": "db", "schema": "s", "alias": "orders", "relation_name": '"db"."s"."orders"'}}}
-    (target / "manifest.json").write_text(json.dumps(manifest))
-    validate_bound_manifest(target, "candidate", "rv_new_", [reused])
-    manifest["nodes"][reused["nativeId"]]["alias"] = "rv_new_orders"
-    (target / "manifest.json").write_text(json.dumps(manifest))
+    node = {"resource_type": "model", "config": {"materialized": "table"}, "database": "db",
+            "schema": "candidate", "alias": prefix + "orders", "relation_name": '"candidate"."' + prefix + 'orders"'}
+    path = target / "manifest.json"
+    path.write_text(json.dumps({"nodes": {"model.p.orders": node}}))
+    validate_bound_manifest(target, "candidate", prefix)
+    node.update(alias="old_orders", relation_name='"candidate"."old_orders"')
+    path.write_text(json.dumps({"nodes": {"model.p.orders": node}}))
     with pytest.raises(ValueError):
-        validate_bound_manifest(target, "candidate", "rv_new_", [reused])
+        validate_bound_manifest(target, "candidate", prefix)
 
 
 @pytest.mark.parametrize("sql", [
@@ -74,7 +68,7 @@ def test_actual_dbt_tests_parse_under_publication_mapping(tmp_path, test_config,
     document["models"][1]["columns"][0]["data_tests"] = [
         {"not_null": {"config": test_config}}]
     definition.write_text(yaml.safe_dump(document, allow_unicode=True), encoding="utf-8")
-    prefix = apply_relation_bindings(project, uuid4(), "main", [])
+    prefix = prepare_publication_project(project, uuid4(), "main")
     parsed = subprocess.run(
         [sys.executable, "-m", "dbt.cli.main", "parse", "--no-partial-parse",
          "--project-dir", str(project), "--profiles-dir", str(profiles)],
@@ -87,6 +81,6 @@ def test_actual_dbt_tests_parse_under_publication_mapping(tmp_path, test_config,
     assert tests and all(node["schema"] == "main" for node in tests)
     if writes:
         with pytest.raises(ValueError, match="发布测试禁止写入失败结果表"):
-            validate_bound_manifest(target, "main", prefix, [])
+            validate_bound_manifest(target, "main", prefix)
     else:
-        validate_bound_manifest(target, "main", prefix, [])
+        validate_bound_manifest(target, "main", prefix)

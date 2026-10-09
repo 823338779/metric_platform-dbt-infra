@@ -15,7 +15,7 @@ async def _invoke(
     *,
     max_bytes: int = 8,
     method: str = "POST",
-    path: str = "/v1/dbt/jobs",
+    path: str = "/v2/projects/example/releases",
     headers: list[tuple[bytes, bytes]] | None = None,
 ) -> tuple[bool, list[Message], list[Message]]:
     called = False

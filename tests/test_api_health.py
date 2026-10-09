@@ -1,118 +1,49 @@
-from __future__ import annotations
-
-import logging
 from importlib.metadata import version
-from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from dbt_metricflow_service import __version__
-from dbt_metricflow_service.api.app import create_app
-from dbt_metricflow_service.projects import ProjectRegistry
+from dbt_metricflow_service.api.app import VERSION_DISTRIBUTIONS, create_app
 from dbt_metricflow_service.settings import Settings
 
-logger = logging.getLogger(__name__)
 
-VERSION_DISTRIBUTIONS = (
-    "dbt-core",
-    "dbt-starrocks",
-    "dbt-duckdb",
-    "dbt-metricflow",
-    "metricflow",
-)
-
-
-class EmptyJobRunner:
-    """Supply the smallest runner surface needed by health routes."""
-
-    async def get(self, job_id: object) -> None:
-        return None
-
-
-class ClosingJobRunner(EmptyJobRunner):
-    """Record whether FastAPI lifespan cleanup reaches the runner."""
-
-    def __init__(self) -> None:
-        self.closed = False
-
-    async def close(self) -> None:
-        self.closed = True
+@pytest.fixture
+def application(monkeypatch, tmp_path):
+    import dbt_metricflow_service.api.runtime as module
+    (tmp_path / "profiles.yml").write_text("fixture: {}")
+    settings = Settings(tmp_path, 30, 1024, database_url="postgresql://unused/test", temp_root=tmp_path)
+    runtime = SimpleNamespace(settings=settings, db=SimpleNamespace(check=lambda: None),
+                              jobs=SimpleNamespace(db=None), started=False, closed=False)
+    async def start():
+        runtime.started = True
+    async def close():
+        runtime.closed = True
+    runtime.start, runtime.close = start, close
+    monkeypatch.setattr(module, "Runtime", lambda settings: runtime)
+    return create_app(settings), runtime
 
 
-def build_client(tmp_path: Path) -> TestClient:
-    """Create an application with concrete readable mount directories."""
-    projects_root = tmp_path / "projects"
-    profiles_dir = tmp_path / "profiles"
-    artifacts_root = tmp_path / "artifacts"
-    projects_root.mkdir()
-    profiles_dir.mkdir()
-    artifacts_root.mkdir()
-    settings = Settings(
-        projects_root=projects_root,
-        profiles_dir=profiles_dir,
-        command_timeout_seconds=30,
-        max_output_bytes=1024,
-        job_artifacts_root=artifacts_root,
-    )
-    return TestClient(create_app(settings, ProjectRegistry(projects_root), EmptyJobRunner()))
+def test_live_does_not_depend_on_cli(application, monkeypatch):
+    app, _ = application
+    monkeypatch.setattr("dbt_metricflow_service.api.runtime.shutil.which", lambda name: None)
+    with TestClient(app) as client:
+        assert client.get("/health/live").json() == {"status": "ok"}
+        assert client.get("/health/ready").status_code == 503
 
 
-def test_live_does_not_depend_on_cli(tmp_path: Path, monkeypatch: object) -> None:
-    """Liveness must only prove that the HTTP process can answer."""
-    client = build_client(tmp_path)
-    monkeypatch.setattr("dbt_metricflow_service.api.app.shutil.which", lambda _: None)  # type: ignore[attr-defined]
-
-    response = client.get("/health/live")
-
-    assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+def test_ready_accepts_installed_clis_and_readable_profiles(application, monkeypatch):
+    app, _ = application
+    monkeypatch.setattr("dbt_metricflow_service.api.runtime.shutil.which", lambda name: name)
+    with TestClient(app) as client:
+        assert client.get("/health/ready").json() == {"status": "ready"}
 
 
-def test_ready_returns_503_when_cli_is_missing(tmp_path: Path, monkeypatch: object) -> None:
-    """Readiness must reject traffic when either packaged CLI is unavailable."""
-    client = build_client(tmp_path)
-    monkeypatch.setattr("dbt_metricflow_service.api.app.shutil.which", lambda _: None)  # type: ignore[attr-defined]
-
-    response = client.get("/health/ready")
-
-    assert response.status_code == 503
-    assert response.json()["detail"]["code"] == "not_ready"
-
-
-def test_ready_accepts_installed_clis_and_readable_mounts(
-    tmp_path: Path, monkeypatch: object
-) -> None:
-    """Readiness must pass when runtime commands and mounted directories exist."""
-    client = build_client(tmp_path)
-    monkeypatch.setattr("dbt_metricflow_service.api.app.shutil.which", lambda name: f"/bin/{name}")  # type: ignore[attr-defined]
-
-    response = client.get("/health/ready")
-
-    assert response.status_code == 200
-    assert response.json() == {"status": "ready"}
-
-
-def test_versions_returns_service_and_pinned_package_versions(tmp_path: Path) -> None:
-    """Version inspection must report the running distributions, not constants."""
-    response = build_client(tmp_path).get("/v1/versions")
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "service": __version__,
-        **{distribution: version(distribution) for distribution in VERSION_DISTRIBUTIONS},
-    }
-
-
-def test_application_shutdown_closes_job_runner(tmp_path: Path) -> None:
-    """Leaving the application lifespan must terminate active job ownership."""
-    projects_root = tmp_path / "projects"
-    profiles_dir = tmp_path / "profiles"
-    projects_root.mkdir()
-    profiles_dir.mkdir()
-    settings = Settings(projects_root, profiles_dir, 30, 1024)
-    runner = ClosingJobRunner()
-
-    with TestClient(create_app(settings, ProjectRegistry(projects_root), runner)):
-        pass
-
-    assert runner.closed is True
+def test_versions_and_runtime_lifecycle(application):
+    app, runtime = application
+    with TestClient(app) as client:
+        assert runtime.started
+        assert client.get("/v1/versions").json() == {
+            "service": __version__, **{name: version(name) for name in VERSION_DISTRIBUTIONS}}
+    assert runtime.closed

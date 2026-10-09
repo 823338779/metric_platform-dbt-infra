@@ -2,21 +2,24 @@
 
 from uuid import UUID
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from ..api.auth import mutation_guard
 from ..publications.api import PREFIX, call
-from .models import DraftValidationRequest, ValidationReceipt, ValidationResult
-from .service import DraftValidationService
+from ..publications.models import FixedCommitRequest
+from .models import ValidationReceipt, ValidationResult
+from .service import CommitValidationService
 
 VALIDATIONS = "/{project_id}/validations"
 
 
-def create_draft_validation_router(runtime) -> APIRouter:
+def create_commit_validation_router(runtime) -> APIRouter:
     router = APIRouter(prefix=PREFIX)
-    service = DraftValidationService(runtime)
+    service = CommitValidationService(runtime)
 
-    @router.post(VALIDATIONS, status_code=202, response_model=ValidationReceipt)
-    async def submit(project_id: str, request: DraftValidationRequest):
+    @router.post(VALIDATIONS, status_code=202, response_model=ValidationReceipt,
+                 dependencies=[Depends(mutation_guard(runtime.settings))])
+    async def submit(project_id: str, request: FixedCommitRequest):
         return await call(service.submit, project_id, request)
 
     @router.get(VALIDATIONS + "/{validation_id}", response_model=ValidationResult)

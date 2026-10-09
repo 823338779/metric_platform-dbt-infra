@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import pytest
 
+from dbt_metricflow_service.runtime.completion import complete_job
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.jobs import CleanupBlocked, JobStore
 from dbt_metricflow_service.storage.publications import SQL_ATTACH_RUN, PublicationStore
@@ -49,7 +50,7 @@ def prepared(store, tmp_path, project=None):
 
 def test_finish_publishes_and_cleanup_is_blocked(store, tmp_path):
     jobs, job, release, output, _ = prepared(store, tmp_path)
-    assert jobs.finish(job["job_id"], job["lease_token"], output_set_id=output)
+    assert complete_job(jobs, job["job_id"], job["lease_token"], output_set_id=output)
     row = store.get_release(job["project_id"], release["release_id"])
     assert row["state"] == "PUBLISHED"
     assert row["artifact_set_id"] == output
@@ -60,7 +61,7 @@ def test_finish_publishes_and_cleanup_is_blocked(store, tmp_path):
 
 def test_seal_failure_preserves_old_publication(store, tmp_path):
     jobs, job, release, output, _ = prepared(store, tmp_path)
-    jobs.finish(job["job_id"], job["lease_token"], output_set_id=output)
+    complete_job(jobs, job["job_id"], job["lease_token"], output_set_id=output)
     jobs, candidate, _, next_output, artifacts = prepared(store, tmp_path, job["project_id"])
 
     def broken_seal(set_id, connection):
@@ -68,7 +69,7 @@ def test_seal_failure_preserves_old_publication(store, tmp_path):
         raise ValueError("injected after seal")
 
     with pytest.raises(ValueError, match="injected"):
-        jobs.finish(candidate["job_id"], candidate["lease_token"], output_set_id=next_output, seal=broken_seal)
+        complete_job(jobs, candidate["job_id"], candidate["lease_token"], output_set_id=next_output, seal=broken_seal)
     assert artifacts.metadata(next_output)["state"] == "STAGING"
     assert store.get_publication(job["project_id"])["activePublication"]["release_id"] == release["release_id"]
 
@@ -76,7 +77,7 @@ def test_seal_failure_preserves_old_publication(store, tmp_path):
 def test_older_candidate_cannot_replace_latest_input(store, tmp_path):
     jobs, job, release, output, _ = prepared(store, tmp_path)
     store.create_candidate(job["project_id"], {"commitSha": "b" * 40}, uuid4().hex)
-    assert jobs.finish(job["job_id"], job["lease_token"], output_set_id=output)
+    assert complete_job(jobs, job["job_id"], job["lease_token"], output_set_id=output)
     assert store.get_release(job["project_id"], release["release_id"])["state"] == "SUPERSEDED"
     assert store.get_publication(job["project_id"])["activePublication"] is None
 
@@ -93,7 +94,7 @@ def test_expired_worker_cannot_publish(store, tmp_path):
     with store.db.transaction() as connection:
         connection.exec_driver_sql("UPDATE runtime_attempt SET lease_expires_at=clock_timestamp()-interval '1 second' "
                        "WHERE attempt_id=%s", (job["attempt_id"],))
-    assert jobs.finish(job["job_id"], job["lease_token"], output_set_id=output) is False
+    assert complete_job(jobs, job["job_id"], job["lease_token"], output_set_id=output) is False
     assert store.get_release(job["project_id"], release["release_id"])["state"] != "PUBLISHED"
 
 
@@ -104,7 +105,7 @@ def test_wrong_source_proof_cannot_publish(store, tmp_path):
             "UPDATE runtime_artifact_set SET source_commit_sha=%s WHERE set_id=%s", ("c" * 40, output)
         )
     with pytest.raises(ValueError, match="输入"):
-        jobs.finish(job["job_id"], job["lease_token"], output_set_id=output)
+        complete_job(jobs, job["job_id"], job["lease_token"], output_set_id=output)
     assert artifacts.metadata(output)["state"] == "STAGING"
     assert store.get_publication(job["project_id"])["activePublication"] is None
 
@@ -119,7 +120,7 @@ def test_failure_after_pointer_update_rolls_back_entire_publication(store, tmp_p
 
     monkeypatch.setattr(PublicationStore, "publish_in_transaction", fail_after_pointer)
     with pytest.raises(ValueError, match="injected"):
-        jobs.finish(job["job_id"], job["lease_token"], output_set_id=output)
+        complete_job(jobs, job["job_id"], job["lease_token"], output_set_id=output)
     assert store.get_publication(job["project_id"])["activePublication"] is None
     assert store.get_release(job["project_id"], release["release_id"])["state"] == "PREPARING"
     assert artifacts.metadata(output)["state"] == "STAGING"
@@ -128,7 +129,7 @@ def test_failure_after_pointer_update_rolls_back_entire_publication(store, tmp_p
 
 def test_committed_publication_cannot_be_failed_after_response_loss(store, tmp_path):
     jobs, job, release, output, _ = prepared(store, tmp_path)
-    assert jobs.finish(job["job_id"], job["lease_token"], output_set_id=output)
+    assert complete_job(jobs, job["job_id"], job["lease_token"], output_set_id=output)
     assert jobs.fail(job["job_id"], job["lease_token"], "RESPONSE_LOST") is False
     assert store.get_release(job["project_id"], release["release_id"])["state"] == "PUBLISHED"
 
@@ -161,7 +162,7 @@ def test_lost_lease_after_publish_rolls_back(store, tmp_path, monkeypatch):
         monkeypatch.setattr(jobs, "_authorized", lambda *args: None)
 
     monkeypatch.setattr(PublicationStore, "publish_in_transaction", publish_then_lose_lease)
-    assert jobs.finish(job["job_id"], job["lease_token"], output_set_id=output) is False
+    assert complete_job(jobs, job["job_id"], job["lease_token"], output_set_id=output) is False
     assert jobs.result(job["job_id"]) is None
     assert artifacts.metadata(output)["state"] == "STAGING"
     assert store.get_release(job["project_id"], release["release_id"])["state"] == "PREPARING"

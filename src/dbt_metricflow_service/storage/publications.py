@@ -61,6 +61,54 @@ class PublicationStore:
         # 连接池由 Runtime 拥有；store 不单独创建连接或提交外部事务。
         self.db = db
 
+    def by_key(self, project_id, key):
+        with self.db.transaction() as connection:
+            return row_dict(connection.exec_driver_sql(SQL_BY_KEY, (project_id, key)))
+
+    def project_ids(self):
+        with self.db.transaction() as connection:
+            return [row[0] for row in connection.exec_driver_sql(
+                "SELECT project_id FROM runtime_project ORDER BY project_id")]
+
+    def releases(self, project_id):
+        with self.db.transaction() as connection:
+            return [dict(row) for row in connection.exec_driver_sql(
+                "SELECT * FROM runtime_release WHERE project_id=%s ORDER BY created_at DESC", (project_id,)
+            ).mappings()]
+
+    def reserve_build(self, jobs, project, key, snapshot, source_id, timeout_seconds):
+        from ..platform.namespace import validate_schema_name
+        from .jobs import SQL_SELECT_PG_ADVISORY_XACT_LOCK_HASHTEXTEXTENDED
+
+        project_id = project["project_id"]
+        scope = "PUBLICATION:" + project_id
+        with self.db.transaction() as connection:
+            connection.exec_driver_sql(SQL_SELECT_PG_ADVISORY_XACT_LOCK_HASHTEXTEXTENDED, (scope + ":" + key,))
+            connection.exec_driver_sql(SQL_PARENT_LOCK, (project_id,))
+            prior = row_dict(connection.exec_driver_sql(SQL_BY_KEY, (project_id, key)))
+            if prior:
+                if prior["request_json"]["commitSha"] != snapshot["commitSha"]:
+                    raise StoreConflict("release key already binds another commit")
+                return prior
+            current = row_dict(connection.exec_driver_sql(
+                "SELECT * FROM runtime_project WHERE project_id=%s", (project_id,)))
+            if (current["binding_config"] != project["binding_config"]
+                    or current["config_version"] != snapshot["configVersion"]):
+                raise StoreConflict("project changed while reading commit")
+            release = self.create_candidate_in_transaction(connection, project_id, snapshot, key)
+            run_id = uuid4()
+            binding = project["binding_config"]
+            schema = validate_schema_name(binding["schemaName"]) if binding.get("schemaName") else "run_" + run_id.hex
+            job = jobs.reserve_in_transaction(
+                connection, BUILD_RUN, project_id, {**snapshot, "binding": binding, "releaseId": release["release_id"]},
+                job_id=str(run_id), input_set_id=source_id, idempotency_scope=scope, idempotency_key=key,
+                config_version=snapshot["configVersion"], toolchain_version=snapshot["toolchainVersion"],
+                profile_binding_id=snapshot["profileBindingId"], schema_name=schema,
+                timeout_seconds=timeout_seconds, expected_revision=project["revision"],
+            )
+            connection.exec_driver_sql(SQL_ATTACH_RUN, (job["job_id"], release["release_id"]))
+            return {**release, "run_id": job["job_id"]}
+
     def create_candidate(self, project_id: str, request: dict, idempotency_key: str, *,
                          branch_id: str | None = None) -> dict:
         # 分支行串行化候选序号与请求幂等；不同分支互不淘汰。

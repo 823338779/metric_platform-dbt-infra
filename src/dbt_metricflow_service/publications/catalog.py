@@ -222,17 +222,13 @@ def build_published_catalog(
 
 
 def write_publication_catalog(target: Path, *, project_id: str, release_id: UUID,
-                              run_id: UUID, native_catalog: dict, reused_bindings: list | None = None) -> dict:
+                              run_id: UUID, native_catalog: dict) -> dict:
     """全构建的实际关系形成直接绑定，完整目录文件必须在 capture 之前写入。"""
     bindings = []
-    reused = {item.native_id: item for item in (reused_bindings or [])}
     for item in native_catalog["resources"]:
         if item["kind"] not in (ResourceKind.TABLE, ResourceKind.VIEW):
             continue
         definition = item["definition"]
-        if item["nativeId"] in reused:
-            bindings.append(reused[item["nativeId"]])
-            continue
         external = definition.get("resource_type") == SOURCE_TYPE
         bindings.append({
             "nativeId": item["nativeId"],

@@ -11,21 +11,13 @@ from uuid import UUID
 
 from dbt_metricflow_service.execution.models import (
     CommandSpec,
-    DbtJobRequest,
     JobRecord,
     JobStatus,
-    MetricFlowJobRequest,
 )
 from dbt_metricflow_service.execution.runner import JobRunner
-from dbt_metricflow_service.platform.bindings import GIT_MAIN, ProjectBinding, resolve_revision
-from dbt_metricflow_service.platform.catalog import catalog_from_artifacts
 from dbt_metricflow_service.platform.namespace import (
-    prepare_versioned_project,
     run_prefix,
-    validate_versioned_manifest,
 )
-from dbt_metricflow_service.platform.runs import build_platform_command, validate_artifacts
-from dbt_metricflow_service.resources.commands import build_dbt_command, build_metricflow_command
 from dbt_metricflow_service.runtime.workspace import attempt_workspace
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
@@ -35,15 +27,10 @@ from dbt_metricflow_service.storage.jobs import JobStore
 BUILD_RUN = "BUILD_RUN"
 DRAFT_VALIDATION = "DRAFT_VALIDATION"
 DBT_COMMAND = "DBT_COMMAND"
-MF_COMMAND = "MF_COMMAND"
 METRIC_QUERY = "METRIC_QUERY"
 QUERY_OPTIONS = "QUERY_OPTIONS"
 RUN_CLEANUP = "RUN_CLEANUP"
-PREPARING = "PREPARING"
-BUILDING = "BUILDING"
 VALIDATING = "VALIDATING"
-SOURCE = "SOURCE"
-EXECUTION = "EXECUTION"
 PROJECT_DIRECTORY = "project"
 RESOURCE_DIRECTORY = "resources"
 UTF8 = "utf-8"
@@ -61,22 +48,6 @@ INPUT_FILE = "input.json"
 OUTPUT_FILE = "output.json"
 QUERY_MODE = "QUERY"
 CLEANUP_MODE = "CLEANUP"
-PROBE_MODE = "PROBE"
-DBT_EXECUTABLE = "dbt"
-DEPS_COMMAND = "deps"
-PARSE_COMMAND = "parse"
-DOCS_COMMAND = "docs"
-GENERATE_COMMAND = "generate"
-PROJECT_OPTION = "--project-dir"
-PROFILES_OPTION = "--profiles-dir"
-TARGET_OPTION = "--target"
-TARGET_PATH_OPTION = "--target-path"
-PACKAGES_FILE = "packages.yml"
-DEPENDENCIES_FILE = "dependencies.yml"
-RUN_RESULTS_FILE = "run_results.json"
-SOURCE_DIRECTORY = "source"
-RESOURCE_REDACTION = "[resource content omitted]"
-OUTPUT_STREAMS = ("stdout", "stderr")
 LOCAL_DBT_COMMANDS = frozenset({"parse", "debug"})
 
 
@@ -155,7 +126,7 @@ class RuntimeExecutor:
         self.jobs = jobs
         self.artifacts = artifacts
 
-    async def execute(self, job: dict, resources: dict[str, str] | None = None) -> ExecutionResult:
+    async def execute(self, job: dict) -> ExecutionResult:
         """还原固定输入，等待子进程退出，再删除可重建的本地目录。"""
 
         # 复用路径、链接与 UUID 检查，在进程停止后退出工作目录上下文。
@@ -168,9 +139,9 @@ class RuntimeExecutor:
                 if job["kind"] == BUILD_RUN:
                     return await self._build(job, runner, attempt)
                 if job["kind"] == DRAFT_VALIDATION:
-                    from ..validation.execution import execute_draft_validation
+                    from ..validation.execution import execute_commit_validation
 
-                    return await execute_draft_validation(self, job, runner, attempt)
+                    return await execute_commit_validation(self, job, runner, attempt)
                 # 构建在源码固定前失败时尚未执行任何仓库命令，无目录可还原。
                 if job["kind"] == RUN_CLEANUP and job["input_set_id"] is None:
                     return ExecutionResult({})
@@ -187,124 +158,19 @@ class RuntimeExecutor:
                             body.update({"runId": str(parent_id), "tablePrefix": run_prefix(parent_id)})
                     payload = await self._programmatic(job, runner, project, attempt, body)
                     return ExecutionResult(payload)
-                request = {**job["request_json"], "resources": resources or {}}
-                if job["kind"] == DBT_COMMAND:
-                    spec = build_dbt_command(DbtJobRequest.model_validate(request), project, self.settings.profiles_dir)
-                elif job["kind"] == MF_COMMAND:
-                    spec = build_metricflow_command(
-                        MetricFlowJobRequest.model_validate(request), project, self.settings.profiles_dir,
-                    )
-                else:
-                    raise ValueError("unsupported runtime job kind")
-                record = await self._command(job, runner, spec, BUILDING)
-                payload = record.model_dump(mode=JSON_MODE)
-                payload["id"] = str(job["job_id"])
-                if resources:
-                    # 成功的 dbt log 宏同样可能回显 YAML，保存前删除原文行。
-                    sensitive = {
-                        line.strip() for raw in resources.values() for line in raw.splitlines() if line.strip()
-                    }
-                    for stream in OUTPUT_STREAMS:
-                        payload[stream] = "".join(
-                            RESOURCE_REDACTION + "\n" if any(text in line for text in sensitive) else line
-                            for line in payload[stream].splitlines(keepends=True)
-                        )
-                output_set = None
-                if job["kind"] == DBT_COMMAND and not resources:
-                    source = await _thread(self.artifacts.metadata, job["input_set_id"])
-                    output_set = await _thread(
-                        self.artifacts.capture, job["project_id"], project,
-                        producer_attempt_id=str(job["attempt_id"]), kind=EXECUTION,
-                        metadata={**self._metadata(job),
-                                  "source_set_id": source.get("source_set_id") or job["input_set_id"]},
-                    )
-                return ExecutionResult(payload, output_set)
-            except ExecutionError as error:
-                # YAML 解析错误可能回显原文，失败时只持久化状态与退出码。
-                if resources:
-                    error.payload.update(stdout="", stderr="")
-                raise
+                raise ValueError("unsupported runtime job kind")
             finally:
                 # JobRunner.close 等待其进程树清理，之后才能移除工作目录。
                 await _finish_task(asyncio.create_task(runner.close()))
 
     async def _build(self, job: dict, runner: JobRunner, attempt: Path) -> ExecutionResult:
-        # 首次读取固定 Git 版本后马上保存源码，安全准备重试不再依赖 Git。
-        request = job["request_json"]
-        if job.get("input_set_id") is None:
-            configured = request["binding"]
-            binding = ProjectBinding(
-                configured["projectId"], configured["remote"], configured["projectSubdir"],
-                configured["profileBindingId"], configured.get("schemaName"),
-            )
-            project = await _thread(
-                resolve_revision, binding, request["commitSha"], request["projectDigest"],
-                attempt / SOURCE_DIRECTORY, git_ref=request.get("gitRef", GIT_MAIN),
-            )
-            source_set = await _thread(
-                self.artifacts.capture, job["project_id"], project, kind=SOURCE, metadata=self._metadata(job),
-            )
-            if not await _thread(self.jobs.attach_input, job["job_id"], job["lease_token"], source_set):
-                raise ExecutionError(ERROR_LEASE_LOST, stopped=False)
-            job = {**job, "input_set_id": source_set}
-        else:
-            project = attempt / PROJECT_DIRECTORY
-            await _thread(self.artifacts.materialize, job["input_set_id"], project)
+        from ..publications.build import execute_publication
 
-        if request.get("releaseId"):
-            # v2 发布独立处理完整覆盖证明，不弱化旧 v1 全构建验证。
-            from dbt_metricflow_service.publications.build import execute_publication
-
-            return await execute_publication(self, job, runner, attempt, project)
-        # 固定 build 使用既有 argv；所有命令由同一个 runner 管理进程树。
-        profiles = self.settings.profiles_dir
-        schema, target_name = job["schema_name"], job["profile_binding_id"]
-        table_prefix = (
-            await _thread(prepare_versioned_project, project, UUID(job["job_id"]), schema)
-            if schema == job["request_json"].get("binding", {}).get("schemaName") else None
-        )
-        base = build_programmatic_command(project, profiles, schema, target_name, attempt / INPUT_FILE,
-                                          attempt / OUTPUT_FILE)
-        common = (PROJECT_OPTION, str(project), PROFILES_OPTION, str(profiles), TARGET_OPTION, target_name)
-        if (project / PACKAGES_FILE).exists() or (project / DEPENDENCIES_FILE).exists():
-            await self._command(job, runner, CommandSpec(
-                (DBT_EXECUTABLE, DEPS_COMMAND, *common), project, base.environment, True,
-            ), BUILDING)
-        if table_prefix is not None:
-            await self._command(job, runner, CommandSpec(
-                (DBT_EXECUTABLE, PARSE_COMMAND, *common, TARGET_PATH_OPTION, str(project / TARGET_DIRECTORY)),
-                project, base.environment, True,
-            ), BUILDING)
-            await _thread(validate_versioned_manifest, project / TARGET_DIRECTORY, schema, table_prefix)
-        await self._command(job, runner, CommandSpec(
-            build_platform_command(project, profiles, target_name, schema), project, base.environment, True,
-        ), BUILDING)
-        # docs generate 可能覆盖 run_results，必须保留全量 build 的测试证明。
-        target = project / TARGET_DIRECTORY
-        results_path = target / RUN_RESULTS_FILE
-        with results_path.open("rb") as stream:
-            run_results = stream.read(self.settings.max_artifact_file_bytes + 1)
-        if len(run_results) > self.settings.max_artifact_file_bytes:
-            raise ExecutionError(ERROR_RESULT_TOO_LARGE)
-        await self._command(job, runner, CommandSpec(
-            (DBT_EXECUTABLE, DOCS_COMMAND, GENERATE_COMMAND, *common, TARGET_PATH_OPTION, str(target)),
-            project, base.environment, True,
-        ), BUILDING)
-        results_path.write_bytes(run_results)
-
-        # 查询证明与原生产物验证全部成功才创建可发布的 STAGING 输出。
-        probe = await self._programmatic(job, runner, project, attempt, {"mode": PROBE_MODE})
-        validation = await _thread(
-            validate_artifacts, target, schema, query_probe_passed=probe.get("queryCapability") is True,
-            table_prefix=table_prefix,
-        )
-        validation.update({"schemaName": schema, "toolchainVersion": job["toolchain_version"]})
-        catalog = await _thread(catalog_from_artifacts, target)
-        output_set = await _thread(
-            self.artifacts.capture, job["project_id"], project, producer_attempt_id=str(job["attempt_id"]),
-            kind=EXECUTION, metadata={**self._metadata(job), "validation_json": validation, "catalog_json": catalog},
-        )
-        return ExecutionResult(validation, output_set)
+        if not job["input_set_id"] or not job["request_json"].get("releaseId"):
+            raise ExecutionError("FIXED_COMMIT_INPUT_REQUIRED")
+        project = attempt / PROJECT_DIRECTORY
+        await _thread(self.artifacts.materialize, job["input_set_id"], project)
+        return await execute_publication(self, job, runner, attempt, project)
 
     async def _command(self, job: dict, runner: JobRunner, spec: CommandSpec, phase: str) -> JobRecord:
         # 提前记录外部执行；失去租约的节点绝不再启动子进程。

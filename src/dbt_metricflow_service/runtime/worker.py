@@ -10,7 +10,8 @@ import time
 from sqlalchemy.exc import DBAPIError as DatabaseError
 from sqlalchemy.exc import TimeoutError as PoolTimeout
 
-from dbt_metricflow_service.runtime.executor import ERROR_COMMAND_FAILED, ExecutionError, RuntimeExecutor, _thread
+from dbt_metricflow_service.runtime.completion import complete_job
+from dbt_metricflow_service.runtime.executor import ERROR_COMMAND_FAILED, ExecutionError, RuntimeExecutor
 
 logger = logging.getLogger(__name__)
 POLL_SECONDS = 0.25
@@ -36,20 +37,6 @@ class Worker:
     def start(self):
         self._tasks = [asyncio.create_task(self._slot()) for _ in range(self.runtime.settings.worker_concurrency)]
         self._tasks.append(asyncio.create_task(self._maintain()))
-        if self.runtime.settings.branch_events_enabled:
-            self._tasks.append(asyncio.create_task(self._sync_branches()))
-
-    async def _sync_branches(self):
-        # 使用现有 worker 生命周期，慢 Git 核对不能阻塞任务和输入的续租循环。
-        from dbt_metricflow_service.branches.sync import BranchSynchronizer
-
-        synchronizer = BranchSynchronizer(self.runtime)
-        while not self._stopping:
-            try:
-                await _thread(synchronizer.scan)
-            except (DatabaseError, PoolTimeout, RuntimeError) as error:
-                logger.warning(FAILURE_LOG, type(error).__name__)
-            await asyncio.sleep(self.runtime.settings.branch_poll_seconds)
 
     async def close(self):
         # 取消执行会先由执行器终止子进程树；数据库失联时等待租约恢复。
@@ -62,17 +49,7 @@ class Worker:
     async def _maintain(self):
         while not self._stopping:
             try:
-                with self.runtime._input_lock:
-                    ids = list(self.runtime._inputs)
-                await asyncio.to_thread(
-                    self.runtime.jobs.heartbeat_inputs, str(self.runtime.instance_id), job_ids=ids,
-                )
                 await asyncio.to_thread(self.runtime.jobs.recover)
-                # 已经由恢复扫描终结的本机输入及时释放，避免占满接收槽位。
-                for job_id in ids:
-                    row = await asyncio.to_thread(self.runtime.jobs.get, job_id)
-                    if row and row["status"] in ("FAILED", "SUCCEEDED"):
-                        self.runtime.discard_input(job_id)
             except (DatabaseError, PoolTimeout, RuntimeError) as error:
                 logger.warning(FAILURE_LOG, type(error).__name__)
             await asyncio.sleep(self.runtime.settings.heartbeat_seconds)
@@ -84,6 +61,7 @@ class Worker:
                     self.runtime.jobs.claim, str(self.runtime.instance_id),
                     toolchain_version=self.runtime.toolchain,
                     config_versions=[self.runtime.settings.config_version],
+                    kinds=["BUILD_RUN", "DRAFT_VALIDATION", "METRIC_QUERY", "QUERY_OPTIONS", "RUN_CLEANUP"],
                 )
                 if job is not None:
                     await self._execute(job)
@@ -94,11 +72,7 @@ class Worker:
             await asyncio.sleep(POLL_SECONDS)
 
     async def _execute(self, job):
-        resources = self.runtime.input_for(job["job_id"])
-        if job["input_mode"] == VOLATILE and resources is None:
-            await asyncio.to_thread(self.runtime.jobs.fail, job["job_id"], job["lease_token"], INPUT_LOST)
-            return
-        execution = asyncio.create_task(self.executor.execute(job, resources))
+        execution = asyncio.create_task(self.executor.execute(job))
         heartbeat = asyncio.create_task(self._heartbeat(job, execution))
         try:
             result = await execution
@@ -106,7 +80,7 @@ class Worker:
                 raise ExecutionError(RESULT_TOO_LARGE)
             # 输出、产物封存和任务成功在同一持久事务内发布。
             await asyncio.to_thread(
-                self.runtime.jobs.finish, job["job_id"], job["lease_token"], result.payload,
+                complete_job, self.runtime.jobs, job["job_id"], job["lease_token"], result.payload,
                 output_set_id=result.output_set_id, seal=self.runtime.artifacts.seal,
                 stdout_tail=result.payload.get("stdout", ""), stderr_tail=result.payload.get("stderr", ""),
                 exit_code=result.payload.get("exit_code", 0),
@@ -129,7 +103,6 @@ class Worker:
         finally:
             heartbeat.cancel()
             await asyncio.gather(heartbeat, return_exceptions=True)
-            self.runtime.discard_input(job["job_id"])
 
     async def _fail(self, job, code, *, detail=None, stopped=True):
         try:

@@ -15,7 +15,7 @@ from dbt_metricflow_service.validation.models import ValidationResult
 def test_shared_fixture_matches_typed_contract_and_hash_manifest():
     directory = Path(__file__).parent / "fixtures/agent_contract"
     manifest = json.loads((directory / "manifest.json").read_text("utf-8"))
-    assert manifest["protocolVersion"] == "agent-dbt-v1"
+    assert manifest["protocolVersion"] == "fixed-commit-v1"
     for name, digest in manifest["sha256"].items():
         assert hashlib.sha256((directory / name).read_bytes()).hexdigest() == digest
     fixture = json.loads((directory / "protocol-v1.json").read_text("utf-8"))
@@ -26,7 +26,7 @@ def test_shared_fixture_matches_typed_contract_and_hash_manifest():
 
 def test_new_routes_publish_typed_response_schemas():
     app = FastAPI()
-    app.include_router(create_publication_router(SimpleNamespace(db=None)))
+    app.include_router(create_publication_router(SimpleNamespace(db=None, jobs=SimpleNamespace(db=None), settings=SimpleNamespace(service_token=None))))
     paths = app.openapi()["paths"]
     for path, method, status in [
         ("/v2/projects/{project_id}/query-option-jobs", "post", "202"),

@@ -1,20 +1,14 @@
 from __future__ import annotations
 
-import asyncio
-import hashlib
-import json
 from datetime import date, datetime
 from decimal import Decimal
-from pathlib import Path
 from typing import Any
-from uuid import UUID
 
 from metricflow.engine.metricflow_engine import MetricFlowQueryRequest
 from metricflow_semantic_interfaces.type_enums.time_granularity import TimeGranularity
 from metricflow_semantics.errors.error_classes import InvalidQueryException
 
 from dbt_metricflow_service.platform.models import PlatformQueryRequest, QueryMode
-from dbt_metricflow_service.platform.store import PlatformJobStore, RunState
 
 ALLOWED_OPERATORS = frozenset({"=", "!=", ">", ">=", "<", "<=", "IN"})
 
@@ -84,77 +78,3 @@ def serialize_rows(table: Any, *, limit: int) -> dict[str, Any]:
     return {"columns": columns, "rows": rows, "truncated": len(table.rows) > limit}
 
 
-class PlatformQueryCoordinator:
-    """固定 run 上异步受理 MetricFlow 查询，结果只保存在任务目录。"""
-
-    def __init__(self, store: PlatformJobStore, runs: Any, root: Path, profiles_dir: Path) -> None:
-        self.store = store
-        self.runs = runs
-        self.root = root.resolve()
-        self.profiles_dir = profiles_dir
-        self._tasks: set[asyncio.Task[None]] = set()
-
-    def _ready(self, run_id: UUID) -> tuple[Path, str, str]:
-        snapshot = self.runs.get(run_id)
-        if snapshot is None or snapshot["state"] != RunState.READY or snapshot.get("queryCapability") is not True:
-            raise ValueError("固定版本尚不可查询")
-        return self.runs.project_for_run(run_id), str(snapshot["schemaName"]), str(snapshot["profileBindingId"])
-
-    def options(self, run_id: UUID, metrics: tuple[str, ...]) -> dict[str, Any]:
-        from dbt_metricflow_service.platform.metricflow import invoke_programmatic
-
-        project, schema, target = self._ready(run_id)
-        directory = self.root / "options"
-        directory.mkdir(parents=True, exist_ok=True)
-        fingerprint = hashlib.sha256(json.dumps([str(run_id), metrics]).encode()).hexdigest()
-        input_path = directory / f"{fingerprint}.input.json"
-        output_path = directory / f"{fingerprint}.output.json"
-        input_path.write_text(json.dumps({"mode": "OPTIONS", "metrics": metrics}), encoding="utf-8")
-        return invoke_programmatic(project, self.profiles_dir, schema, target, input_path, output_path)
-
-    def submit(self, request: PlatformQueryRequest) -> dict[str, str]:
-        self._ready(request.run_id)
-        fingerprint = hashlib.sha256(request.model_dump_json(exclude={"idempotency_key"}).encode()).hexdigest()
-        query_id = self.store.reserve_query(request.idempotency_key, fingerprint, request.run_id)
-        directory = self.root / str(query_id)
-        directory.mkdir(parents=True, exist_ok=True)
-        if self.store.claim_query(query_id, directory):
-            (directory / "request.json").write_text(request.model_dump_json(by_alias=True), encoding="utf-8")
-            task = asyncio.create_task(self._execute(query_id, request, directory))
-            self._tasks.add(task)
-            task.add_done_callback(self._tasks.discard)
-        return {"queryId": str(query_id)}
-
-    async def _execute(self, query_id: UUID, request: PlatformQueryRequest, directory: Path) -> None:
-        from dbt_metricflow_service.platform.metricflow import invoke_programmatic
-
-        try:
-            project, schema, target = self._ready(request.run_id)
-            input_path = directory / "input.json"
-            output_path = directory / "result.json"
-            input_path.write_text(
-                json.dumps({"mode": request.mode.value, "request": request.model_dump(by_alias=True, mode="json")}),
-                encoding="utf-8",
-            )
-            await asyncio.to_thread(
-                invoke_programmatic, project, self.profiles_dir, schema, target, input_path, output_path
-            )
-            (directory / "READY").write_text("ready\n", encoding="utf-8")
-            self.store.transition_query(query_id, RunState.READY, directory)
-        except Exception as error:
-            self.store.transition_query(query_id, RunState.FAILED, directory, type(error).__name__)
-
-    def get(self, query_id: UUID) -> dict[str, Any] | None:
-        record = self.store.find_query(query_id)
-        if record is None:
-            return None
-        result: dict[str, Any] = {"queryId": str(query_id), "state": record.state.value}
-        if record.state is RunState.READY and record.artifact_path:
-            result.update(json.loads((record.artifact_path / "result.json").read_text(encoding="utf-8")))
-        if record.error_code:
-            result["errorCode"] = record.error_code
-        return result
-
-    def get_by_key(self, key: str) -> dict[str, Any] | None:
-        record = self.store.find_query_by_key(key)
-        return self.get(record.run_id) if record else None

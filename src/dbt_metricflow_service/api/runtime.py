@@ -5,19 +5,16 @@ import os
 import shutil
 from contextlib import asynccontextmanager
 from importlib.metadata import version
-from uuid import UUID
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import DBAPIError as DatabaseError
 from sqlalchemy.exc import TimeoutError as PoolTimeout
 
 from dbt_metricflow_service import __version__
 from dbt_metricflow_service.api.limits import RequestBodyLimitMiddleware
-from dbt_metricflow_service.execution.models import DbtJobRequest, JobRecord, MetricFlowJobRequest
-from dbt_metricflow_service.platform.models import PlatformQueryRequest, PlatformRunRequest
-from dbt_metricflow_service.runtime.service import AdapterUnsupported, Runtime, RuntimeUnavailable
-from dbt_metricflow_service.storage.jobs import CleanupBlocked, ProjectBusy, StoreConflict
+from dbt_metricflow_service.runtime.service import Runtime, RuntimeUnavailable
+from dbt_metricflow_service.storage.jobs import ProjectBusy, StoreConflict
 
 RUNS = "/v1/project-runs"
 QUERIES = "/v1/query-jobs"
@@ -49,15 +46,9 @@ def create_runtime_app(settings):
     from dbt_metricflow_service.publications.api import create_publication_router
 
     app.include_router(create_publication_router(runtime))
-    from dbt_metricflow_service.branches.api import create_branch_router
+    from dbt_metricflow_service.validation.api import create_commit_validation_router
 
-    app.include_router(create_branch_router(runtime))
-    from dbt_metricflow_service.branches.events import create_branch_event_router
-
-    app.include_router(create_branch_event_router(runtime))
-    from dbt_metricflow_service.validation.api import create_draft_validation_router
-
-    app.include_router(create_draft_validation_router(runtime))
+    app.include_router(create_commit_validation_router(runtime))
 
     # 错误响应不输出数据库驱动异常正文或连接凭据。
     async def unavailable(_request, _error):
@@ -74,25 +65,6 @@ def create_runtime_app(settings):
     @app.exception_handler(StoreConflict)
     async def conflict(_request, _error):
         return JSONResponse(status_code=409, content={"detail": {"code": "idempotency_conflict"}})
-
-    @app.exception_handler(AdapterUnsupported)
-    async def unsupported(_request, _error):
-        return JSONResponse(status_code=422, content={"detail": {"code": "metricflow_adapter_not_supported"}})
-
-    async def call(function, *args, invalid="invalid_request", missing="not_found"):
-        try:
-            return await asyncio.to_thread(function, *args)
-        except StoreConflict:
-            raise
-        except KeyError as error:
-            raise HTTPException(404, detail={"code": missing}) from error
-        except ValueError as error:
-            raise HTTPException(422, detail={"code": invalid}) from error
-
-    def found(value, code):
-        if value is None:
-            raise HTTPException(404, detail={"code": code})
-        return value
 
     @app.get("/health/live")
     async def live():
@@ -112,62 +84,5 @@ def create_runtime_app(settings):
     @app.get("/v1/versions")
     async def versions():
         return {"service": __version__, **{package: version(package) for package in VERSION_DISTRIBUTIONS}}
-
-    @app.post("/v1/dbt/jobs", status_code=202)
-    async def dbt(payload: DbtJobRequest) -> JobRecord:
-        return await runtime.submit_cli(payload)
-
-    @app.post("/v1/metricflow/jobs", status_code=202)
-    async def metricflow(payload: MetricFlowJobRequest) -> JobRecord:
-        return await runtime.submit_cli(payload)
-
-    @app.get("/v1/jobs/{job_id}")
-    async def job(job_id: UUID) -> JobRecord:
-        return found(await asyncio.to_thread(runtime.cli_record, str(job_id)), "job_not_found")
-
-    @app.post(RUNS, status_code=202)
-    async def submit_run(payload: PlatformRunRequest):
-        return await call(runtime.submit_run, payload, invalid="invalid_platform_run")
-
-    @app.get(RUNS + "/by-key/{key}")
-    async def run_by_key(key: str):
-        return found(await call(runtime.run_by_key, key), "run_not_found")
-
-    @app.get(RUNS + "/{run_id}")
-    async def get_run(run_id: UUID):
-        return found(await call(runtime.get_run, str(run_id)), "run_not_found")
-
-    @app.get(RUNS + "/{run_id}/catalog")
-    async def catalog(run_id: UUID):
-        try:
-            return await asyncio.to_thread(runtime.catalog, str(run_id))
-        except (KeyError, ValueError) as error:
-            raise HTTPException(409, detail={"code": "catalog_unavailable"}) from error
-
-    @app.get(RUNS + "/{run_id}/query-options")
-    async def options(run_id: UUID, metrics: list[str] = METRIC_PARAMS):
-        return await call(runtime.options, str(run_id), tuple(metrics), invalid="query_options_unavailable")
-
-    @app.post(RUNS + "/{run_id}:cleanup")
-    async def cleanup(run_id: UUID):
-        try:
-            await asyncio.to_thread(runtime.cleanup, str(run_id))
-        except KeyError as error:
-            raise HTTPException(404, detail={"code": "run_not_found"}) from error
-        except (CleanupBlocked, ValueError) as error:
-            raise HTTPException(409, detail={"code": "run_cleanup_blocked"}) from error
-        return {"state": "CLEANED"}
-
-    @app.post(QUERIES, status_code=202)
-    async def query(payload: PlatformQueryRequest):
-        return await call(runtime.submit_query, payload, invalid="query_unavailable")
-
-    @app.get(QUERIES + "/by-key/{key}")
-    async def query_by_key(key: str):
-        return found(await call(runtime.query_by_key, key), "query_not_found")
-
-    @app.get(QUERIES + "/{query_id}")
-    async def get_query(query_id: UUID):
-        return found(await call(runtime.get_query, str(query_id)), "query_not_found")
 
     return app

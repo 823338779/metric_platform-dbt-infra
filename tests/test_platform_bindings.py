@@ -8,7 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from dbt_metricflow_service.platform.bindings import ProjectBinding, load_bindings, resolve_revision
-from dbt_metricflow_service.platform.models import PlatformRunRequest
+from dbt_metricflow_service.publications.models import FixedCommitRequest
 
 
 def git(repo: Path, *args: str) -> str:
@@ -61,12 +61,12 @@ def test_resolve_fixed_sha_and_digest(repository: Path, tmp_path: Path) -> None:
 def test_draft_resolves_exact_old_main_commit_without_published_digest(repository, tmp_path):
     import dbt_metricflow_service.platform.bindings as platform_bindings
 
-    assert hasattr(platform_bindings, "resolve_draft_revision"), "draft baseline resolver is not implemented"
+    assert hasattr(platform_bindings, "resolve_commit"), "draft baseline resolver is not implemented"
     old = git(repository, "rev-parse", "HEAD")
     expected = digest(repository, old)
     (repository / "models/a.sql").write_text("select 2\n", encoding="utf-8")
     git(repository, "commit", "-am", "newer unpublished source")
-    project, actual = platform_bindings.resolve_draft_revision(
+    project, actual = platform_bindings.resolve_commit(
         ProjectBinding("sample", str(repository), ".", "postgres"), old, tmp_path / "draft")
     assert actual == expected
     assert (project / "models/a.sql").read_text("utf-8") == "select 1 as value\n"
@@ -97,7 +97,7 @@ def test_reject_unsafe_sha_subdir_symlink_and_digest(repository: Path, tmp_path:
 
 def test_remote_cannot_be_supplied_by_request() -> None:
     with pytest.raises(ValidationError):
-        PlatformRunRequest.model_validate({
+        FixedCommitRequest.model_validate({
             "projectId": "sample", "commitSha": "a" * 40, "projectDigest": "b" * 64,
             "profileBindingId": "postgres", "configVersion": "1", "idempotencyKey": "one",
             "remote": "https://untrusted.invalid/repo.git",
@@ -116,7 +116,7 @@ def test_fixed_schema_binding_is_controlled_by_service(tmp_path: Path) -> None:
 
     assert binding.schema_name == "dbt_ecom"
     with pytest.raises(ValidationError):
-        PlatformRunRequest.model_validate({
+        FixedCommitRequest.model_validate({
             "projectId": "sample", "commitSha": "a" * 40, "projectDigest": "b" * 64,
             "profileBindingId": "starrocks", "configVersion": "2", "idempotencyKey": "one",
             "schemaName": "attacker_db",

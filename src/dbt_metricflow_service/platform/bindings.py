@@ -48,45 +48,8 @@ REF_DOT = "."
 REF_LOCK = ".lock"
 
 
-def validate_git_ref(git_ref: str) -> str:
-    """只接受完整分支引用，不接受 revision 表达式、refspec 或选项。"""
-    # 校验 Git check-ref-format 的分支限制，并将范围收窄至 refs/heads。
-    if (not git_ref.startswith(HEADS_PREFIX) or len(git_ref) > 255 or REF_FORBIDDEN.search(git_ref)
-            or git_ref.endswith(REF_DOT)
-            or any(not part or part.startswith(REF_DOT) or part.endswith(REF_LOCK)
-                   for part in git_ref.split(REF_SEPARATOR))):
-        raise ValueError("Git 分支引用无效")
-    return git_ref
 
 
-def observe_revision(binding: ProjectBinding, work_root: Path, *, git_ref: str = GIT_MAIN) -> tuple[str, str]:
-    """从服务受控分支取得 SHA 与相同的项目树摘要；实际执行仍逐文件验证。"""
-    prefix = _prefix(binding.project_subdir)
-    validate_git_ref(git_ref)
-    work_root.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=GIT_CACHE_PREFIX, dir=work_root) as directory:
-        cache = Path(directory)
-        _git(cache, GIT_INIT, GIT_BARE)
-        _git(cache, GIT_FETCH, GIT_NO_TAGS, GIT_SEPARATOR, binding.remote, git_ref)
-        sha = _git(cache, GIT_REV_PARSE, GIT_VERIFY, GIT_HEAD).decode().strip()
-        if not SHA_PATTERN.fullmatch(sha):
-            raise ValueError("Git 版本无效")
-        raw = _git(cache, GIT_TREE, GIT_RECURSIVE, GIT_ZERO, sha, GIT_SEPARATOR, prefix[:-1] if prefix else ROOT_PATH)
-        entries = {}
-        for entry in raw.split(b"\0"):
-            if not entry:
-                continue
-            metadata, path = entry.decode(UTF8).split("\t", 1)
-            mode, kind, blob = metadata.split()
-            if kind != GIT_BLOB or mode not in GIT_MODES or not SHA_PATTERN.fullmatch(blob):
-                raise ValueError("dbt 项目输入无效")
-            relative = path[len(prefix):]
-            if _included(relative):
-                entries[relative] = (mode, blob)
-        digest = hashlib.sha256()
-        for relative, (mode, blob) in sorted(entries.items()):
-            digest.update(relative.encode(UTF8) + b"\0" + f"{mode} {blob}".encode(UTF8) + b"\0")
-        return sha, digest.hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,25 +104,22 @@ def _included(path: str) -> bool:
     return path in ROOT_INPUTS or path.split("/", 1)[0] in INPUT_DIRECTORIES and "/" in path
 
 
-def resolve_revision(binding: ProjectBinding, commit_sha: str, expected_digest: str, work_root: Path, *,
-                     git_ref: str = GIT_MAIN) -> Path:
-    """从受控 remote 读取目标分支祖先的固定 Git 树，核对摘要后安全写入任务目录。"""
+def resolve_revision(binding: ProjectBinding, commit_sha: str, expected_digest: str, work_root: Path) -> Path:
+    """从受控 remote 读取固定 Git 树，核对摘要后安全写入任务目录。"""
     if not SHA_PATTERN.fullmatch(commit_sha) or not DIGEST_PATTERN.fullmatch(expected_digest):
         raise ValueError("固定版本或项目摘要无效")
-    return _resolve_revision(binding, commit_sha, expected_digest, work_root, git_ref)[0]
+    return _resolve_revision(binding, commit_sha, expected_digest, work_root)[0]
 
 
-def resolve_draft_revision(binding: ProjectBinding, commit_sha: str, work_root: Path, *,
-                           git_ref: str = GIT_MAIN) -> tuple[Path, str]:
-    """草稿不依赖已发布摘要，仍只能读取受控分支祖先并执行相同树检查。"""
+def resolve_commit(binding: ProjectBinding, commit_sha: str, work_root: Path) -> tuple[Path, str]:
+    """读取受控 remote 的精确提交并计算源码摘要。"""
     if not SHA_PATTERN.fullmatch(commit_sha):
         raise ValueError("固定版本无效")
-    return _resolve_revision(binding, commit_sha, None, work_root, git_ref)
+    return _resolve_revision(binding, commit_sha, None, work_root)
 
 
-def _resolve_revision(binding, commit_sha, expected_digest, work_root, git_ref):
+def _resolve_revision(binding, commit_sha, expected_digest, work_root):
     prefix = _prefix(binding.project_subdir)
-    validate_git_ref(git_ref)
     if not binding.remote or not binding.project_id or not binding.profile_binding_id:
         raise ValueError("平台项目绑定无效")
     root = work_root.resolve()
@@ -167,11 +127,12 @@ def _resolve_revision(binding, commit_sha, expected_digest, work_root, git_ref):
     with tempfile.TemporaryDirectory(prefix="git-", dir=root) as cache_name:
         cache = Path(cache_name)
         _git(cache, "init", "--bare")
-        _git(cache, GIT_FETCH, GIT_NO_TAGS, GIT_SEPARATOR, binding.remote, git_ref)
+        _git(cache, GIT_FETCH, GIT_NO_TAGS, GIT_SEPARATOR, binding.remote, commit_sha)
         fetched = _git(cache, "rev-parse", "--verify", "FETCH_HEAD").decode().strip()
         if not SHA_PATTERN.fullmatch(fetched):
             raise ValueError("Git 版本无效")
-        _git(cache, "merge-base", "--is-ancestor", commit_sha, fetched)
+        if fetched != commit_sha:
+            raise ValueError("Git did not return the requested commit")
         raw = _git(cache, "ls-tree", "-r", "-z", commit_sha, "--", prefix[:-1] if prefix else ".")
         entries: dict[str, tuple[str, str]] = {}
         for item in raw.split(b"\0"):

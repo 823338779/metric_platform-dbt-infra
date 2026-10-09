@@ -6,6 +6,7 @@ import pytest
 
 from dbt_metricflow_service.publications.errors import PublicationError
 from dbt_metricflow_service.publications.models import PublishedQueryRequest
+from dbt_metricflow_service.runtime.completion import complete_job
 from tests.test_publication_queries import query_service
 from tests.test_publication_storage import store as store
 
@@ -19,7 +20,7 @@ def queued(service, job, release):
 
 def finish(service, job, payload):
     child = service.runtime.jobs.claim(str(uuid4()), toolchain_version=job["toolchain_version"], kinds=["METRIC_QUERY"])
-    service.runtime.jobs.finish(child["job_id"], child["lease_token"], payload)
+    complete_job(service.runtime.jobs, child["job_id"], child["lease_token"], payload)
 
 
 def test_pages_preserve_rows_and_status_never_reads_payload(store, tmp_path, monkeypatch):

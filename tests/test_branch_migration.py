@@ -4,6 +4,7 @@ import hashlib
 from contextlib import contextmanager
 from uuid import uuid4
 
+from dbt_metricflow_service.runtime.completion import complete_job
 from dbt_metricflow_service.storage.branches import BranchStore
 from dbt_metricflow_service.storage.jobs import JobStore
 from dbt_metricflow_service.storage.postgres import Database
@@ -115,7 +116,7 @@ def test_upgrade_preserves_production_identities(store):
 def test_legacy_project_facade_reads_production_pointer(store, tmp_path):
     # 旧项目读取门面也必须从 main 派生，避免调用方看到过期指针。
     jobs, job, release, output, _ = prepared(store, tmp_path)
-    assert jobs.finish(job["job_id"], job["lease_token"], output_set_id=output)
+    assert complete_job(jobs, job["job_id"], job["lease_token"], output_set_id=output)
     project = JobStore(store.db).project(job["project_id"])
     assert project["active_published_release_id"] == release["release_id"]
     assert project["publication_sequence"] == 1

@@ -1,0 +1,7 @@
+src\dbt_metricflow_service\publications\build.py:76:9: B007 Loop control variable `native_id` not used within loop body
+src\dbt_metricflow_service\storage\publications.py:95:121: E501 Line too long (128 > 120)
+tests\test_agent_response_contract.py:29:121: E501 Line too long (152 > 120)
+tests\test_fixed_commit_contract.py:43:121: E501 Line too long (132 > 120)
+tests\test_publication_service.py:21:121: E501 Line too long (123 > 120)
+Found 31 errors (26 fixed, 5 remaining).
+No fixes available (1 hidden fix can be enabled with the `--unsafe-fixes` option).

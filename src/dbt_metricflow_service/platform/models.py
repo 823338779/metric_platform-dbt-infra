@@ -8,19 +8,6 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class PlatformRunRequest(BaseModel):
-    """平台请求仅指定已有绑定和固定版本，不接收执行环境。"""
-
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
-
-    project_id: str = Field(alias="projectId")
-    commit_sha: str = Field(alias="commitSha")
-    project_digest: str = Field(alias="projectDigest")
-    profile_binding_id: str = Field(alias="profileBindingId")
-    config_version: str = Field(alias="configVersion")
-    idempotency_key: str = Field(alias="idempotencyKey")
-
-
 class QueryMode(StrEnum):
     """MetricFlow 平台查询模式。"""
 

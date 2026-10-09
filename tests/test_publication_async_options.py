@@ -4,6 +4,7 @@ from types import MethodType
 from uuid import uuid4
 
 from dbt_metricflow_service.publications.models import QueryOptionsRequest
+from dbt_metricflow_service.runtime.completion import complete_job
 from dbt_metricflow_service.runtime.service import Runtime
 from tests.test_publication_queries import query_service
 from tests.test_publication_storage import store as store
@@ -21,7 +22,7 @@ def test_options_admission_deduplicates_and_reads_same_mapping(store, tmp_path):
     assert accepted["state"] == "QUEUED"
     assert service.submit_options(job["project_id"], request)["optionsJobId"] == accepted["optionsJobId"]
     child = runtime.jobs.claim(str(uuid4()), toolchain_version=job["toolchain_version"], kinds=["QUERY_OPTIONS"])
-    runtime.jobs.finish(child["job_id"], child["lease_token"], runtime.options(None, ("orders",)))
+    complete_job(runtime.jobs, child["job_id"], child["lease_token"], runtime.options(None, ("orders",)))
     result = service.get_options(job["project_id"], accepted["optionsJobId"])
     assert result["state"] == "READY"
     assert result["options"] == service.query_options(job["project_id"], request)["options"]
@@ -35,7 +36,7 @@ def test_options_admission_deduplicates_and_reads_same_mapping(store, tmp_path):
         service.get_options("wrong-project", accepted["optionsJobId"])
     query = queued(service, job, release)
     jobs, candidate, _, output, _ = prepared(store, tmp_path, job["project_id"])
-    jobs.finish(candidate["job_id"], candidate["lease_token"], output_set_id=output)
+    complete_job(jobs, candidate["job_id"], candidate["lease_token"], output_set_id=output)
     with pytest.raises(ReleaseGone):
         service.get_options(job["project_id"], accepted["optionsJobId"])
     assert service.query_status(job["project_id"], query)["queryId"] == query

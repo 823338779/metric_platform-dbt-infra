@@ -15,14 +15,14 @@ async def test_two_workers_execute_persisted_task_once(tmp_path, monkeypatch):
     from dbt_metricflow_service.runtime.service import Runtime
     from dbt_metricflow_service.runtime.worker import Worker
     runtimes = [Runtime(Settings(
-        projects_root=tmp_path, profiles_dir=tmp_path, command_timeout_seconds=30,
+         profiles_dir=tmp_path, command_timeout_seconds=30,
         max_output_bytes=1024, database_url=dsn, temp_root=tmp_path / str(i),
         toolchain_version=str(uuid4()),
     )) for i in range(2)]
     runtimes[1].toolchain = runtimes[0].toolchain
     project = "worker_" + uuid4().hex
     runtimes[0].jobs.register_project(project)
-    row = runtimes[0].jobs.reserve("MF_COMMAND", project, {}, toolchain_version=runtimes[0].toolchain)
+    row = runtimes[0].jobs.reserve("QUERY_OPTIONS", project, {}, toolchain_version=runtimes[0].toolchain)
     executions = []
 
     # 只隔离外部引擎，认领、心跳和提交均经过真实数据库。
@@ -39,7 +39,7 @@ async def test_two_workers_execute_persisted_task_once(tmp_path, monkeypatch):
             if runtimes[0].jobs.get(row["job_id"])["status"] == "SUCCEEDED":
                 break
             await asyncio.sleep(0.05)
-        assert runtimes[1].cli_record(row["job_id"]).stdout == "shared result"
+        assert runtimes[1].jobs.result(row["job_id"])["payload_json"]["stdout"] == "shared result"
         assert executions == [row["job_id"]]
     finally:
         for worker in workers:

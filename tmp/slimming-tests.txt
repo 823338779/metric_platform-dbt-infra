@@ -1,0 +1,255 @@
+sFFFFFFFF..........................F..............................ss.... [ 24%]
+.....................................F.................................. [ 48%]
+...F..........F...................FFFFF............................FF... [ 72%]
+..F.FF.....FFFFFF..F....................F............................... [ 96%]
+............                                                             [100%]
+================================== FAILURES ===================================
+________ test_shared_fixture_matches_typed_contract_and_hash_manifest _________
+tests\test_agent_response_contract.py:24: in test_shared_fixture_matches_typed_contract_and_hash_manifest
+    model.model_validate(fixture[key])
+E   pydantic_core._pydantic_core.ValidationError: 3 validation errors for ValidationResult
+E   commitSha
+E     Field required [type=missing, input_value={'validationId': '0000000... '2026-10-02T00:00:00Z'}, input_type=dict]
+E       For further information visit https://errors.pydantic.dev/2.13/v/missing
+E   baseCommitSha
+E     Extra inputs are not permitted [type=extra_forbidden, input_value='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', input_type=str]
+E       For further information visit https://errors.pydantic.dev/2.13/v/extra_forbidden
+E   changesDigest
+E     Extra inputs are not permitted [type=extra_forbidden, input_value='bbbbbbbbbbbbbbbbbbbbbbbb...bbbbbbbbbbbbbbbbbbbbbbb', input_type=str]
+E       For further information visit https://errors.pydantic.dev/2.13/v/extra_forbidden
+_______________ test_new_routes_publish_typed_response_schemas ________________
+tests\test_agent_response_contract.py:29: in test_new_routes_publish_typed_response_schemas
+    app.include_router(create_publication_router(SimpleNamespace(db=None)))
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src\dbt_metricflow_service\publications\api.py:66: in create_publication_router
+    queries = QueryService(runtime)
+              ^^^^^^^^^^^^^^^^^^^^^
+src\dbt_metricflow_service\publications\queries.py:31: in __init__
+    self.store = QueryStore(runtime.jobs)
+                            ^^^^^^^^^^^^
+E   AttributeError: 'types.SimpleNamespace' object has no attribute 'jobs'
+______________________ test_live_does_not_depend_on_cli _______________________
+tests\test_api_health.py:62: in test_live_does_not_depend_on_cli
+    client = build_client(tmp_path)
+             ^^^^^^^^^^^^^^^^^^^^^^
+tests\test_api_health.py:57: in build_client
+    return TestClient(create_app(settings, ProjectRegistry(projects_root), EmptyJobRunner()))
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: create_app() takes 1 positional argument but 3 were given
+_________________ test_ready_returns_503_when_cli_is_missing __________________
+tests\test_api_health.py:73: in test_ready_returns_503_when_cli_is_missing
+    client = build_client(tmp_path)
+             ^^^^^^^^^^^^^^^^^^^^^^
+tests\test_api_health.py:57: in build_client
+    return TestClient(create_app(settings, ProjectRegistry(projects_root), EmptyJobRunner()))
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: create_app() takes 1 positional argument but 3 were given
+____________ test_ready_accepts_installed_clis_and_readable_mounts ____________
+tests\test_api_health.py:86: in test_ready_accepts_installed_clis_and_readable_mounts
+    client = build_client(tmp_path)
+             ^^^^^^^^^^^^^^^^^^^^^^
+tests\test_api_health.py:57: in build_client
+    return TestClient(create_app(settings, ProjectRegistry(projects_root), EmptyJobRunner()))
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: create_app() takes 1 positional argument but 3 were given
+__________ test_versions_returns_service_and_pinned_package_versions __________
+tests\test_api_health.py:97: in test_versions_returns_service_and_pinned_package_versions
+    response = build_client(tmp_path).get("/v1/versions")
+               ^^^^^^^^^^^^^^^^^^^^^^
+tests\test_api_health.py:57: in build_client
+    return TestClient(create_app(settings, ProjectRegistry(projects_root), EmptyJobRunner()))
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: create_app() takes 1 positional argument but 3 were given
+_________________ test_application_shutdown_closes_job_runner _________________
+tests\test_api_health.py:115: in test_application_shutdown_closes_job_runner
+    with TestClient(create_app(settings, ProjectRegistry(projects_root), runner)):
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: create_app() takes 1 positional argument but 3 were given
+_________________ test_feature_commit_not_on_main_is_readable _________________
+tests\test_branch_bindings.py:35: in test_feature_commit_not_on_main_is_readable
+    with pytest.raises(ValueError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE ValueError
+---------------------------- Captured stderr call -----------------------------
+Switched to a new branch 'feature-a'
+________________ test_vendored_sources_are_at_audited_commits _________________
+tests\test_dependencies.py:77: in test_vendored_sources_are_at_audited_commits
+    assert actual_commit == expected_commit
+E   AssertionError: assert '9a07d35d6fa7...1e483c29581ac' == '05551f73c227...c47c2a1b51625'
+E     
+E     - 05551f73c22786b933969bbccafc47c2a1b51625
+E     + 9a07d35d6fa7cef009ea574938c1e483c29581ac
+______________ test_active_catalog_and_historical_release_access ______________
+tests\test_publication_api.py:17: in test_active_catalog_and_historical_release_access
+    app.include_router(create_publication_router(runtime))
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src\dbt_metricflow_service\publications\api.py:76: in create_publication_router
+    @router.post(RELEASES, status_code=202, dependencies=[Depends(mutation_guard(runtime.settings))])
+                                                                                 ^^^^^^^^^^^^^^^^
+E   AttributeError: 'types.SimpleNamespace' object has no attribute 'settings'
+_____________ test_submit_fixes_input_and_reserves_run_atomically _____________
+tests\test_publication_service.py:22: in test_submit_fixes_input_and_reserves_run_atomically
+    first = service.submit(project, key)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src\dbt_metricflow_service\publications\service.py:74: in submit
+    prior = self.store.by_key(project_id, request.idempotency_key)
+                                          ^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'str' object has no attribute 'idempotency_key'
+__________ test_capabilities_disclose_project_path_and_time_contract __________
+tests\test_publication_time.py:35: in test_capabilities_disclose_project_path_and_time_contract
+    publication = service.publication(job["project_id"])
+                  ^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'QueryService' object has no attribute 'publication'. Did you mean: 'publications'?
+__________________ test_queued_build_reports_preparing_state __________________
+tests\test_runtime_api.py:61: in test_queued_build_reports_preparing_state
+    snapshot = runtimes[1].get_run(row["job_id"])
+               ^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'Runtime' object has no attribute 'get_run'
+_______ test_cli_acceptance_and_result_are_shared_without_local_project _______
+tests\test_runtime_api.py:67: in test_cli_acceptance_and_result_are_shared_without_local_project
+    from dbt_metricflow_service.execution.models import DbtJobRequest
+E   ImportError: cannot import name 'DbtJobRequest' from 'dbt_metricflow_service.execution.models' (E:\IdeaProjects\agent-root\dbt-metricflow-service\src\dbt_metricflow_service\execution\models.py)
+______ test_volatile_input_is_not_stored_and_queued_owner_loss_finishes _______
+tests\test_runtime_api.py:79: in test_volatile_input_is_not_stored_and_queued_owner_loss_finishes
+    from dbt_metricflow_service.execution.models import DbtJobRequest
+E   ImportError: cannot import name 'DbtJobRequest' from 'dbt_metricflow_service.execution.models' (E:\IdeaProjects\agent-root\dbt-metricflow-service\src\dbt_metricflow_service\execution\models.py)
+_________ test_postgres_http_uses_shared_store_without_project_mount __________
+tests\test_runtime_api.py:110: in test_postgres_http_uses_shared_store_without_project_mount
+    app = create_app(settings, ProjectRegistry(settings.projects_root), JobRunner(30, 1024))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: create_app() takes 1 positional argument but 3 were given
+______________ test_failed_cli_exposes_bounded_exit_diagnostics _______________
+tests\test_runtime_api.py:128: in test_failed_cli_exposes_bounded_exit_diagnostics
+    from dbt_metricflow_service.execution.models import DbtJobRequest
+E   ImportError: cannot import name 'DbtJobRequest' from 'dbt_metricflow_service.execution.models' (E:\IdeaProjects\agent-root\dbt-metricflow-service\src\dbt_metricflow_service\execution\models.py)
+___________________ test_database_errors_return_503[error0] ___________________
+tests\test_runtime_database_errors.py:31: in test_database_errors_return_503
+    assert response.status_code == 503
+E   assert 404 == 503
+E    +  where 404 = <Response [404 Not Found]>.status_code
+___________________ test_database_errors_return_503[error1] ___________________
+tests\test_runtime_database_errors.py:31: in test_database_errors_return_503
+    assert response.status_code == 503
+E   assert 404 == 503
+E    +  where 404 = <Response [404 Not Found]>.status_code
+______ test_generic_execution_restores_snapshot_and_captures_new_output _______
+tests\test_runtime_execution.py:147: in test_generic_execution_restores_snapshot_and_captures_new_output
+    original = runtime_execution.build_dbt_command
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: module 'dbt_metricflow_service.runtime.executor' has no attribute 'build_dbt_command'
+_ test_programmatic_tasks_use_restored_input_and_return_json[RUN_CLEANUP-payload1-expected1] _
+tests\test_runtime_execution.py:182: in test_programmatic_tasks_use_restored_input_and_return_json
+    result = await executor.execute(job)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src\dbt_metricflow_service\runtime\executor.py:155: in execute
+    parent_id = UUID(job["parent_run_id"])
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\82333\AppData\Roaming\uv\python\cpython-3.12-windows-x86_64-none\Lib\uuid.py:172: in __init__
+    raise TypeError('one of the hex, bytes, bytes_le, fields, '
+E   TypeError: one of the hex, bytes, bytes_le, fields, or int arguments must be given
+_ test_programmatic_tasks_use_restored_input_and_return_json[RUN_CLEANUP-payload2-expected2] _
+tests\test_runtime_execution.py:182: in test_programmatic_tasks_use_restored_input_and_return_json
+    result = await executor.execute(job)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src\dbt_metricflow_service\runtime\executor.py:155: in execute
+    parent_id = UUID(job["parent_run_id"])
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\82333\AppData\Roaming\uv\python\cpython-3.12-windows-x86_64-none\Lib\uuid.py:172: in __init__
+    raise TypeError('one of the hex, bytes, bytes_le, fields, '
+E   TypeError: one of the hex, bytes, bytes_le, fields, or int arguments must be given
+_ test_fixed_build_pins_git_source_preserves_results_and_requires_probe[True] _
+tests\test_runtime_execution.py:302: in test_fixed_build_pins_git_source_preserves_results_and_requires_probe
+    result = await executor.execute(job)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src\dbt_metricflow_service\runtime\executor.py:139: in execute
+    return await self._build(job, runner, attempt)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src\dbt_metricflow_service\runtime\executor.py:169: in _build
+    raise ExecutionError("FIXED_COMMIT_INPUT_REQUIRED")
+E   dbt_metricflow_service.runtime.executor.ExecutionError: FIXED_COMMIT_INPUT_REQUIRED
+_ test_fixed_build_pins_git_source_preserves_results_and_requires_probe[False] _
+tests\test_runtime_execution.py:295: in test_fixed_build_pins_git_source_preserves_results_and_requires_probe
+    await executor.execute(job)
+src\dbt_metricflow_service\runtime\executor.py:139: in execute
+    return await self._build(job, runner, attempt)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src\dbt_metricflow_service\runtime\executor.py:169: in _build
+    raise ExecutionError("FIXED_COMMIT_INPUT_REQUIRED")
+E   dbt_metricflow_service.runtime.executor.ExecutionError: FIXED_COMMIT_INPUT_REQUIRED
+_________ test_resource_input_and_derived_output_never_persist[True] __________
+tests\test_runtime_execution.py:320: in test_resource_input_and_derived_output_never_persist
+    original = runtime_execution.build_dbt_command
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: module 'dbt_metricflow_service.runtime.executor' has no attribute 'build_dbt_command'
+_________ test_resource_input_and_derived_output_never_persist[False] _________
+tests\test_runtime_execution.py:320: in test_resource_input_and_derived_output_never_persist
+    original = runtime_execution.build_dbt_command
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: module 'dbt_metricflow_service.runtime.executor' has no attribute 'build_dbt_command'
+__________ test_timeout_retains_bounded_diagnostics_and_unknown_stop __________
+tests\test_runtime_execution.py:353: in test_timeout_retains_bounded_diagnostics_and_unknown_stop
+    original = runtime_execution.build_dbt_command
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: module 'dbt_metricflow_service.runtime.executor' has no attribute 'build_dbt_command'
+_______ test_write_child_connection_loss_does_not_confirm_external_stop _______
+tests\test_runtime_execution.py:374: in test_write_child_connection_loss_does_not_confirm_external_stop
+    original = runtime_execution.build_dbt_command
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: module 'dbt_metricflow_service.runtime.executor' has no attribute 'build_dbt_command'
+_______ test_source_only_cleanup_drops_schema_without_semantic_manifest _______
+tests\test_runtime_execution.py:454: in test_source_only_cleanup_drops_schema_without_semantic_manifest
+    result = await executor.execute(job)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src\dbt_metricflow_service\runtime\executor.py:155: in execute
+    parent_id = UUID(job["parent_run_id"])
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\82333\AppData\Roaming\uv\python\cpython-3.12-windows-x86_64-none\Lib\uuid.py:172: in __init__
+    raise TypeError('one of the hex, bytes, bytes_le, fields, '
+E   TypeError: one of the hex, bytes, bytes_le, fields, or int arguments must be given
+________________ test_two_workers_execute_persisted_task_once _________________
+tests\test_runtime_worker.py:42: in test_two_workers_execute_persisted_task_once
+    assert runtimes[1].cli_record(row["job_id"]).stdout == "shared result"
+           ^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'Runtime' object has no attribute 'cli_record'
+============================== warnings summary ===============================
+.venv\Lib\site-packages\fastapi\testclient.py:1
+  E:\IdeaProjects\agent-root\dbt-metricflow-service\.venv\Lib\site-packages\fastapi\testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+.venv\Lib\site-packages\starlette\testclient.py:53
+  E:\IdeaProjects\agent-root\dbt-metricflow-service\.venv\Lib\site-packages\starlette\testclient.py:53: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
+    _PortalFactoryType = Callable[[], AbstractContextManager[anyio.abc.BlockingPortal]]
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_agent_response_contract.py::test_shared_fixture_matches_typed_contract_and_hash_manifest
+FAILED tests/test_agent_response_contract.py::test_new_routes_publish_typed_response_schemas
+FAILED tests/test_api_health.py::test_live_does_not_depend_on_cli - TypeError...
+FAILED tests/test_api_health.py::test_ready_returns_503_when_cli_is_missing
+FAILED tests/test_api_health.py::test_ready_accepts_installed_clis_and_readable_mounts
+FAILED tests/test_api_health.py::test_versions_returns_service_and_pinned_package_versions
+FAILED tests/test_api_health.py::test_application_shutdown_closes_job_runner
+FAILED tests/test_branch_bindings.py::test_feature_commit_not_on_main_is_readable
+FAILED tests/test_dependencies.py::test_vendored_sources_are_at_audited_commits
+FAILED tests/test_publication_api.py::test_active_catalog_and_historical_release_access
+FAILED tests/test_publication_service.py::test_submit_fixes_input_and_reserves_run_atomically
+FAILED tests/test_publication_time.py::test_capabilities_disclose_project_path_and_time_contract
+FAILED tests/test_runtime_api.py::test_queued_build_reports_preparing_state
+FAILED tests/test_runtime_api.py::test_cli_acceptance_and_result_are_shared_without_local_project
+FAILED tests/test_runtime_api.py::test_volatile_input_is_not_stored_and_queued_owner_loss_finishes
+FAILED tests/test_runtime_api.py::test_postgres_http_uses_shared_store_without_project_mount
+FAILED tests/test_runtime_api.py::test_failed_cli_exposes_bounded_exit_diagnostics
+FAILED tests/test_runtime_database_errors.py::test_database_errors_return_503[error0]
+FAILED tests/test_runtime_database_errors.py::test_database_errors_return_503[error1]
+FAILED tests/test_runtime_execution.py::test_generic_execution_restores_snapshot_and_captures_new_output
+FAILED tests/test_runtime_execution.py::test_programmatic_tasks_use_restored_input_and_return_json[RUN_CLEANUP-payload1-expected1]
+FAILED tests/test_runtime_execution.py::test_programmatic_tasks_use_restored_input_and_return_json[RUN_CLEANUP-payload2-expected2]
+FAILED tests/test_runtime_execution.py::test_fixed_build_pins_git_source_preserves_results_and_requires_probe[True]
+FAILED tests/test_runtime_execution.py::test_fixed_build_pins_git_source_preserves_results_and_requires_probe[False]
+FAILED tests/test_runtime_execution.py::test_resource_input_and_derived_output_never_persist[True]
+FAILED tests/test_runtime_execution.py::test_resource_input_and_derived_output_never_persist[False]
+FAILED tests/test_runtime_execution.py::test_timeout_retains_bounded_diagnostics_and_unknown_stop
+FAILED tests/test_runtime_execution.py::test_write_child_connection_loss_does_not_confirm_external_stop
+FAILED tests/test_runtime_execution.py::test_source_only_cleanup_drops_schema_without_semantic_manifest
+FAILED tests/test_runtime_worker.py::test_two_workers_execute_persisted_task_once
+30 failed, 267 passed, 3 skipped, 2 warnings in 67.46s (0:01:07)

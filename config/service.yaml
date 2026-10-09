@@ -12,8 +12,6 @@ SERVICE_PORT: 8000
 SERVICE_DATABASE_URL: "host=localhost port=5432 user=data_agent password=data_agent_local_dev dbname=dbt_service connect_timeout=5"
 
 # dbt 项目目录及派生产物根目录；PostgreSQL 模式的项目源码保存在服务数据库中。
-PROJECTS_ROOT: "../../tmp/metric-debug/projects"
-JOB_ARTIFACTS_ROOT: "../../tmp/metric-debug/artifacts"
 
 # dbt 数据仓库连接也在本文件维护；启动时自动生成 dbt CLI 要求的 profiles.yml。
 # 生成文件位于 SERVICE_TEMP_ROOT 下，无需手动维护；环境变量 DBT_PROFILES_DIR 可切换到外部配置。
@@ -37,8 +35,6 @@ DBT_PROFILES:
         use_pure: 'true'
 
 # 兼容模式的项目绑定 JSON 文件和服务独占的 SQLite 任务索引。
-PLATFORM_BINDINGS_FILE: "../../tmp/metric-debug/bindings.json"
-PLATFORM_DB_PATH: "../../tmp/metric-debug/jobs.sqlite"
 
 # PostgreSQL 模式可丢弃的实例工作目录；使用短路径避免 Windows 的 260 字符限制。
 # 多副本必须使用各自独立目录。

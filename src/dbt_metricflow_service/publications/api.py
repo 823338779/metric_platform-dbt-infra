@@ -1,14 +1,16 @@
 """已发布目录的 HTTP 边界。"""
 
 import asyncio
-from uuid import UUID, uuid4
+from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from ..api.auth import mutation_guard
 from ..storage.jobs import StoreConflict
-from .compatibility import legacy_selection, submit_legacy
+from .catalog_service import CatalogService
 from .errors import PublicationError
 from .models import (
+    FixedCommitRequest,
     OptionsTask,
     PublishedQueryRequest,
     QueryOptionsRequest,
@@ -16,6 +18,7 @@ from .models import (
     QueryStatus,
     ResourceKind,
 )
+from .queries import QueryService
 from .service import InvalidPublishedArtifact, PublicationService, ReleaseGone
 
 PREFIX = "/v2/projects"
@@ -59,6 +62,8 @@ async def call(function, *args):
 def create_publication_router(runtime) -> APIRouter:
     router = APIRouter(prefix=PREFIX)
     service = PublicationService(runtime)
+    catalogs = CatalogService(runtime)
+    queries = QueryService(runtime)
 
     @router.get("")
     async def projects():
@@ -67,6 +72,10 @@ def create_publication_router(runtime) -> APIRouter:
     @router.get(PUBLICATION)
     async def publication(project_id: str):
         return await call(service.publication, project_id)
+
+    @router.post(RELEASES, status_code=202, dependencies=[Depends(mutation_guard(runtime.settings))])
+    async def submit_release(project_id: str, request: FixedCommitRequest):
+        return service._descriptor(await call(service.submit, project_id, request))
 
     @router.get(RELEASES)
     async def releases(project_id: str):
@@ -79,16 +88,16 @@ def create_publication_router(runtime) -> APIRouter:
     @router.get(CATALOG)
     async def catalog(project_id: str, release_id: UUID, q: str = "", kind: ResourceKind | None = None,
                       page: int = Query(1, ge=1), size: int = Query(50, ge=1, le=200)):
-        return await call(service.catalog, project_id, str(release_id), q, kind, page, size)
+        return await call(catalogs.catalog, project_id, str(release_id), q, kind, page, size)
 
     @router.get(RESOURCE)
     async def resource(project_id: str, release_id: UUID, resource_id: str):
-        return await call(service.resource, project_id, str(release_id), resource_id)
+        return await call(catalogs.resource, project_id, str(release_id), resource_id)
 
     # 固定白名单子资源，不允许客户端将路径变成任意产物文件读取。
     def view_handler(view):
         async def handler(project_id: str, release_id: UUID, resource_id: str):
-            return await call(service.resource, project_id, str(release_id), resource_id, view)
+            return await call(catalogs.resource, project_id, str(release_id), resource_id, view)
         return handler
 
     for view in VIEWS:
@@ -96,43 +105,33 @@ def create_publication_router(runtime) -> APIRouter:
 
     @router.post(QUERY_OPTIONS)
     async def options(project_id: str, request: QueryOptionsRequest):
-        return await call(service.query_options, project_id, request)
+        return await call(queries.query_options, project_id, request)
 
     @router.post(QUERIES, status_code=202)
     async def submit(project_id: str, request: PublishedQueryRequest):
         # 当前服务仅面向受控平台绑定；不接受客户端伪造身份作为幂等域。
-        return await call(service.submit_query, project_id, request, PLATFORM_IDENTITY)
+        return await call(queries.submit_query, project_id, request, PLATFORM_IDENTITY)
 
     @router.post(QUERY_OPTION_JOBS, status_code=202, response_model=OptionsTask, response_model_exclude_unset=True)
     async def submit_options(project_id: str, request: QueryOptionsRequest):
-        return await call(service.submit_options, project_id, request)
+        return await call(queries.submit_options, project_id, request)
 
     @router.get(QUERY_OPTION_JOBS + "/{options_job_id}", response_model=OptionsTask, response_model_exclude_unset=True)
     async def get_options(project_id: str, options_job_id: UUID):
-        return await call(service.get_options, project_id, str(options_job_id))
+        return await call(queries.get_options, project_id, str(options_job_id))
 
     @router.get(QUERIES + "/{query_id}/status", response_model=QueryStatus, response_model_exclude_unset=True)
     async def query_status(project_id: str, query_id: UUID):
-        return await call(service.query_status, project_id, str(query_id))
+        return await call(queries.query_status, project_id, str(query_id))
 
     @router.get(QUERIES + "/{query_id}/results", response_model=QueryResultPage | QueryStatus,
                 response_model_exclude_unset=True)
     async def query_results(project_id: str, query_id: UUID, offset: int = Query(0, ge=0),
                             limit: int = Query(100, ge=1, le=200)):
-        return await call(service.query_result_page, project_id, str(query_id), offset, limit)
+        return await call(queries.query_result_page, project_id, str(query_id), offset, limit)
 
     @router.get(QUERIES + "/{query_id}")
     async def query(project_id: str, query_id: UUID):
-        return await call(service.get_query, project_id, str(query_id))
+        return await call(queries.get_query, project_id, str(query_id))
 
-    @router.post("/{project_id}/compatibility/query-options")
-    async def legacy_options(project_id: str, body: dict):
-        release, _, _, _ = await call(legacy_selection, service, project_id, body.get("releaseId"), body.get("metrics"))
-        native = await call(runtime.options, release["run_id"], tuple(body["metrics"]))
-        return {**native, "releaseId": body["releaseId"]}
-
-    @router.post("/{project_id}/compatibility/queries", status_code=202)
-    async def legacy_submit(project_id: str, body: dict):
-        return await call(submit_legacy, service, project_id, body.get("mode"), body.get("request"),
-                          body.get("idempotencyKey") or uuid4().hex, body.get("resourceId"))
     return router

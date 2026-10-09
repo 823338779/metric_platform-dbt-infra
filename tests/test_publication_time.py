@@ -32,9 +32,9 @@ def test_legacy_naive_calendar_is_preserved(store, tmp_path):
 
 def test_capabilities_disclose_project_path_and_time_contract(store, tmp_path):
     service, job, _ = query_service(store, tmp_path)
-    publication = service.publication(job["project_id"])
-    assert publication["protocolVersion"] == "agent-dbt-v1"
-    assert "draft-validation-v1" in publication["capabilities"]
+    publication = service.publications.publication(job["project_id"])
+    assert publication["protocolVersion"] == "fixed-commit-v1"
+    assert "fixed-commit-validation-v1" in publication["capabilities"]
     assert publication["businessTimezone"] == "Asia/Shanghai"
 
 

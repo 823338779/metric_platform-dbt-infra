@@ -20,6 +20,13 @@ class Contract(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True, alias_generator=to_camel)
 
 
+
+class FixedCommitRequest(Contract):
+    """只接收不可变提交身份，连接与执行参数由项目绑定决定。"""
+
+    commit_sha: str = Field(pattern=r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
+    idempotency_key: str = Field(min_length=1, max_length=256)
+
 class ResourceKind(StrEnum):
     METRIC = "METRIC"
     DIMENSION = "DIMENSION"

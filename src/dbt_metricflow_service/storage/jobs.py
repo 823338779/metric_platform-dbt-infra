@@ -626,6 +626,7 @@ class JobStore:
         exit_code=0,
         output_truncated=False,
         seal=None,
+        publish=None,
     ):
         # 发布产物、结果和终态共用一个事务；过期 worker 无权发布任何内容。
         encoded = json.dumps(payload or {}, ensure_ascii=False, separators=(",", ":"))
@@ -675,12 +676,9 @@ class JobStore:
                 )
                 # 业务发布与封存共用事务；兼容 BUILD_RUN 没有 releaseId 时仍只报告 READY。
                 if job["kind"] == BUILD_RUN and job["request_json"].get("releaseId"):
-                    from .publications import PublicationStore
-
-                    PublicationStore(self.db).publish_in_transaction(
-                        connection, job_id=job_id, attempt_token=token,
-                        release_id=job["request_json"]["releaseId"], output_set_id=output_set_id,
-                    )
+                    if publish is None:
+                        raise ValueError("Publication completion requires its transaction coordinator")
+                    publish(connection, job, output_set_id)
                 # 封存校验可能耗时；提交前重新 fencing，失效时连同已封存文件状态一起回滚。
                 if not self._authorized(connection, job_id, token):
                     raise _FinishLeaseLost

@@ -2,17 +2,26 @@
   "protocolVersion": "agent-dbt-v1",
   "project": {
     "protocolVersion": "agent-dbt-v1",
-    "capabilities": ["draft-validation-v1", "query-options-async-v1", "query-results-page-v1", "query-time-v1"],
+    "capabilities": [
+      "draft-validation-v1",
+      "query-options-async-v1",
+      "query-results-page-v1",
+      "query-time-v1"
+    ],
     "projectId": "sample",
     "projectSubdir": ".",
     "businessTimezone": "Asia/Shanghai",
-    "activePublication": {"releaseId": "00000000-0000-0000-0000-000000000001"}
+    "activePublication": {
+      "releaseId": "00000000-0000-0000-0000-000000000001"
+    }
   },
   "options": {
     "optionsJobId": "00000000-0000-0000-0000-000000000002",
     "releaseId": "00000000-0000-0000-0000-000000000001",
     "state": "READY",
-    "metricResourceIds": ["metric.sample.orders"],
+    "metricResourceIds": [
+      "metric.sample.orders"
+    ],
     "options": []
   },
   "status": {
@@ -24,7 +33,10 @@
     "state": "READY",
     "resultAvailable": true,
     "businessTimezone": "Asia/Shanghai",
-    "normalizedTimeRange": {"startTime": "2026-01-01T08:00:00", "endTime": null},
+    "normalizedTimeRange": {
+      "startTime": "2026-01-01T08:00:00",
+      "endTime": null
+    },
     "boundaryPolicy": "metricflow_granularity_alignment"
   },
   "page": {
@@ -34,8 +46,20 @@
     "mode": "QUERY",
     "targetCommitSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "state": "READY",
-    "columns": [{"name": "amount", "type": "decimal"}],
-    "rows": [["12345678901234567890.123456789"], [null]],
+    "columns": [
+      {
+        "name": "amount",
+        "type": "decimal"
+      }
+    ],
+    "rows": [
+      [
+        "12345678901234567890.123456789"
+      ],
+      [
+        null
+      ]
+    ],
     "offset": 0,
     "returnedRows": 2,
     "nextOffset": null,
@@ -45,15 +69,19 @@
   "validation": {
     "validationId": "00000000-0000-0000-0000-000000000004",
     "state": "SUCCEEDED",
-    "baseCommitSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "projectSubdir": ".",
-    "changesDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "configVersion": "fixture-config-v1",
     "toolchainVersion": "fixture-toolchain-v1",
     "validatedProjectDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     "valid": true,
-    "checkedLevels": ["YAML", "TEMPLATE", "DBT_PARSE", "SEMANTIC"],
+    "checkedLevels": [
+      "YAML",
+      "TEMPLATE",
+      "DBT_PARSE",
+      "SEMANTIC"
+    ],
     "diagnostics": [],
-    "completedAt": "2026-10-02T00:00:00Z"
+    "completedAt": "2026-10-02T00:00:00Z",
+    "commitSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   }
 }

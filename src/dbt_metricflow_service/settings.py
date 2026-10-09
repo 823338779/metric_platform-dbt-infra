@@ -11,11 +11,7 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PROJECTS_ROOT = "projects"
 DEFAULT_PROFILES_DIR = "profiles"
-DEFAULT_JOB_ARTIFACTS_ROOT = "job-artifacts"
-DEFAULT_PLATFORM_DB_PATH = "platform-jobs.sqlite"
-PLATFORM_BINDINGS_FILE_ENV = "PLATFORM_BINDINGS_FILE"
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 1800
 DEFAULT_MAX_OUTPUT_BYTES = 1_048_576
 MAX_OUTPUT_BYTES_ENV = "MAX_OUTPUT_BYTES"
@@ -30,13 +26,13 @@ GENERATED_PROFILES_DIR = "profiles"
 PROFILE_TARGET_KEY, PROFILE_OUTPUTS_KEY, ADAPTER_TYPE_KEY = "target", "outputs", "type"
 WRITE_MODE = "wb"
 CONFIG_KEYS = frozenset({
-    "SERVICE_HOST", "SERVICE_PORT", "PROJECTS_ROOT", "DBT_PROFILES_DIR", "COMMAND_TIMEOUT_SECONDS",
-    "MAX_OUTPUT_BYTES", "JOB_ARTIFACTS_ROOT", "PLATFORM_BINDINGS_FILE", "PLATFORM_DB_PATH",
+    "SERVICE_HOST", "SERVICE_PORT",  "DBT_PROFILES_DIR", "COMMAND_TIMEOUT_SECONDS",
+    "MAX_OUTPUT_BYTES",   
     "SERVICE_DATABASE_URL", "SERVICE_TEMP_ROOT", "WORKER_CONCURRENCY", "JOB_LEASE_SECONDS",
     "JOB_HEARTBEAT_SECONDS", "SERVICE_CONFIG_VERSION", "SERVICE_TOOLCHAIN_VERSION", "MAX_RESULT_BYTES",
-    "MAX_ARTIFACT_FILE_BYTES", "MAX_ARTIFACT_BYTES", "SYNCHRONOUS_WAIT_SECONDS", INLINE_PROFILES_KEY,
-    "BRANCH_SERVICE_TOKEN", "BRANCH_PREVIEW_PROFILE_BINDING_ID",
-    "BRANCH_EVENTS_ENABLED", "BRANCH_POLL_SECONDS", "BRANCH_EVENT_SECRET",
+    "MAX_ARTIFACT_FILE_BYTES", "MAX_ARTIFACT_BYTES", "SYNCHRONOUS_WAIT_SECONDS", "SERVICE_TOKEN", INLINE_PROFILES_KEY,
+     
+      
 })
 
 
@@ -83,35 +79,18 @@ def _materialize_profiles(profiles: dict, temp_root: Path) -> Path:
 class Settings:
     """Runtime paths and resource limits for one service process."""
 
-    # Root containing dbt project directories addressable by project ID.
-    projects_root: Path
     # dbt profiles.yml 所在目录，可来自部署挂载或服务配置生成的临时快照。
     profiles_dir: Path
     # Maximum wall-clock duration allowed for one CLI subprocess.
     command_timeout_seconds: int
     # Maximum number of bytes retained for each subprocess output stream.
     max_output_bytes: int
-    # Service-owned root for task-isolated derived dbt and MetricFlow artifacts.
-    job_artifacts_root: Path = Path(DEFAULT_JOB_ARTIFACTS_ROOT)
-    # 服务拥有的项目 Git 与 profile 绑定配置；不由 HTTP 请求覆盖。
-    platform_bindings_file: Path | None = None
-    # 平台构建与查询的可重启 SQLite 任务索引。
-    platform_db_path: Path = Path(DEFAULT_PLATFORM_DB_PATH)
     # 启用 PostgreSQL 运行时的连接信息；repr 不包含凭据。
     database_url: str | None = field(default=None, repr=False)
-    # 分支写入口部署凭据；禁止进入 repr、API、模型参数或持久任务。
-    branch_service_token: str | None = field(default=None, repr=False)
-    # 开发分支使用独立受控 profile，未配置时拒绝创建和登记。
-    branch_preview_profile_binding_id: str | None = None
-    # 控制事件接收和补偿扫描，默认关闭；关闭后仍可显式请求构建。
-    branch_events_enabled: bool = False
-    # 已登记分支的远端核对周期，单位秒。
-    branch_poll_seconds: int = 30
-    # Forgejo HMAC 签名密钥，只由部署注入且不进入 repr。
-    branch_event_secret: str | None = field(default=None, repr=False)
+    service_token: str | None = field(default=None, repr=False)
     # 可丢弃的实例本地工作目录，不作为持久产物定位符。
     temp_root: Path = Path("runtime-tmp")
-    # 本机同时执行的任务数，临时 resources 同样受此上限约束。
+    # 本机同时执行的任务数。
     worker_concurrency: int = 2
     # 数据库租约有效期及续租间隔，单位秒。
     lease_seconds: int = 90
@@ -131,9 +110,6 @@ class Settings:
     server_port: int = 8000
 
     def __post_init__(self) -> None:
-        # 核对周期必须为正，开启事件时必须配置 Secret。
-        if self.branch_poll_seconds <= 0 or self.branch_events_enabled and not self.branch_event_secret:
-            raise ValueError("branch polling requires a positive interval and events require a secret")
         # 监听配置错误应在创建服务前暴露。
         if not self.server_host or not 1 <= self.server_port <= 65535:
             raise ValueError("server host must be nonempty and port must be between 1 and 65535")
@@ -170,7 +146,7 @@ class Settings:
             if not isinstance(config, dict) or not config.keys() <= CONFIG_KEYS:
                 raise ValueError("服务配置必须是配置项映射，且不能包含未知配置项")
             if any(value is not None and type(value) not in (str, int)
-                   for key, value in config.items() if key not in (INLINE_PROFILES_KEY, "BRANCH_EVENTS_ENABLED")):
+                   for key, value in config.items() if key != INLINE_PROFILES_KEY):
                 raise ValueError("服务配置值只能是字符串、整数或 null")
         profiles = config.get(INLINE_PROFILES_KEY)
         if profiles is not None:
@@ -189,23 +165,13 @@ class Settings:
             return (configured if name in os.environ else base_dir / configured).resolve()
 
         settings = cls(
-            projects_root=path("PROJECTS_ROOT", DEFAULT_PROJECTS_ROOT),
             profiles_dir=path("DBT_PROFILES_DIR", DEFAULT_PROFILES_DIR),
             command_timeout_seconds=int(
                 value("COMMAND_TIMEOUT_SECONDS", str(DEFAULT_COMMAND_TIMEOUT_SECONDS))
             ),
             max_output_bytes=int(value(MAX_OUTPUT_BYTES_ENV, str(DEFAULT_MAX_OUTPUT_BYTES))),
-            job_artifacts_root=path("JOB_ARTIFACTS_ROOT", DEFAULT_JOB_ARTIFACTS_ROOT),
-            platform_bindings_file=(
-                path(PLATFORM_BINDINGS_FILE_ENV, "") if value(PLATFORM_BINDINGS_FILE_ENV) else None
-            ),
-            platform_db_path=path("PLATFORM_DB_PATH", DEFAULT_PLATFORM_DB_PATH),
             database_url=value("SERVICE_DATABASE_URL") or None,
-            branch_service_token=value("BRANCH_SERVICE_TOKEN") or None,
-            branch_preview_profile_binding_id=value("BRANCH_PREVIEW_PROFILE_BINDING_ID") or None,
-            branch_events_enabled=str(value("BRANCH_EVENTS_ENABLED", "false")).lower() in ("true", "1"),
-            branch_poll_seconds=int(value("BRANCH_POLL_SECONDS", "30")),
-            branch_event_secret=value("BRANCH_EVENT_SECRET") or None,
+            service_token=value("SERVICE_TOKEN") or None,
             temp_root=path("SERVICE_TEMP_ROOT", "runtime-tmp"),
             worker_concurrency=int(value("WORKER_CONCURRENCY", "2")),
             lease_seconds=int(value("JOB_LEASE_SECONDS", "90")),

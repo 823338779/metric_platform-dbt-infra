@@ -1,7 +1,6 @@
 {
-  "protocolVersion": "agent-dbt-v1",
+  "protocolVersion": "fixed-commit-v1",
   "sha256": {
-    "changes-v1.json": "f74d359cf644b9f472090849223d4e6cf3225c021f91c18095e655ce4a64ee64",
-    "protocol-v1.json": "55edfebe72ac1bbe17aafa318f05917b9e4967980fd6c7afc4adaaf39e6b5cb5"
+    "protocol-v1.json": "bc9e0d96622ca0853e6c24cca9f6c49f230f8d2ad1225b32bffc494050d7b34e"
   }
 }

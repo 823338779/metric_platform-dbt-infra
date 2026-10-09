@@ -5,13 +5,14 @@ from uuid import uuid4
 import pytest
 
 from dbt_metricflow_service.publications.migration import import_publication
+from dbt_metricflow_service.runtime.completion import complete_job
 from tests.test_publication_storage import store as store
 from tests.test_publication_transaction import prepared
 
 
 def test_import_existing_publication_identity_is_idempotent(store, tmp_path):
     jobs, job, release, output, artifacts = prepared(store, tmp_path)
-    jobs.finish(job["job_id"], job["lease_token"], output_set_id=output)
+    complete_job(jobs, job["job_id"], job["lease_token"], output_set_id=output)
     old_id = str(uuid4())
     document = {"projectId": job["project_id"], "legacyReleaseId": old_id,
                 "runId": job["job_id"], "queries": []}

@@ -1,0 +1,325 @@
+tests/test_agent_response_contract.py::test_shared_fixture_matches_typed_contract_and_hash_manifest
+tests/test_agent_response_contract.py::test_new_routes_publish_typed_response_schemas
+tests/test_api_health.py::test_live_does_not_depend_on_cli
+tests/test_api_health.py::test_ready_returns_503_when_cli_is_missing
+tests/test_api_health.py::test_ready_accepts_installed_clis_and_readable_mounts
+tests/test_api_health.py::test_versions_returns_service_and_pinned_package_versions
+tests/test_api_health.py::test_application_shutdown_closes_job_runner
+tests/test_branch_bindings.py::test_feature_commit_not_on_main_is_readable
+tests/test_branch_bindings.py::test_invalid_ref_is_rejected[HEAD]
+tests/test_branch_bindings.py::test_invalid_ref_is_rejected[refs/tags/main]
+tests/test_branch_bindings.py::test_invalid_ref_is_rejected[refs/heads/../main]
+tests/test_branch_bindings.py::test_invalid_ref_is_rejected[--upload-pack=evil]
+tests/test_branch_bindings.py::test_invalid_ref_is_rejected[refs/heads/a:b]
+tests/test_branch_bindings.py::test_invalid_ref_is_rejected[refs/heads/a.lock]
+tests/test_branch_bindings.py::test_invalid_ref_is_rejected[refs/heads/a@{1}]
+tests/test_branch_migration.py::test_upgrade_preserves_production_identities
+tests/test_branch_migration.py::test_legacy_project_facade_reads_production_pointer
+tests/test_branch_publication.py::test_other_branch_does_not_supersede_candidate
+tests/test_branch_publication.py::test_late_candidate_cannot_replace_newer_input
+tests/test_branch_publication.py::test_failed_latest_keeps_branch_active_release
+tests/test_branch_publication.py::test_deleted_branch_or_expired_attempt_cannot_publish
+tests/test_branch_publication.py::test_deleted_branch_keeps_published_run_protected
+tests/test_branch_storage.py::test_new_project_has_one_production_branch
+tests/test_branch_storage.py::test_branch_sequence_and_key_are_independent
+tests/test_branch_storage.py::test_cross_project_and_branch_references_are_rejected
+tests/test_branch_storage.py::test_publication_job_inherits_release_branch
+tests/test_database.py::test_commit_and_exception_rollback
+tests/test_database.py::test_pool_exhaustion_and_reuse
+tests/test_database.py::test_concurrent_writes_reuse_bounded_pool
+tests/test_database.py::test_dsn_and_value_compatibility
+tests/test_database.py::test_connection_parameters_preserve_credentials_and_ssl[postgresql://test:p%25%20%27%40%3A@localhost/example?sslmode=require&options=-c%20application_name%3Dtest]
+tests/test_database.py::test_connection_parameters_preserve_credentials_and_ssl[user=test password='p% \\'@:' host=localhost dbname=example sslmode=require options='-c application_name=test']
+tests/test_dependencies.py::test_upstream_versions_are_pinned
+tests/test_dependencies.py::test_local_source_configuration_is_complete
+tests/test_dependencies.py::test_vendored_sources_are_at_audited_commits
+tests/test_dependencies.py::test_core_packages_are_installed_from_vendored_sources
+tests/test_fixed_commit_contract.py::test_fixed_commit_request_rejects_moving_refs_and_environment_overrides
+tests/test_fixed_commit_contract.py::test_resolve_fixed_commit_outside_main
+tests/test_fixed_commit_contract.py::test_application_requires_postgresql
+tests/test_fixed_commit_contract.py::test_application_exposes_only_fixed_commit_business_routes
+tests/test_job_artifacts.py::test_create_and_remove_uuid_job_directory
+tests/test_job_artifacts.py::test_cleanup_rejects_outside_directory
+tests/test_job_artifacts.py::test_startup_recovery_only_removes_confirmed_finished_directories
+tests/test_job_artifacts.py::test_artifact_paths_work_without_python_312_isjunction
+tests/test_job_artifacts.py::test_resource_job_artifacts_are_cleaned_after_exit[artifact-success]
+tests/test_job_artifacts.py::test_resource_job_artifacts_are_cleaned_after_exit[artifact-failure]
+tests/test_job_artifacts.py::test_resource_job_artifacts_are_cleaned_after_timeout
+tests/test_job_artifacts.py::test_normal_job_does_not_create_artifact_root
+tests/test_jobs.py::test_successful_job_captures_both_streams
+tests/test_jobs.py::test_nonzero_exit_code_marks_job_failed
+tests/test_jobs.py::test_timeout_terminates_job
+tests/test_jobs.py::test_large_output_keeps_bounded_tail
+tests/test_jobs.py::test_second_write_job_for_same_project_is_rejected
+tests/test_jobs.py::test_write_jobs_for_different_projects_run_concurrently
+tests/test_jobs.py::test_secret_environment_values_are_redacted
+tests/test_jobs.py::test_secret_is_redacted_before_output_tail_is_truncated
+tests/test_jobs.py::test_secret_redaction_handles_stream_boundaries_and_overlaps
+tests/test_jobs.py::test_same_project_directory_alias_cannot_bypass_write_lock
+tests/test_jobs.py::test_timeout_terminates_descendants_that_hold_output_pipes
+tests/test_jobs.py::test_close_cancels_and_terminates_active_process
+tests/test_jobs.py::test_completed_job_retention_is_bounded
+tests/test_jobs.py::test_unknown_job_returns_none
+tests/test_jobs.py::test_stdin_payload_is_delivered_without_deadlocking_output
+tests/test_jobs.py::test_child_exit_before_stdin_preserves_exit_code
+tests/test_jobs.py::test_stdin_writer_is_inside_job_timeout
+tests/test_migration_package.py::test_wheel_contains_migration_resources
+tests/test_migration_package.py::test_installed_package_migrates_without_repository_cwd
+tests/test_platform_bindings.py::test_resolve_fixed_sha_and_digest
+tests/test_platform_bindings.py::test_draft_resolves_exact_old_main_commit_without_published_digest
+tests/test_platform_bindings.py::test_reject_unsafe_sha_subdir_symlink_and_digest
+tests/test_platform_bindings.py::test_remote_cannot_be_supplied_by_request
+tests/test_platform_bindings.py::test_fixed_schema_binding_is_controlled_by_service
+tests/test_platform_bindings.py::test_fixed_schema_binding_rejects_unsafe_name[dbt-ecom]
+tests/test_platform_bindings.py::test_fixed_schema_binding_rejects_unsafe_name[]
+tests/test_platform_bindings.py::test_fixed_schema_binding_rejects_unsafe_name[aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]
+tests/test_platform_catalog.py::test_catalog_maps_metric_dimension_semantic_model_table_and_view
+tests/test_platform_catalog.py::test_catalog_rejects_schema_version_or_missing_relation
+tests/test_platform_catalog.py::test_catalog_source_path_uses_git_separators_on_windows
+tests/test_platform_catalog.py::test_catalog_includes_external_source_table
+tests/test_platform_namespace.py::test_run_prefix_is_deterministic
+tests/test_platform_namespace.py::test_project_copy_gets_run_specific_alias_macro
+tests/test_platform_namespace.py::test_project_rejects_existing_alias_macro
+tests/test_platform_namespace.py::test_parse_rejects_unscoped_relation_before_build
+tests/test_platform_namespace.py::test_parse_rejects_model_hooks[pre-hook]
+tests/test_platform_namespace.py::test_parse_rejects_model_hooks[post-hook]
+tests/test_platform_namespace.py::test_parse_rejects_model_hooks[pre_hook]
+tests/test_platform_namespace.py::test_parse_rejects_model_hooks[post_hook]
+tests/test_platform_namespace.py::test_parse_rejects_project_run_hook
+tests/test_platform_queries.py::test_multi_metric_options_return_common_dimensions_and_time_tokens
+tests/test_platform_queries.py::test_dimension_values_are_bounded_and_typed
+tests/test_platform_queries.py::test_query_rejects_unlisted_filter_operator_and_foreign_run
+tests/test_platform_queries.py::test_decimal_result_preserves_precision
+tests/test_projects.py::test_resolve_returns_project_containing_dbt_project_file
+tests/test_projects.py::test_resolve_rejects_unsafe_project_names[../secret]
+tests/test_projects.py::test_resolve_rejects_unsafe_project_names[a/b]
+tests/test_projects.py::test_resolve_rejects_unsafe_project_names[a\\b]
+tests/test_projects.py::test_resolve_rejects_unsafe_project_names[C:\\secret]
+tests/test_projects.py::test_resolve_rejects_unsafe_project_names[.]
+tests/test_projects.py::test_resolve_rejects_unsafe_project_names[..]
+tests/test_projects.py::test_resolve_rejects_symlink_escape
+tests/test_projects.py::test_resolve_rejects_missing_project
+tests/test_projects.py::test_resolve_requires_dbt_project_file
+tests/test_projects.py::test_adapter_type_reads_manifest_metadata
+tests/test_projects.py::test_adapter_type_rejects_missing_manifest
+tests/test_projects.py::test_adapter_type_rejects_invalid_manifest[not-json]
+tests/test_projects.py::test_adapter_type_rejects_invalid_manifest[{}]
+tests/test_projects.py::test_adapter_type_rejects_invalid_manifest[{"metadata": null}]
+tests/test_projects.py::test_resolve_handles_case_normalized_root
+tests/test_publication_api.py::test_active_catalog_and_historical_release_access
+tests/test_publication_async_options.py::test_options_admission_deduplicates_and_reads_same_mapping
+tests/test_publication_build.py::test_only_configured_freshness_thresholds_require_execution[None-False]
+tests/test_publication_build.py::test_only_configured_freshness_thresholds_require_execution[freshness1-False]
+tests/test_publication_build.py::test_only_configured_freshness_thresholds_require_execution[freshness2-True]
+tests/test_publication_build.py::test_only_configured_freshness_thresholds_require_execution[freshness3-True]
+tests/test_publication_build.py::test_reused_view_and_final_binding_agree
+tests/test_publication_build.py::test_compiled_model_cannot_escape_readonly_query[select 1; drop table active_model]
+tests/test_publication_build.py::test_compiled_model_cannot_escape_readonly_query[with removed as (delete from active_model returning *) select * from removed]
+tests/test_publication_build.py::test_compiled_model_cannot_escape_readonly_query[select * into active_model from source_table]
+tests/test_publication_build.py::test_actual_dbt_tests_parse_under_publication_mapping[test_config0-False]
+tests/test_publication_build.py::test_actual_dbt_tests_parse_under_publication_mapping[test_config1-False]
+tests/test_publication_build.py::test_actual_dbt_tests_parse_under_publication_mapping[test_config2-True]
+tests/test_publication_build.py::test_actual_dbt_tests_parse_under_publication_mapping[test_config3-False]
+tests/test_publication_build.py::test_actual_dbt_tests_parse_under_publication_mapping[test_config4-True]
+tests/test_publication_catalog.py::test_typed_catalog_is_complete
+tests/test_publication_catalog.py::test_invalid_catalog_cannot_publish[duplicate]
+tests/test_publication_catalog.py::test_invalid_catalog_cannot_publish[missing-binding]
+tests/test_publication_catalog.py::test_invalid_catalog_cannot_publish[unknown-type]
+tests/test_publication_catalog.py::test_invalid_catalog_cannot_publish[dangling]
+tests/test_publication_catalog.py::test_invalid_catalog_cannot_publish[cycle]
+tests/test_publication_catalog.py::test_invalid_catalog_cannot_publish[mismatch]
+tests/test_publication_catalog.py::test_empty_catalog_requires_complete_native_structure
+tests/test_publication_catalog.py::test_write_catalog_requires_matching_physical_binding
+tests/test_publication_error_contract.py::test_structured_error_keeps_legacy_code_and_recovery
+tests/test_publication_error_contract.py::test_unknown_error_does_not_expose_internal_message
+tests/test_publication_migration.py::test_import_existing_publication_identity_is_idempotent
+tests/test_publication_plan.py::test_full_build_includes_every_physical_model
+tests/test_publication_plan.py::test_full_build_evidence_cannot_omit_build_or_models
+tests/test_publication_queries.py::test_options_are_versioned_and_do_not_merge_paths
+tests/test_publication_queries.py::test_query_rejects_parameters_from_another_mode[extra0]
+tests/test_publication_queries.py::test_query_rejects_parameters_from_another_mode[extra1]
+tests/test_publication_queries.py::test_query_pins_run_and_retry_survives_replacement
+tests/test_publication_queries.py::test_concurrent_same_key_admits_one_query
+tests/test_publication_queries.py::test_retry_recovers_admission_committed_between_initial_lookup_and_version_check
+tests/test_publication_result_pages.py::test_pages_preserve_rows_and_status_never_reads_payload
+tests/test_publication_result_pages.py::test_large_row_is_explicit_error_and_small_page_advances_by_returned_rows
+tests/test_publication_result_pages.py::test_transport_shrinks_whole_rows_and_explain_preserves_sql
+tests/test_publication_service.py::test_submit_fixes_input_and_reserves_run_atomically
+tests/test_publication_storage.py::test_candidate_sequence_and_idempotency
+tests/test_publication_storage.py::test_migration_keeps_default_output_separate
+tests/test_publication_template.py::test_unsafe_template_is_rejected_before_dbt[{{ run_query('drop table old') }}]
+tests/test_publication_template.py::test_unsafe_template_is_rejected_before_dbt[{{ adapter.execute('drop table old') }}]
+tests/test_publication_template.py::test_unsafe_template_is_rejected_before_dbt[{% materialization unsafe, default %}select 1{% endmaterialization %}]
+tests/test_publication_template.py::test_unsafe_template_is_rejected_before_dbt[{% macro get_create_table_as_sql() %}drop table old{% endmacro %}]
+tests/test_publication_template.py::test_unsafe_template_is_rejected_before_dbt[{% set execute_sql = run_query %}{{ execute_sql('drop table old') }}]
+tests/test_publication_template.py::test_pure_expression_macro_remains_supported
+tests/test_publication_time.py::test_equivalent_offsets_share_idempotent_query_and_business_calendar
+tests/test_publication_time.py::test_legacy_naive_calendar_is_preserved
+tests/test_publication_time.py::test_capabilities_disclose_project_path_and_time_contract
+tests/test_publication_time.py::test_query_error_identifies_invalid_dimension
+tests/test_publication_time.py::test_historical_snapshot_without_timezone_retries_without_rewriting_engine
+tests/test_publication_transaction.py::test_finish_publishes_and_cleanup_is_blocked
+tests/test_publication_transaction.py::test_seal_failure_preserves_old_publication
+tests/test_publication_transaction.py::test_older_candidate_cannot_replace_latest_input
+tests/test_publication_transaction.py::test_failed_job_marks_candidate_failed_without_changing_pointer
+tests/test_publication_transaction.py::test_expired_worker_cannot_publish
+tests/test_publication_transaction.py::test_wrong_source_proof_cannot_publish
+tests/test_publication_transaction.py::test_failure_after_pointer_update_rolls_back_entire_publication
+tests/test_publication_transaction.py::test_committed_publication_cannot_be_failed_after_response_loss
+tests/test_publication_transaction.py::test_candidate_and_job_share_transaction
+tests/test_publication_transaction.py::test_lost_lease_after_publish_rolls_back
+tests/test_request_limits.py::test_chunked_limit_precedes_application
+tests/test_request_limits.py::test_actual_body_size_is_enforced_and_exact_limit_replayed[headers0]
+tests/test_request_limits.py::test_actual_body_size_is_enforced_and_exact_limit_replayed[headers1]
+tests/test_request_limits.py::test_content_length_can_reject_before_reading_body
+tests/test_request_limits.py::test_disconnect_does_not_call_application
+tests/test_request_limits.py::test_unrelated_route_is_not_buffered
+tests/test_runtime_api.py::test_postgres_settings_keep_credentials_private_and_validate_lease
+tests/test_runtime_api.py::test_queued_build_reports_preparing_state
+tests/test_runtime_api.py::test_cli_acceptance_and_result_are_shared_without_local_project
+tests/test_runtime_api.py::test_volatile_input_is_not_stored_and_queued_owner_loss_finishes
+tests/test_runtime_api.py::test_postgres_http_uses_shared_store_without_project_mount
+tests/test_runtime_api.py::test_failed_cli_exposes_bounded_exit_diagnostics
+tests/test_runtime_artifacts.py::test_source_roundtrip_preserves_raw_bytes_and_configured_paths
+tests/test_runtime_artifacts.py::test_execution_keeps_dependencies_and_excludes_local_state
+tests/test_runtime_artifacts.py::test_sealed_files_cannot_be_overwritten
+tests/test_runtime_artifacts.py::test_source_rejects_escaping_configured_paths[../outside]
+tests/test_runtime_artifacts.py::test_source_rejects_escaping_configured_paths[/absolute]
+tests/test_runtime_artifacts.py::test_source_rejects_escaping_configured_paths[C:/absolute]
+tests/test_runtime_artifacts.py::test_source_rejects_escaping_configured_paths[models/../outside]
+tests/test_runtime_artifacts.py::test_capture_rejects_single_file_over_limit
+tests/test_runtime_artifacts.py::test_capture_rejects_external_symlink
+tests/test_runtime_artifacts.py::test_workspace_cleans_only_its_attempt
+tests/test_runtime_artifacts.py::test_metadata_has_stable_digest_across_local_roots
+tests/test_runtime_artifacts.py::test_worker_capture_is_invisible_until_transaction_seals
+tests/test_runtime_artifacts.py::test_gc_preserves_referenced_and_active_worker_artifacts
+tests/test_runtime_artifacts.py::test_read_file_is_bounded_and_requires_sealed
+tests/test_runtime_artifacts.py::test_configurable_limits_reject_set_before_publication
+tests/test_runtime_artifacts.py::test_source_includes_resolved_dependencies
+tests/test_runtime_artifacts.py::test_restoration_rejects_unsafe_database_paths_before_writes[names0]
+tests/test_runtime_artifacts.py::test_restoration_rejects_unsafe_database_paths_before_writes[names1]
+tests/test_runtime_artifacts.py::test_restoration_rejects_unsafe_database_paths_before_writes[names2]
+tests/test_runtime_artifacts.py::test_restoration_rejects_unsafe_database_paths_before_writes[names3]
+tests/test_runtime_artifacts.py::test_restoration_rejects_unsafe_database_paths_before_writes[names4]
+tests/test_runtime_artifacts.py::test_restoration_rejects_unsafe_database_paths_before_writes[names5]
+tests/test_runtime_artifacts.py::test_restoration_rejects_unsafe_database_paths_before_writes[names6]
+tests/test_runtime_artifacts.py::test_internal_package_link_is_materialized_as_plain_files
+tests/test_runtime_artifacts.py::test_destination_link_is_rejected_without_writing_outside
+tests/test_runtime_artifacts.py::test_source_link_cannot_smuggle_excluded_credentials
+tests/test_runtime_artifacts.py::test_corrupt_bytes_and_decompression_over_limit_are_rejected[raw-corrupt]
+tests/test_runtime_artifacts.py::test_corrupt_bytes_and_decompression_over_limit_are_rejected[gzip-\x1f\x8b\x08\x00\x16\x0f\xc9j\x02\xff\xab\xa8\x18\xd9\x00\x00\x10\x1a\xees\x00\x01\x00\x00]
+tests/test_runtime_database_errors.py::test_database_errors_return_503[error0]
+tests/test_runtime_database_errors.py::test_database_errors_return_503[error1]
+tests/test_runtime_database_errors.py::test_worker_survives_database_error[error0]
+tests/test_runtime_database_errors.py::test_worker_survives_database_error[error1]
+tests/test_runtime_database_errors.py::test_heartbeat_failure_cancels_unconfirmed_execution[error0]
+tests/test_runtime_database_errors.py::test_heartbeat_failure_cancels_unconfirmed_execution[error1]
+tests/test_runtime_database_errors.py::test_gc_only_swallows_foreign_key_violation
+tests/test_runtime_execution.py::test_generic_execution_restores_snapshot_and_captures_new_output
+tests/test_runtime_execution.py::test_programmatic_tasks_use_restored_input_and_return_json[QUERY_OPTIONS-payload0-expected0]
+tests/test_runtime_execution.py::test_programmatic_tasks_use_restored_input_and_return_json[RUN_CLEANUP-payload1-expected1]
+tests/test_runtime_execution.py::test_programmatic_tasks_use_restored_input_and_return_json[RUN_CLEANUP-payload2-expected2]
+tests/test_runtime_execution.py::test_programmatic_tasks_use_restored_input_and_return_json[METRIC_QUERY-payload3-expected3]
+tests/test_runtime_execution.py::test_oversized_programmatic_result_is_rejected_before_parsing
+tests/test_runtime_execution.py::test_cleanup_before_source_attachment_has_no_external_work
+tests/test_runtime_execution.py::test_expired_lease_does_not_start_child
+tests/test_runtime_execution.py::test_cancellation_stops_process_before_workspace_removal
+tests/test_runtime_execution.py::test_fixed_build_pins_git_source_preserves_results_and_requires_probe[True]
+tests/test_runtime_execution.py::test_fixed_build_pins_git_source_preserves_results_and_requires_probe[False]
+tests/test_runtime_execution.py::test_resource_input_and_derived_output_never_persist[True]
+tests/test_runtime_execution.py::test_resource_input_and_derived_output_never_persist[False]
+tests/test_runtime_execution.py::test_timeout_retains_bounded_diagnostics_and_unknown_stop
+tests/test_runtime_execution.py::test_write_child_connection_loss_does_not_confirm_external_stop
+tests/test_runtime_execution.py::test_options_invalid_input_uses_structured_error_code
+tests/test_runtime_execution.py::test_repeated_cancellation_waits_for_filesystem_thread
+tests/test_runtime_execution.py::test_source_only_cleanup_drops_schema_without_semantic_manifest
+tests/test_runtime_storage.py::test_concurrent_idempotency_and_claim
+tests/test_runtime_storage.py::test_expired_write_cannot_renew_or_publish_or_release_lock
+tests/test_runtime_storage.py::test_queued_volatile_input_expires_without_claim
+tests/test_runtime_storage.py::test_readonly_retry_retains_unconfirmed_attempt_and_cleanup_gate
+tests/test_runtime_storage.py::test_build_without_output_cannot_be_published
+tests/test_runtime_storage.py::test_deadline_expires_queued_job_and_inputs_cannot_revive
+tests/test_runtime_storage.py::test_renew_only_inputs_present_in_memory
+tests/test_runtime_storage.py::test_finish_rechecks_lease_after_artifact_sealing
+tests/test_runtime_storage.py::test_cleanup_uses_parent_versions_and_can_clean_failed_build
+tests/test_runtime_storage.py::test_sealed_set_cannot_be_demoted_or_rewritten
+tests/test_runtime_storage.py::test_idempotency_cannot_reuse_another_project
+tests/test_runtime_storage.py::test_cli_admission_rejects_project_import_after_manifest_validation
+tests/test_runtime_storage.py::test_options_retry_is_bounded_and_preserves_deadline
+tests/test_runtime_storage.py::test_options_retry_rejects_unconfirmed_external_execution
+tests/test_runtime_storage.py::test_options_retry_rejects_elapsed_deadline
+tests/test_runtime_storage.py::test_cleanup_releases_artifact_references_but_preserves_tombstone
+tests/test_runtime_storage.py::test_missing_source_cannot_report_clean_after_known_external_execution
+tests/test_runtime_toolchain.py::test_toolchain_detects_changes_outside_runtime_package[publications/service.py]
+tests/test_runtime_toolchain.py::test_toolchain_detects_changes_outside_runtime_package[storage/jobs.py]
+tests/test_runtime_toolchain.py::test_toolchain_detects_changes_outside_runtime_package[__init__.py]
+tests/test_runtime_worker.py::test_two_workers_execute_persisted_task_once
+tests/test_schema_migrations.py::test_adopt_supported_versions[0]
+tests/test_schema_migrations.py::test_adopt_supported_versions[1]
+tests/test_schema_migrations.py::test_adopt_supported_versions[2]
+tests/test_schema_migrations.py::test_adopt_supported_versions[3]
+tests/test_schema_migrations.py::test_adopt_supported_versions[4]
+tests/test_schema_migrations.py::test_adopt_supported_versions[5]
+tests/test_schema_migrations.py::test_reject_invalid_history[UPDATE runtime_schema_version SET version=0]
+tests/test_schema_migrations.py::test_reject_invalid_history[UPDATE runtime_schema_version SET version=6]
+tests/test_schema_migrations.py::test_reject_invalid_history[INSERT INTO runtime_schema_version VALUES(4)]
+tests/test_schema_migrations.py::test_reject_invalid_history[DROP TABLE runtime_schema_version]
+tests/test_schema_migrations.py::test_reject_invalid_history[ALTER TABLE runtime_job DROP COLUMN error_detail]
+tests/test_schema_migrations.py::test_reject_invalid_history[ALTER TABLE runtime_job DROP CONSTRAINT runtime_job_input_fk]
+tests/test_schema_migrations.py::test_reject_invalid_history[DROP TRIGGER runtime_artifact_file_guard ON runtime_artifact_file]
+tests/test_schema_migrations.py::test_reject_invalid_history[ALTER TABLE runtime_artifact_set DISABLE TRIGGER runtime_artifact_set_guard]
+tests/test_schema_migrations.py::test_check_requires_supported_alembic_head
+tests/test_schema_migrations.py::test_disabled_foreign_key_enforcement_rejects_adoption
+tests/test_schema_migrations.py::test_identifier_display_setting_does_not_change_schema_contract[0]
+tests/test_schema_migrations.py::test_identifier_display_setting_does_not_change_schema_contract[5]
+tests/test_schema_migrations.py::test_concurrent_migration_is_serialized
+tests/test_schema_migrations.py::test_two_schemas_do_not_share_history
+tests/test_schema_migrations.py::test_inconsistent_adopted_versions_are_rejected[INSERT INTO alembic_version VALUES('second_head')]
+tests/test_schema_migrations.py::test_inconsistent_adopted_versions_are_rejected[UPDATE runtime_schema_version SET version=4]
+tests/test_schema_migrations.py::test_migration_failure_is_atomic
+tests/test_schema_migrations.py::test_downgrade_is_rejected_without_changes
+tests/test_settings.py::test_settings_reads_paths_and_limits
+tests/test_settings.py::test_settings_defaults_to_local_directories
+tests/test_settings.py::test_settings_loads_file_relative_paths_and_server
+tests/test_settings.py::test_settings_environment_overrides_selected_file
+tests/test_settings.py::test_settings_rejects_invalid_file[UNKNOWN_SETTING: 1]
+tests/test_settings.py::test_settings_rejects_invalid_file[- item]
+tests/test_settings.py::test_settings_rejects_invalid_file[SERVICE_PORT: [8123]]
+tests/test_settings.py::test_settings_rejects_invalid_file[SERVICE_PORT: []
+tests/test_settings.py::test_settings_requires_explicit_config_file
+tests/test_settings.py::test_inline_profiles_are_generated_from_single_file
+tests/test_settings.py::test_inline_profile_update_preserves_running_instance_file
+tests/test_settings.py::test_profiles_directory_environment_override_does_not_overwrite_external_file
+tests/test_settings.py::test_invalid_inline_profiles_fail_without_leaking_values[profiles0]
+tests/test_settings.py::test_invalid_inline_profiles_fail_without_leaking_values[profiles1]
+tests/test_settings.py::test_invalid_inline_profiles_fail_without_leaking_values[secret-marker]
+tests/test_settings.py::test_invalid_inline_profiles_fail_without_leaking_values[profiles3]
+tests/test_settings.py::test_invalid_inline_profiles_fail_without_leaking_values[profiles4]
+tests/test_settings.py::test_invalid_inline_profiles_fail_without_leaking_values[profiles5]
+tests/test_settings.py::test_inline_profiles_and_file_directory_are_rejected_as_ambiguous
+
+=================================== ERRORS ====================================
+______ ERROR collecting tests/integration/test_publication_proxy_flow.py ______
+ImportError while importing test module 'E:\IdeaProjects\agent-root\dbt-metricflow-service\tests\integration\test_publication_proxy_flow.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+C:\Users\82333\AppData\Roaming\uv\python\cpython-3.12-windows-x86_64-none\Lib\importlib\__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests\integration\test_publication_proxy_flow.py:20: in <module>
+    from tests.integration.test_postgres_platform_flow import FIXTURE, PROFILES, git
+E   ModuleNotFoundError: No module named 'tests.integration.test_postgres_platform_flow'
+============================== warnings summary ===============================
+.venv\Lib\site-packages\fastapi\testclient.py:1
+  E:\IdeaProjects\agent-root\dbt-metricflow-service\.venv\Lib\site-packages\fastapi\testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+.venv\Lib\site-packages\starlette\testclient.py:53
+  E:\IdeaProjects\agent-root\dbt-metricflow-service\.venv\Lib\site-packages\starlette\testclient.py:53: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
+    _PortalFactoryType = Callable[[], AbstractContextManager[anyio.abc.BlockingPortal]]
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+ERROR tests/integration/test_publication_proxy_flow.py
+!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+299 tests collected, 1 error in 1.49s
