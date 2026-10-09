@@ -1,0 +1,2303 @@
+[
+  {
+    "runtime_artifact_file": {
+      "columns": {
+        "set_id": [
+          "uuid",
+          true,
+          null
+        ],
+        "relative_path": [
+          "text",
+          true,
+          null
+        ],
+        "content": [
+          "bytea",
+          true,
+          null
+        ],
+        "codec": [
+          "text",
+          true,
+          null
+        ],
+        "raw_sha256": [
+          "text",
+          true,
+          null
+        ],
+        "raw_size": [
+          "bigint",
+          true,
+          null
+        ],
+        "stored_size": [
+          "bigint",
+          true,
+          null
+        ],
+        "media_type": [
+          "text",
+          true,
+          "'application/octet-stream'::text"
+        ],
+        "executable": [
+          "boolean",
+          true,
+          "false"
+        ]
+      },
+      "constraints": [
+        [
+          "CHECK (codec = ANY (ARRAY['raw'::text, 'gzip'::text]))",
+          true
+        ],
+        [
+          "CHECK (raw_size >= 0)",
+          true
+        ],
+        [
+          "CHECK (stored_size >= 0)",
+          true
+        ],
+        [
+          "FOREIGN KEY (set_id) REFERENCES runtime_artifact_set(set_id) ON DELETE CASCADE",
+          true
+        ],
+        [
+          "PRIMARY KEY (set_id, relative_path)",
+          true
+        ]
+      ],
+      "indexes": [
+        [
+          true,
+          true,
+          "btree (set_id, relative_path)"
+        ]
+      ],
+      "triggers": [
+        [
+          "runtime_artifact_file_guard",
+          "O",
+          "CREATE TRIGGER runtime_artifact_file_guard BEFORE INSERT OR DELETE OR UPDATE ON runtime_artifact_file FOR EACH ROW EXECUTE FUNCTION runtime_guard_artifact_file()",
+          "DECLARE current_state text; BEGIN SELECT state INTO current_state FROM runtime_artifact_set WHERE set_id=CASE WHEN TG_OP='DELETE' THEN OLD.set_id ELSE NEW.set_id END FOR UPDATE; IF TG_OP='INSERT' AND current_state='STAGING' THEN RETURN NEW; END IF; IF TG_OP='DELETE' AND current_state='DELETING' THEN RETURN OLD; END IF; RAISE EXCEPTION 'Artifact file mutation is not permitted in state %', current_state; END"
+        ]
+      ]
+    },
+    "runtime_artifact_set": {
+      "columns": {
+        "set_id": [
+          "uuid",
+          true,
+          null
+        ],
+        "project_id": [
+          "text",
+          true,
+          null
+        ],
+        "producer_attempt_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "kind": [
+          "text",
+          true,
+          null
+        ],
+        "state": [
+          "text",
+          true,
+          "'STAGING'::text"
+        ],
+        "source_commit_sha": [
+          "text",
+          false,
+          null
+        ],
+        "project_digest": [
+          "text",
+          false,
+          null
+        ],
+        "source_set_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "config_version": [
+          "text",
+          false,
+          null
+        ],
+        "toolchain_version": [
+          "text",
+          false,
+          null
+        ],
+        "format_version": [
+          "text",
+          true,
+          "'1'::text"
+        ],
+        "content_digest": [
+          "text",
+          false,
+          null
+        ],
+        "file_count": [
+          "integer",
+          true,
+          "0"
+        ],
+        "raw_bytes": [
+          "bigint",
+          true,
+          "0"
+        ],
+        "validation_json": [
+          "jsonb",
+          true,
+          "'{}'::jsonb"
+        ],
+        "catalog_json": [
+          "jsonb",
+          true,
+          "'{}'::jsonb"
+        ],
+        "metadata": [
+          "jsonb",
+          true,
+          "'{}'::jsonb"
+        ],
+        "created_at": [
+          "timestamp with time zone",
+          true,
+          "clock_timestamp()"
+        ],
+        "sealed_at": [
+          "timestamp with time zone",
+          false,
+          null
+        ]
+      },
+      "constraints": [
+        [
+          "CHECK (kind = ANY (ARRAY['SOURCE'::text, 'EXECUTION'::text]))",
+          true
+        ],
+        [
+          "CHECK (state = ANY (ARRAY['STAGING'::text, 'SEALED'::text, 'DELETING'::text]))",
+          true
+        ],
+        [
+          "FOREIGN KEY (producer_attempt_id) REFERENCES runtime_attempt(attempt_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (project_id) REFERENCES runtime_project(project_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (source_set_id) REFERENCES runtime_artifact_set(set_id)",
+          true
+        ],
+        [
+          "PRIMARY KEY (set_id)",
+          true
+        ]
+      ],
+      "indexes": [
+        [
+          true,
+          true,
+          "btree (set_id)"
+        ]
+      ],
+      "triggers": [
+        [
+          "runtime_artifact_set_guard",
+          "O",
+          "CREATE TRIGGER runtime_artifact_set_guard BEFORE UPDATE ON runtime_artifact_set FOR EACH ROW EXECUTE FUNCTION runtime_guard_artifact_set()",
+          "BEGIN IF OLD.state IN ('SEALED','DELETING') AND ((to_jsonb(NEW)-'state') IS DISTINCT FROM (to_jsonb(OLD)-'state') OR NEW.state NOT IN (OLD.state,'DELETING')) THEN RAISE EXCEPTION 'Sealed artifact set is immutable' USING ERRCODE='23514'; END IF; RETURN NEW; END"
+        ]
+      ]
+    },
+    "runtime_attempt": {
+      "columns": {
+        "attempt_id": [
+          "uuid",
+          true,
+          null
+        ],
+        "job_id": [
+          "uuid",
+          true,
+          null
+        ],
+        "attempt_no": [
+          "integer",
+          true,
+          null
+        ],
+        "worker_id": [
+          "uuid",
+          true,
+          null
+        ],
+        "lease_token": [
+          "uuid",
+          true,
+          null
+        ],
+        "lease_expires_at": [
+          "timestamp with time zone",
+          true,
+          null
+        ],
+        "heartbeat_at": [
+          "timestamp with time zone",
+          true,
+          "clock_timestamp()"
+        ],
+        "execution_stage": [
+          "text",
+          true,
+          "'PREPARING'::text"
+        ],
+        "state": [
+          "text",
+          true,
+          "'EXECUTING'::text"
+        ],
+        "external_execution_refs": [
+          "jsonb",
+          true,
+          "'{}'::jsonb"
+        ],
+        "stop_confirmed_at": [
+          "timestamp with time zone",
+          false,
+          null
+        ],
+        "started_at": [
+          "timestamp with time zone",
+          true,
+          "clock_timestamp()"
+        ],
+        "finished_at": [
+          "timestamp with time zone",
+          false,
+          null
+        ]
+      },
+      "constraints": [
+        [
+          "CHECK (execution_stage = ANY (ARRAY['PREPARING'::text, 'EXTERNAL'::text]))",
+          true
+        ],
+        [
+          "CHECK (state = ANY (ARRAY['EXECUTING'::text, 'SUCCEEDED'::text, 'FAILED'::text, 'EXPIRED_UNCONFIRMED'::text, 'STOPPED'::text]))",
+          true
+        ],
+        [
+          "FOREIGN KEY (job_id) REFERENCES runtime_job(job_id)",
+          true
+        ],
+        [
+          "PRIMARY KEY (attempt_id)",
+          true
+        ],
+        [
+          "UNIQUE (job_id, attempt_no)",
+          true
+        ],
+        [
+          "UNIQUE (lease_token)",
+          true
+        ]
+      ],
+      "indexes": [
+        [
+          false,
+          true,
+          "btree (job_id) WHERE state = 'EXPIRED_UNCONFIRMED'::text AND stop_confirmed_at IS NULL"
+        ],
+        [
+          true,
+          true,
+          "btree (attempt_id)"
+        ],
+        [
+          true,
+          true,
+          "btree (job_id, attempt_no)"
+        ],
+        [
+          true,
+          true,
+          "btree (lease_token)"
+        ]
+      ],
+      "triggers": []
+    },
+    "runtime_job": {
+      "columns": {
+        "job_id": [
+          "uuid",
+          true,
+          null
+        ],
+        "kind": [
+          "text",
+          true,
+          null
+        ],
+        "project_id": [
+          "text",
+          true,
+          null
+        ],
+        "parent_run_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "idempotency_scope": [
+          "text",
+          false,
+          null
+        ],
+        "idempotency_key": [
+          "text",
+          false,
+          null
+        ],
+        "request_fingerprint": [
+          "text",
+          true,
+          null
+        ],
+        "request_json": [
+          "jsonb",
+          true,
+          "'{}'::jsonb"
+        ],
+        "input_mode": [
+          "text",
+          true,
+          "'DURABLE'::text"
+        ],
+        "pinned_instance_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "input_lease_expires_at": [
+          "timestamp with time zone",
+          false,
+          null
+        ],
+        "input_set_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "output_set_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "config_version": [
+          "text",
+          true,
+          null
+        ],
+        "toolchain_version": [
+          "text",
+          true,
+          null
+        ],
+        "schema_name": [
+          "text",
+          false,
+          null
+        ],
+        "profile_binding_id": [
+          "text",
+          false,
+          null
+        ],
+        "status": [
+          "text",
+          true,
+          "'QUEUED'::text"
+        ],
+        "phase": [
+          "text",
+          true,
+          "'PREPARING'::text"
+        ],
+        "run_lifecycle": [
+          "text",
+          false,
+          null
+        ],
+        "attempt_no": [
+          "integer",
+          true,
+          "0"
+        ],
+        "current_attempt_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "available_at": [
+          "timestamp with time zone",
+          true,
+          "clock_timestamp()"
+        ],
+        "deadline_at": [
+          "timestamp with time zone",
+          true,
+          null
+        ],
+        "max_attempts": [
+          "integer",
+          true,
+          "3"
+        ],
+        "retry_policy": [
+          "text",
+          true,
+          "'PREPARATION_ONLY'::text"
+        ],
+        "error_code": [
+          "text",
+          false,
+          null
+        ],
+        "error_detail": [
+          "jsonb",
+          false,
+          null
+        ],
+        "created_at": [
+          "timestamp with time zone",
+          true,
+          "clock_timestamp()"
+        ],
+        "started_at": [
+          "timestamp with time zone",
+          false,
+          null
+        ],
+        "finished_at": [
+          "timestamp with time zone",
+          false,
+          null
+        ]
+      },
+      "constraints": [
+        [
+          "CHECK ((idempotency_key IS NULL) = (idempotency_scope IS NULL))",
+          true
+        ],
+        [
+          "CHECK (input_mode = 'DURABLE'::text OR pinned_instance_id IS NOT NULL AND input_lease_expires_at IS NOT NULL)",
+          true
+        ],
+        [
+          "CHECK (input_mode = ANY (ARRAY['DURABLE'::text, 'VOLATILE'::text]))",
+          true
+        ],
+        [
+          "CHECK (kind = ANY (ARRAY['BUILD_RUN'::text, 'METRIC_QUERY'::text, 'DBT_COMMAND'::text, 'MF_COMMAND'::text, 'QUERY_OPTIONS'::text, 'RUN_CLEANUP'::text]))",
+          true
+        ],
+        [
+          "CHECK (max_attempts >= 1 AND max_attempts <= 3)",
+          true
+        ],
+        [
+          "CHECK (retry_policy = ANY (ARRAY['PREPARATION_ONLY'::text, 'READ_ONLY'::text, 'NEVER'::text]))",
+          true
+        ],
+        [
+          "CHECK (run_lifecycle = ANY (ARRAY['ACTIVE'::text, 'CLEANING'::text, 'CLEANED'::text]))",
+          true
+        ],
+        [
+          "CHECK (status = ANY (ARRAY['QUEUED'::text, 'RUNNING'::text, 'SUCCEEDED'::text, 'FAILED'::text]))",
+          true
+        ],
+        [
+          "FOREIGN KEY (current_attempt_id) REFERENCES runtime_attempt(attempt_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (input_set_id) REFERENCES runtime_artifact_set(set_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (output_set_id) REFERENCES runtime_artifact_set(set_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (parent_run_id) REFERENCES runtime_job(job_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (project_id) REFERENCES runtime_project(project_id)",
+          true
+        ],
+        [
+          "PRIMARY KEY (job_id)",
+          true
+        ]
+      ],
+      "indexes": [
+        [
+          false,
+          true,
+          "btree (kind, available_at, created_at) WHERE status = 'QUEUED'::text"
+        ],
+        [
+          false,
+          true,
+          "btree (parent_run_id, status)"
+        ],
+        [
+          true,
+          true,
+          "btree (idempotency_scope, idempotency_key) WHERE idempotency_key IS NOT NULL"
+        ],
+        [
+          true,
+          true,
+          "btree (job_id)"
+        ]
+      ],
+      "triggers": []
+    },
+    "runtime_job_result": {
+      "columns": {
+        "job_id": [
+          "uuid",
+          true,
+          null
+        ],
+        "attempt_id": [
+          "uuid",
+          true,
+          null
+        ],
+        "payload_json": [
+          "jsonb",
+          true,
+          "'{}'::jsonb"
+        ],
+        "format_version": [
+          "text",
+          true,
+          "'1'::text"
+        ],
+        "stdout_tail": [
+          "text",
+          true,
+          "''::text"
+        ],
+        "stderr_tail": [
+          "text",
+          true,
+          "''::text"
+        ],
+        "exit_code": [
+          "integer",
+          false,
+          null
+        ],
+        "output_truncated": [
+          "boolean",
+          true,
+          "false"
+        ],
+        "created_at": [
+          "timestamp with time zone",
+          true,
+          "clock_timestamp()"
+        ]
+      },
+      "constraints": [
+        [
+          "FOREIGN KEY (attempt_id) REFERENCES runtime_attempt(attempt_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (job_id) REFERENCES runtime_job(job_id)",
+          true
+        ],
+        [
+          "PRIMARY KEY (job_id)",
+          true
+        ]
+      ],
+      "indexes": [
+        [
+          true,
+          true,
+          "btree (job_id)"
+        ]
+      ],
+      "triggers": []
+    },
+    "runtime_project": {
+      "columns": {
+        "project_id": [
+          "text",
+          true,
+          null
+        ],
+        "binding_config": [
+          "jsonb",
+          true,
+          "'{}'::jsonb"
+        ],
+        "config_version": [
+          "text",
+          true,
+          "'1'::text"
+        ],
+        "source_set_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "current_output_set_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "busy_job_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "revision": [
+          "bigint",
+          true,
+          "0"
+        ]
+      },
+      "constraints": [
+        [
+          "FOREIGN KEY (busy_job_id) REFERENCES runtime_job(job_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (current_output_set_id) REFERENCES runtime_artifact_set(set_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (source_set_id) REFERENCES runtime_artifact_set(set_id)",
+          true
+        ],
+        [
+          "PRIMARY KEY (project_id)",
+          true
+        ]
+      ],
+      "indexes": [
+        [
+          true,
+          true,
+          "btree (project_id)"
+        ]
+      ],
+      "triggers": []
+    },
+    "runtime_schema_version": {
+      "columns": {
+        "version": [
+          "integer",
+          true,
+          null
+        ]
+      },
+      "constraints": [
+        [
+          "PRIMARY KEY (version)",
+          true
+        ]
+      ],
+      "indexes": [
+        [
+          true,
+          true,
+          "btree (version)"
+        ]
+      ],
+      "triggers": []
+    }
+  },
+  {
+    "runtime_legacy_identity": {
+      "columns": {
+        "project_id": [
+          "text",
+          true,
+          null
+        ],
+        "kind": [
+          "text",
+          true,
+          null
+        ],
+        "legacy_id": [
+          "uuid",
+          true,
+          null
+        ],
+        "target_id": [
+          "uuid",
+          true,
+          null
+        ]
+      },
+      "constraints": [
+        [
+          "CHECK (kind = ANY (ARRAY['RELEASE'::text, 'QUERY'::text]))",
+          true
+        ],
+        [
+          "FOREIGN KEY (project_id) REFERENCES runtime_project(project_id)",
+          true
+        ],
+        [
+          "PRIMARY KEY (project_id, kind, legacy_id)",
+          true
+        ]
+      ],
+      "indexes": [
+        [
+          true,
+          true,
+          "btree (project_id, kind, legacy_id)"
+        ]
+      ],
+      "triggers": []
+    },
+    "runtime_project": {
+      "columns": {
+        "project_id": [
+          "text",
+          true,
+          null
+        ],
+        "binding_config": [
+          "jsonb",
+          true,
+          "'{}'::jsonb"
+        ],
+        "config_version": [
+          "text",
+          true,
+          "'1'::text"
+        ],
+        "source_set_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "current_output_set_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "busy_job_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "revision": [
+          "bigint",
+          true,
+          "0"
+        ],
+        "publication_sequence": [
+          "bigint",
+          true,
+          "0"
+        ],
+        "active_published_release_id": [
+          "uuid",
+          false,
+          null
+        ]
+      },
+      "constraints": [
+        [
+          "FOREIGN KEY (busy_job_id) REFERENCES runtime_job(job_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (current_output_set_id) REFERENCES runtime_artifact_set(set_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (project_id, active_published_release_id) REFERENCES runtime_release(project_id, release_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (source_set_id) REFERENCES runtime_artifact_set(set_id)",
+          true
+        ],
+        [
+          "PRIMARY KEY (project_id)",
+          true
+        ]
+      ],
+      "indexes": [
+        [
+          true,
+          true,
+          "btree (project_id)"
+        ]
+      ],
+      "triggers": []
+    },
+    "runtime_release": {
+      "columns": {
+        "release_id": [
+          "uuid",
+          true,
+          null
+        ],
+        "project_id": [
+          "text",
+          true,
+          null
+        ],
+        "sequence": [
+          "bigint",
+          true,
+          null
+        ],
+        "idempotency_key": [
+          "text",
+          true,
+          null
+        ],
+        "request_json": [
+          "jsonb",
+          true,
+          null
+        ],
+        "baseline_release_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "run_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "artifact_set_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "state": [
+          "text",
+          true,
+          "'PREPARING'::text"
+        ],
+        "build_mode": [
+          "text",
+          true,
+          "'FULL_BUILD'::text"
+        ],
+        "catalog_digest": [
+          "text",
+          false,
+          null
+        ],
+        "error_code": [
+          "text",
+          false,
+          null
+        ],
+        "created_at": [
+          "timestamp with time zone",
+          true,
+          "clock_timestamp()"
+        ],
+        "published_at": [
+          "timestamp with time zone",
+          false,
+          null
+        ]
+      },
+      "constraints": [
+        [
+          "CHECK (build_mode = ANY (ARRAY['SEMANTIC_ONLY'::text, 'SELECTIVE_BUILD'::text, 'FULL_BUILD'::text]))",
+          true
+        ],
+        [
+          "CHECK (state <> 'PUBLISHED'::text OR run_id IS NOT NULL AND artifact_set_id IS NOT NULL AND published_at IS NOT NULL AND catalog_digest IS NOT NULL)",
+          true
+        ],
+        [
+          "CHECK (state = ANY (ARRAY['PREPARING'::text, 'BUILDING'::text, 'VALIDATING'::text, 'PUBLISHED'::text, 'FAILED'::text, 'SUPERSEDED'::text]))",
+          true
+        ],
+        [
+          "FOREIGN KEY (artifact_set_id) REFERENCES runtime_artifact_set(set_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (baseline_release_id) REFERENCES runtime_release(release_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (project_id) REFERENCES runtime_project(project_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (run_id) REFERENCES runtime_job(job_id)",
+          true
+        ],
+        [
+          "PRIMARY KEY (release_id)",
+          true
+        ],
+        [
+          "UNIQUE (project_id, idempotency_key)",
+          true
+        ],
+        [
+          "UNIQUE (project_id, release_id)",
+          true
+        ],
+        [
+          "UNIQUE (project_id, sequence)",
+          true
+        ],
+        [
+          "UNIQUE (run_id)",
+          true
+        ]
+      ],
+      "indexes": [
+        [
+          true,
+          true,
+          "btree (project_id, idempotency_key)"
+        ],
+        [
+          true,
+          true,
+          "btree (project_id, release_id)"
+        ],
+        [
+          true,
+          true,
+          "btree (project_id, sequence)"
+        ],
+        [
+          true,
+          true,
+          "btree (release_id)"
+        ],
+        [
+          true,
+          true,
+          "btree (run_id)"
+        ]
+      ],
+      "triggers": []
+    },
+    "runtime_release_relation": {
+      "columns": {
+        "release_id": [
+          "uuid",
+          true,
+          null
+        ],
+        "native_id": [
+          "text",
+          true,
+          null
+        ],
+        "creator_run_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "binding_json": [
+          "jsonb",
+          true,
+          null
+        ]
+      },
+      "constraints": [
+        [
+          "FOREIGN KEY (creator_run_id) REFERENCES runtime_job(job_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (release_id) REFERENCES runtime_release(release_id)",
+          true
+        ],
+        [
+          "PRIMARY KEY (release_id, native_id)",
+          true
+        ]
+      ],
+      "indexes": [
+        [
+          false,
+          true,
+          "btree (creator_run_id)"
+        ],
+        [
+          true,
+          true,
+          "btree (release_id, native_id)"
+        ]
+      ],
+      "triggers": []
+    }
+  },
+  {
+    "runtime_artifact_set": {
+      "columns": {
+        "set_id": [
+          "uuid",
+          true,
+          null
+        ],
+        "project_id": [
+          "text",
+          true,
+          null
+        ],
+        "producer_attempt_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "kind": [
+          "text",
+          true,
+          null
+        ],
+        "state": [
+          "text",
+          true,
+          "'STAGING'::text"
+        ],
+        "source_commit_sha": [
+          "text",
+          false,
+          null
+        ],
+        "project_digest": [
+          "text",
+          false,
+          null
+        ],
+        "source_set_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "config_version": [
+          "text",
+          false,
+          null
+        ],
+        "toolchain_version": [
+          "text",
+          false,
+          null
+        ],
+        "format_version": [
+          "text",
+          true,
+          "'1'::text"
+        ],
+        "content_digest": [
+          "text",
+          false,
+          null
+        ],
+        "file_count": [
+          "integer",
+          true,
+          "0"
+        ],
+        "raw_bytes": [
+          "bigint",
+          true,
+          "0"
+        ],
+        "validation_json": [
+          "jsonb",
+          true,
+          "'{}'::jsonb"
+        ],
+        "catalog_json": [
+          "jsonb",
+          true,
+          "'{}'::jsonb"
+        ],
+        "metadata": [
+          "jsonb",
+          true,
+          "'{}'::jsonb"
+        ],
+        "created_at": [
+          "timestamp with time zone",
+          true,
+          "clock_timestamp()"
+        ],
+        "sealed_at": [
+          "timestamp with time zone",
+          false,
+          null
+        ]
+      },
+      "constraints": [
+        [
+          "CHECK (kind = ANY (ARRAY['SOURCE'::text, 'EXECUTION'::text, 'VALIDATION_INPUT'::text]))",
+          true
+        ],
+        [
+          "CHECK (state = ANY (ARRAY['STAGING'::text, 'SEALED'::text, 'DELETING'::text]))",
+          true
+        ],
+        [
+          "FOREIGN KEY (producer_attempt_id) REFERENCES runtime_attempt(attempt_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (project_id) REFERENCES runtime_project(project_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (source_set_id) REFERENCES runtime_artifact_set(set_id)",
+          true
+        ],
+        [
+          "PRIMARY KEY (set_id)",
+          true
+        ]
+      ],
+      "indexes": [
+        [
+          true,
+          true,
+          "btree (set_id)"
+        ]
+      ],
+      "triggers": [
+        [
+          "runtime_artifact_set_guard",
+          "O",
+          "CREATE TRIGGER runtime_artifact_set_guard BEFORE UPDATE ON runtime_artifact_set FOR EACH ROW EXECUTE FUNCTION runtime_guard_artifact_set()",
+          "BEGIN IF OLD.state IN ('SEALED','DELETING') AND ((to_jsonb(NEW)-'state') IS DISTINCT FROM (to_jsonb(OLD)-'state') OR NEW.state NOT IN (OLD.state,'DELETING')) THEN RAISE EXCEPTION 'Sealed artifact set is immutable' USING ERRCODE='23514'; END IF; RETURN NEW; END"
+        ]
+      ]
+    },
+    "runtime_job": {
+      "columns": {
+        "job_id": [
+          "uuid",
+          true,
+          null
+        ],
+        "kind": [
+          "text",
+          true,
+          null
+        ],
+        "project_id": [
+          "text",
+          true,
+          null
+        ],
+        "parent_run_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "idempotency_scope": [
+          "text",
+          false,
+          null
+        ],
+        "idempotency_key": [
+          "text",
+          false,
+          null
+        ],
+        "request_fingerprint": [
+          "text",
+          true,
+          null
+        ],
+        "request_json": [
+          "jsonb",
+          true,
+          "'{}'::jsonb"
+        ],
+        "input_mode": [
+          "text",
+          true,
+          "'DURABLE'::text"
+        ],
+        "pinned_instance_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "input_lease_expires_at": [
+          "timestamp with time zone",
+          false,
+          null
+        ],
+        "input_set_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "output_set_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "config_version": [
+          "text",
+          true,
+          null
+        ],
+        "toolchain_version": [
+          "text",
+          true,
+          null
+        ],
+        "schema_name": [
+          "text",
+          false,
+          null
+        ],
+        "profile_binding_id": [
+          "text",
+          false,
+          null
+        ],
+        "status": [
+          "text",
+          true,
+          "'QUEUED'::text"
+        ],
+        "phase": [
+          "text",
+          true,
+          "'PREPARING'::text"
+        ],
+        "run_lifecycle": [
+          "text",
+          false,
+          null
+        ],
+        "attempt_no": [
+          "integer",
+          true,
+          "0"
+        ],
+        "current_attempt_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "available_at": [
+          "timestamp with time zone",
+          true,
+          "clock_timestamp()"
+        ],
+        "deadline_at": [
+          "timestamp with time zone",
+          true,
+          null
+        ],
+        "max_attempts": [
+          "integer",
+          true,
+          "3"
+        ],
+        "retry_policy": [
+          "text",
+          true,
+          "'PREPARATION_ONLY'::text"
+        ],
+        "error_code": [
+          "text",
+          false,
+          null
+        ],
+        "error_detail": [
+          "jsonb",
+          false,
+          null
+        ],
+        "created_at": [
+          "timestamp with time zone",
+          true,
+          "clock_timestamp()"
+        ],
+        "started_at": [
+          "timestamp with time zone",
+          false,
+          null
+        ],
+        "finished_at": [
+          "timestamp with time zone",
+          false,
+          null
+        ]
+      },
+      "constraints": [
+        [
+          "CHECK ((idempotency_key IS NULL) = (idempotency_scope IS NULL))",
+          true
+        ],
+        [
+          "CHECK (input_mode = 'DURABLE'::text OR pinned_instance_id IS NOT NULL AND input_lease_expires_at IS NOT NULL)",
+          true
+        ],
+        [
+          "CHECK (input_mode = ANY (ARRAY['DURABLE'::text, 'VOLATILE'::text]))",
+          true
+        ],
+        [
+          "CHECK (kind = ANY (ARRAY['BUILD_RUN'::text, 'METRIC_QUERY'::text, 'DBT_COMMAND'::text, 'MF_COMMAND'::text, 'QUERY_OPTIONS'::text, 'RUN_CLEANUP'::text, 'DRAFT_VALIDATION'::text]))",
+          true
+        ],
+        [
+          "CHECK (max_attempts >= 1 AND max_attempts <= 3)",
+          true
+        ],
+        [
+          "CHECK (retry_policy = ANY (ARRAY['PREPARATION_ONLY'::text, 'READ_ONLY'::text, 'NEVER'::text]))",
+          true
+        ],
+        [
+          "CHECK (run_lifecycle = ANY (ARRAY['ACTIVE'::text, 'CLEANING'::text, 'CLEANED'::text]))",
+          true
+        ],
+        [
+          "CHECK (status = ANY (ARRAY['QUEUED'::text, 'RUNNING'::text, 'SUCCEEDED'::text, 'FAILED'::text]))",
+          true
+        ],
+        [
+          "FOREIGN KEY (current_attempt_id) REFERENCES runtime_attempt(attempt_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (input_set_id) REFERENCES runtime_artifact_set(set_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (output_set_id) REFERENCES runtime_artifact_set(set_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (parent_run_id) REFERENCES runtime_job(job_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (project_id) REFERENCES runtime_project(project_id)",
+          true
+        ],
+        [
+          "PRIMARY KEY (job_id)",
+          true
+        ]
+      ],
+      "indexes": [
+        [
+          false,
+          true,
+          "btree (kind, available_at, created_at) WHERE status = 'QUEUED'::text"
+        ],
+        [
+          false,
+          true,
+          "btree (parent_run_id, status)"
+        ],
+        [
+          true,
+          true,
+          "btree (idempotency_scope, idempotency_key) WHERE idempotency_key IS NOT NULL"
+        ],
+        [
+          true,
+          true,
+          "btree (job_id)"
+        ]
+      ],
+      "triggers": []
+    }
+  },
+  {
+    "runtime_branch": {
+      "columns": {
+        "branch_id": [
+          "uuid",
+          true,
+          null
+        ],
+        "project_id": [
+          "text",
+          true,
+          null
+        ],
+        "git_ref": [
+          "text",
+          true,
+          null
+        ],
+        "mode": [
+          "text",
+          true,
+          null
+        ],
+        "status": [
+          "text",
+          true,
+          null
+        ],
+        "base_commit_sha": [
+          "text",
+          false,
+          null
+        ],
+        "base_release_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "observed_head_sha": [
+          "text",
+          false,
+          null
+        ],
+        "active_release_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "latest_release_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "publication_sequence": [
+          "bigint",
+          true,
+          "0"
+        ],
+        "version": [
+          "bigint",
+          true,
+          "1"
+        ],
+        "binding_config": [
+          "jsonb",
+          true,
+          "'{}'::jsonb"
+        ],
+        "config_version": [
+          "text",
+          true,
+          null
+        ],
+        "operation_key": [
+          "text",
+          false,
+          null
+        ],
+        "operation_json": [
+          "jsonb",
+          false,
+          null
+        ],
+        "signal_version": [
+          "bigint",
+          true,
+          "0"
+        ],
+        "processed_signal_version": [
+          "bigint",
+          true,
+          "0"
+        ],
+        "scan_token": [
+          "uuid",
+          false,
+          null
+        ],
+        "scan_expires_at": [
+          "timestamp with time zone",
+          false,
+          null
+        ],
+        "created_at": [
+          "timestamp with time zone",
+          true,
+          "clock_timestamp()"
+        ]
+      },
+      "constraints": [
+        [
+          "CHECK (git_ref ~~ 'refs/heads/%'::text)",
+          true
+        ],
+        [
+          "CHECK (mode <> 'PRODUCTION'::text OR git_ref = 'refs/heads/main'::text AND status = 'ACTIVE'::text)",
+          true
+        ],
+        [
+          "CHECK (mode = ANY (ARRAY['PRODUCTION'::text, 'PREVIEW'::text]))",
+          true
+        ],
+        [
+          "CHECK (status = ANY (ARRAY['PROVISIONING'::text, 'ACTIVE'::text, 'DELETING'::text, 'DELETED'::text, 'FAILED'::text]))",
+          true
+        ],
+        [
+          "FOREIGN KEY (project_id) REFERENCES runtime_project(project_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (project_id, base_release_id) REFERENCES runtime_release(project_id, release_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (project_id, branch_id, active_release_id) REFERENCES runtime_release(project_id, branch_id, release_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (project_id, branch_id, latest_release_id) REFERENCES runtime_release(project_id, branch_id, release_id)",
+          true
+        ],
+        [
+          "PRIMARY KEY (branch_id)",
+          true
+        ],
+        [
+          "UNIQUE (project_id, branch_id)",
+          true
+        ],
+        [
+          "UNIQUE (project_id, operation_key)",
+          true
+        ]
+      ],
+      "indexes": [
+        [
+          true,
+          true,
+          "btree (branch_id)"
+        ],
+        [
+          true,
+          true,
+          "btree (project_id) WHERE mode = 'PRODUCTION'::text"
+        ],
+        [
+          true,
+          true,
+          "btree (project_id, branch_id)"
+        ],
+        [
+          true,
+          true,
+          "btree (project_id, git_ref) WHERE status <> 'DELETED'::text"
+        ],
+        [
+          true,
+          true,
+          "btree (project_id, operation_key)"
+        ]
+      ],
+      "triggers": []
+    },
+    "runtime_job": {
+      "columns": {
+        "job_id": [
+          "uuid",
+          true,
+          null
+        ],
+        "kind": [
+          "text",
+          true,
+          null
+        ],
+        "project_id": [
+          "text",
+          true,
+          null
+        ],
+        "parent_run_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "idempotency_scope": [
+          "text",
+          false,
+          null
+        ],
+        "idempotency_key": [
+          "text",
+          false,
+          null
+        ],
+        "request_fingerprint": [
+          "text",
+          true,
+          null
+        ],
+        "request_json": [
+          "jsonb",
+          true,
+          "'{}'::jsonb"
+        ],
+        "input_mode": [
+          "text",
+          true,
+          "'DURABLE'::text"
+        ],
+        "pinned_instance_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "input_lease_expires_at": [
+          "timestamp with time zone",
+          false,
+          null
+        ],
+        "input_set_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "output_set_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "config_version": [
+          "text",
+          true,
+          null
+        ],
+        "toolchain_version": [
+          "text",
+          true,
+          null
+        ],
+        "schema_name": [
+          "text",
+          false,
+          null
+        ],
+        "profile_binding_id": [
+          "text",
+          false,
+          null
+        ],
+        "status": [
+          "text",
+          true,
+          "'QUEUED'::text"
+        ],
+        "phase": [
+          "text",
+          true,
+          "'PREPARING'::text"
+        ],
+        "run_lifecycle": [
+          "text",
+          false,
+          null
+        ],
+        "attempt_no": [
+          "integer",
+          true,
+          "0"
+        ],
+        "current_attempt_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "available_at": [
+          "timestamp with time zone",
+          true,
+          "clock_timestamp()"
+        ],
+        "deadline_at": [
+          "timestamp with time zone",
+          true,
+          null
+        ],
+        "max_attempts": [
+          "integer",
+          true,
+          "3"
+        ],
+        "retry_policy": [
+          "text",
+          true,
+          "'PREPARATION_ONLY'::text"
+        ],
+        "error_code": [
+          "text",
+          false,
+          null
+        ],
+        "error_detail": [
+          "jsonb",
+          false,
+          null
+        ],
+        "created_at": [
+          "timestamp with time zone",
+          true,
+          "clock_timestamp()"
+        ],
+        "started_at": [
+          "timestamp with time zone",
+          false,
+          null
+        ],
+        "finished_at": [
+          "timestamp with time zone",
+          false,
+          null
+        ],
+        "branch_id": [
+          "uuid",
+          false,
+          null
+        ]
+      },
+      "constraints": [
+        [
+          "CHECK ((idempotency_key IS NULL) = (idempotency_scope IS NULL))",
+          true
+        ],
+        [
+          "CHECK (input_mode = 'DURABLE'::text OR pinned_instance_id IS NOT NULL AND input_lease_expires_at IS NOT NULL)",
+          true
+        ],
+        [
+          "CHECK (input_mode = ANY (ARRAY['DURABLE'::text, 'VOLATILE'::text]))",
+          true
+        ],
+        [
+          "CHECK (kind = ANY (ARRAY['BUILD_RUN'::text, 'METRIC_QUERY'::text, 'DBT_COMMAND'::text, 'MF_COMMAND'::text, 'QUERY_OPTIONS'::text, 'RUN_CLEANUP'::text, 'DRAFT_VALIDATION'::text]))",
+          true
+        ],
+        [
+          "CHECK (max_attempts >= 1 AND max_attempts <= 3)",
+          true
+        ],
+        [
+          "CHECK (retry_policy = ANY (ARRAY['PREPARATION_ONLY'::text, 'READ_ONLY'::text, 'NEVER'::text]))",
+          true
+        ],
+        [
+          "CHECK (run_lifecycle = ANY (ARRAY['ACTIVE'::text, 'CLEANING'::text, 'CLEANED'::text]))",
+          true
+        ],
+        [
+          "CHECK (status = ANY (ARRAY['QUEUED'::text, 'RUNNING'::text, 'SUCCEEDED'::text, 'FAILED'::text]))",
+          true
+        ],
+        [
+          "FOREIGN KEY (current_attempt_id) REFERENCES runtime_attempt(attempt_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (input_set_id) REFERENCES runtime_artifact_set(set_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (output_set_id) REFERENCES runtime_artifact_set(set_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (parent_run_id) REFERENCES runtime_job(job_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (project_id) REFERENCES runtime_project(project_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (project_id, branch_id) REFERENCES runtime_branch(project_id, branch_id)",
+          true
+        ],
+        [
+          "PRIMARY KEY (job_id)",
+          true
+        ]
+      ],
+      "indexes": [
+        [
+          false,
+          true,
+          "btree (kind, available_at, created_at) WHERE status = 'QUEUED'::text"
+        ],
+        [
+          false,
+          true,
+          "btree (parent_run_id, status)"
+        ],
+        [
+          true,
+          true,
+          "btree (idempotency_scope, idempotency_key) WHERE idempotency_key IS NOT NULL"
+        ],
+        [
+          true,
+          true,
+          "btree (job_id)"
+        ]
+      ],
+      "triggers": []
+    },
+    "runtime_release": {
+      "columns": {
+        "release_id": [
+          "uuid",
+          true,
+          null
+        ],
+        "project_id": [
+          "text",
+          true,
+          null
+        ],
+        "sequence": [
+          "bigint",
+          true,
+          null
+        ],
+        "idempotency_key": [
+          "text",
+          true,
+          null
+        ],
+        "request_json": [
+          "jsonb",
+          true,
+          null
+        ],
+        "baseline_release_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "run_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "artifact_set_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "state": [
+          "text",
+          true,
+          "'PREPARING'::text"
+        ],
+        "build_mode": [
+          "text",
+          true,
+          "'FULL_BUILD'::text"
+        ],
+        "catalog_digest": [
+          "text",
+          false,
+          null
+        ],
+        "error_code": [
+          "text",
+          false,
+          null
+        ],
+        "created_at": [
+          "timestamp with time zone",
+          true,
+          "clock_timestamp()"
+        ],
+        "published_at": [
+          "timestamp with time zone",
+          false,
+          null
+        ],
+        "branch_id": [
+          "uuid",
+          true,
+          null
+        ]
+      },
+      "constraints": [
+        [
+          "CHECK (build_mode = ANY (ARRAY['SEMANTIC_ONLY'::text, 'SELECTIVE_BUILD'::text, 'FULL_BUILD'::text]))",
+          true
+        ],
+        [
+          "CHECK (state <> 'PUBLISHED'::text OR run_id IS NOT NULL AND artifact_set_id IS NOT NULL AND published_at IS NOT NULL AND catalog_digest IS NOT NULL)",
+          true
+        ],
+        [
+          "CHECK (state = ANY (ARRAY['PREPARING'::text, 'BUILDING'::text, 'VALIDATING'::text, 'PUBLISHED'::text, 'FAILED'::text, 'SUPERSEDED'::text]))",
+          true
+        ],
+        [
+          "FOREIGN KEY (artifact_set_id) REFERENCES runtime_artifact_set(set_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (baseline_release_id) REFERENCES runtime_release(release_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (project_id) REFERENCES runtime_project(project_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (project_id, branch_id) REFERENCES runtime_branch(project_id, branch_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (project_id, branch_id, baseline_release_id) REFERENCES runtime_release(project_id, branch_id, release_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (run_id) REFERENCES runtime_job(job_id)",
+          true
+        ],
+        [
+          "PRIMARY KEY (release_id)",
+          true
+        ],
+        [
+          "UNIQUE (project_id, branch_id, idempotency_key)",
+          true
+        ],
+        [
+          "UNIQUE (project_id, branch_id, release_id)",
+          true
+        ],
+        [
+          "UNIQUE (project_id, branch_id, sequence)",
+          true
+        ],
+        [
+          "UNIQUE (project_id, release_id)",
+          true
+        ],
+        [
+          "UNIQUE (run_id)",
+          true
+        ]
+      ],
+      "indexes": [
+        [
+          true,
+          true,
+          "btree (project_id, branch_id, idempotency_key)"
+        ],
+        [
+          true,
+          true,
+          "btree (project_id, branch_id, release_id)"
+        ],
+        [
+          true,
+          true,
+          "btree (project_id, branch_id, sequence)"
+        ],
+        [
+          true,
+          true,
+          "btree (project_id, release_id)"
+        ],
+        [
+          true,
+          true,
+          "btree (release_id)"
+        ],
+        [
+          true,
+          true,
+          "btree (run_id)"
+        ]
+      ],
+      "triggers": []
+    }
+  },
+  {
+    "runtime_branch": {
+      "columns": {
+        "branch_id": [
+          "uuid",
+          true,
+          null
+        ],
+        "project_id": [
+          "text",
+          true,
+          null
+        ],
+        "git_ref": [
+          "text",
+          true,
+          null
+        ],
+        "mode": [
+          "text",
+          true,
+          null
+        ],
+        "status": [
+          "text",
+          true,
+          null
+        ],
+        "base_commit_sha": [
+          "text",
+          false,
+          null
+        ],
+        "base_release_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "observed_head_sha": [
+          "text",
+          false,
+          null
+        ],
+        "active_release_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "latest_release_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "publication_sequence": [
+          "bigint",
+          true,
+          "0"
+        ],
+        "version": [
+          "bigint",
+          true,
+          "1"
+        ],
+        "binding_config": [
+          "jsonb",
+          true,
+          "'{}'::jsonb"
+        ],
+        "config_version": [
+          "text",
+          true,
+          null
+        ],
+        "operation_key": [
+          "text",
+          false,
+          null
+        ],
+        "operation_json": [
+          "jsonb",
+          false,
+          null
+        ],
+        "signal_version": [
+          "bigint",
+          true,
+          "0"
+        ],
+        "processed_signal_version": [
+          "bigint",
+          true,
+          "0"
+        ],
+        "scan_token": [
+          "uuid",
+          false,
+          null
+        ],
+        "scan_expires_at": [
+          "timestamp with time zone",
+          false,
+          null
+        ],
+        "created_at": [
+          "timestamp with time zone",
+          true,
+          "clock_timestamp()"
+        ],
+        "base_input_set_id": [
+          "uuid",
+          false,
+          null
+        ],
+        "production_base_release_id": [
+          "uuid",
+          false,
+          null
+        ]
+      },
+      "constraints": [
+        [
+          "CHECK (git_ref ~~ 'refs/heads/%'::text)",
+          true
+        ],
+        [
+          "CHECK (mode <> 'PRODUCTION'::text OR git_ref = 'refs/heads/main'::text AND status = 'ACTIVE'::text)",
+          true
+        ],
+        [
+          "CHECK (mode = ANY (ARRAY['PRODUCTION'::text, 'PREVIEW'::text]))",
+          true
+        ],
+        [
+          "CHECK (status = ANY (ARRAY['PROVISIONING'::text, 'ACTIVE'::text, 'DELETING'::text, 'DELETED'::text, 'FAILED'::text]))",
+          true
+        ],
+        [
+          "FOREIGN KEY (base_input_set_id) REFERENCES runtime_artifact_set(set_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (project_id) REFERENCES runtime_project(project_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (project_id, base_release_id) REFERENCES runtime_release(project_id, release_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (project_id, branch_id, active_release_id) REFERENCES runtime_release(project_id, branch_id, release_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (project_id, branch_id, latest_release_id) REFERENCES runtime_release(project_id, branch_id, release_id)",
+          true
+        ],
+        [
+          "FOREIGN KEY (project_id, production_base_release_id) REFERENCES runtime_release(project_id, release_id)",
+          true
+        ],
+        [
+          "PRIMARY KEY (branch_id)",
+          true
+        ],
+        [
+          "UNIQUE (project_id, branch_id)",
+          true
+        ],
+        [
+          "UNIQUE (project_id, operation_key)",
+          true
+        ]
+      ],
+      "indexes": [
+        [
+          true,
+          true,
+          "btree (branch_id)"
+        ],
+        [
+          true,
+          true,
+          "btree (project_id) WHERE mode = 'PRODUCTION'::text"
+        ],
+        [
+          true,
+          true,
+          "btree (project_id, branch_id)"
+        ],
+        [
+          true,
+          true,
+          "btree (project_id, git_ref) WHERE status <> 'DELETED'::text"
+        ],
+        [
+          true,
+          true,
+          "btree (project_id, operation_key)"
+        ]
+      ],
+      "triggers": []
+    },
+    "runtime_branch_event": {
+      "columns": {
+        "delivery_id": [
+          "text",
+          true,
+          null
+        ],
+        "payload_digest": [
+          "text",
+          true,
+          null
+        ],
+        "received_at": [
+          "timestamp with time zone",
+          true,
+          "clock_timestamp()"
+        ]
+      },
+      "constraints": [
+        [
+          "PRIMARY KEY (delivery_id)",
+          true
+        ]
+      ],
+      "indexes": [
+        [
+          true,
+          true,
+          "btree (delivery_id)"
+        ]
+      ],
+      "triggers": []
+    }
+  }
+]

@@ -11,7 +11,7 @@ from psycopg2 import sql
 from psycopg2.extensions import make_dsn
 from psycopg2.extras import Json
 from sqlalchemy import Connection
-from sqlalchemy.exc import TimeoutError
+from sqlalchemy.exc import DBAPIError, TimeoutError
 
 from dbt_metricflow_service.storage.postgres import Database
 
@@ -100,5 +100,30 @@ def test_dsn_and_value_compatibility(database_dsn):
             assert connection.exec_driver_sql("SHOW lock_timeout").scalar_one() == "5s"
             # The schema provided through libpq options must survive service defaults.
             assert connection.exec_driver_sql("SELECT count(*) FROM records").scalar_one() == 0
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("dsn", [
+    "postgresql://test:p%25%20%27%40%3A@localhost/example?sslmode=require&options=-c%20application_name%3Dtest",
+    "user=test password='p% \\'@:' host=localhost dbname=example sslmode=require options='-c application_name=test'",
+])
+def test_connection_parameters_preserve_credentials_and_ssl(dsn, monkeypatch):
+    parameters = {}
+
+    def connect(dsn="", **kwargs):
+        assert dsn == ""
+        parameters.update(kwargs)
+        raise psycopg2.OperationalError("injected offline")
+
+    monkeypatch.setattr(psycopg2, "connect", connect)
+    db = Database(dsn)
+    try:
+        with pytest.raises(DBAPIError), db.transaction():
+            pass
+        assert parameters["password"] == "p% '@:"
+        assert parameters["sslmode"] == "require"
+        assert parameters["connect_timeout"] == 5
+        assert "-c application_name=test" in parameters["options"]
     finally:
         db.close()

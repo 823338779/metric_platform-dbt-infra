@@ -259,7 +259,9 @@ class ArtifactStore:
                 self.seal(set_id, connection)
         return set_id
 
-    def capture_validation_input(self, project_id: str, payload: bytes, connection: Connection, *, version: int = 1) -> str:
+    def capture_validation_input(
+        self, project_id: str, payload: bytes, connection: Connection, *, version: int = 1
+    ) -> str:
         """与 job 受理共用事务；专用输入不放宽普通项目快照的文件白名单。"""
         if len(payload) > min(MAX_VALIDATION_INPUT_BYTES, self.max_file_bytes, self.max_set_bytes):
             raise ValueError("validation input exceeds byte limit")

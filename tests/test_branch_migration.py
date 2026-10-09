@@ -6,8 +6,9 @@ from uuid import uuid4
 
 from dbt_metricflow_service.storage.branches import BranchStore
 from dbt_metricflow_service.storage.jobs import JobStore
-from dbt_metricflow_service.storage.postgres import MIGRATIONS, Database
+from dbt_metricflow_service.storage.postgres import Database
 from dbt_metricflow_service.storage.rows import row_dict
+from tests.schema_helpers import prepare_legacy
 from tests.test_publication_storage import store as store
 from tests.test_publication_transaction import prepared
 
@@ -68,11 +69,8 @@ def test_upgrade_preserves_production_identities(store):
             execution_options={"no_parameters": True},
         )
     try:
+        prepare_legacy(scoped, 3)
         with scoped.transaction() as connection:
-            for migration in MIGRATIONS[:3]:
-                sql_result = connection.exec_driver_sql(
-                    migration.read_text(encoding=UTF8), execution_options={"no_parameters": True}
-                )
             sql_result = connection.exec_driver_sql(SQL_PROJECT, (PROJECT,))
             sql_result = connection.exec_driver_sql(SQL_JOB, (run, PROJECT, BUILD, None))
             sql_result = connection.exec_driver_sql(SQL_JOB, (query, PROJECT, QUERY, run))

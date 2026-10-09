@@ -160,7 +160,7 @@ class PublicationService:
             schema = (
                 validate_schema_name(configured.schema_name) if configured.schema_name else SCHEMA_PREFIX + run_id.hex
             )
-            job = self.runtime.jobs.reserve_in_transaction(connection, 
+            job = self.runtime.jobs.reserve_in_transaction(connection,
                 BUILD, project_id, {**request, "binding": binding, "releaseId": release["release_id"]},
                 job_id=str(run_id), idempotency_scope=SCOPE + project_id + branch["branch_id"],
                 idempotency_key=idempotency_key,
@@ -457,7 +457,7 @@ class PublicationService:
                 return recover(prior)
             if project["status"] != ACTIVE_BRANCH or project["active_release_id"] != release["release_id"]:
                 raise ReleaseGone("发布版本已替代")
-            row = self.runtime.jobs.reserve_in_transaction(connection, 
+            row = self.runtime.jobs.reserve_in_transaction(connection,
                 QUERY_KIND, project_id, {"publicationRequest": public, "businessTimezone": timezone,
                                          "engineRequest": engine.model_dump(mode=JSON_MODE, by_alias=True)},
                 idempotency_scope=scope, idempotency_key=request.idempotency_key,
