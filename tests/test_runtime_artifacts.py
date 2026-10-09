@@ -5,12 +5,13 @@ import hashlib
 import os
 from uuid import uuid4
 
-import psycopg2
 import pytest
+from sqlalchemy.exc import DBAPIError
 
 from dbt_metricflow_service.runtime.workspace import materialized_workspace
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.postgres import Database
+from dbt_metricflow_service.storage.rows import row_dict
 
 # 所有集成测试使用独立项目，允许不同仓储测试并行执行。
 DATABASE_ENV = "SERVICE_TEST_DATABASE_URL"
@@ -43,8 +44,8 @@ def store():
 @pytest.fixture
 def project(store, tmp_path):
     project_id = str(uuid4())
-    with store.database.transaction() as cursor:
-        cursor.execute(SQL_PROJECT, (project_id,))
+    with store.database.transaction() as connection:
+        connection.exec_driver_sql(SQL_PROJECT, (project_id,))
     source = tmp_path / "input"
     source.mkdir()
     (source / PROJECT_FILE).write_text(PROJECT_TEXT, encoding="utf-8")
@@ -84,8 +85,8 @@ def test_execution_keeps_dependencies_and_excludes_local_state(store, project, t
 
 def test_sealed_files_cannot_be_overwritten(store, project):
     set_id = store.capture(*project)
-    with pytest.raises(psycopg2.Error), store.database.transaction() as cursor:
-        cursor.execute(SQL_MUTATE, (b"corrupt", set_id))
+    with pytest.raises(DBAPIError), store.database.transaction() as connection:
+        connection.exec_driver_sql(SQL_MUTATE, (b"corrupt", set_id))
 
 
 @pytest.mark.parametrize("unsafe", ["../outside", "/absolute", "C:/absolute", "models/../outside"])
@@ -134,18 +135,19 @@ def test_metadata_has_stable_digest_across_local_roots(store, project, tmp_path)
     store.materialize(first, destination)
     second = store.capture(project_id, destination)
     assert store.metadata(first)["content_digest"] == store.metadata(second)["content_digest"]
-    with store.database.transaction() as cursor:
-        cursor.execute("SELECT raw_sha256 FROM runtime_artifact_file WHERE set_id=%s AND relative_path=%s",
-                       (second, MODEL_PATH))
-        assert cursor.fetchone()["raw_sha256"] == hashlib.sha256(MODEL_BYTES).hexdigest()
+    with store.database.transaction() as connection:
+        sql_result = connection.exec_driver_sql(
+            "SELECT raw_sha256 FROM runtime_artifact_file WHERE set_id=%s AND relative_path=%s", (second, MODEL_PATH)
+        )
+        assert row_dict(sql_result)["raw_sha256"] == hashlib.sha256(MODEL_BYTES).hexdigest()
 
 
 @pytest.fixture
 def attempt(store, project):
     job_id, attempt_id = str(uuid4()), str(uuid4())
-    with store.database.transaction() as cursor:
-        cursor.execute(SQL_JOB, (job_id, project[0]))
-        cursor.execute(SQL_ATTEMPT, (attempt_id, job_id, str(uuid4()), str(uuid4())))
+    with store.database.transaction() as connection:
+        connection.exec_driver_sql(SQL_JOB, (job_id, project[0]))
+        connection.exec_driver_sql(SQL_ATTEMPT, (attempt_id, job_id, str(uuid4()), str(uuid4())))
     return attempt_id
 
 
@@ -153,16 +155,18 @@ def test_worker_capture_is_invisible_until_transaction_seals(store, project, att
     set_id = store.capture(*project, kind="EXECUTION", producer_attempt_id=attempt)
     with pytest.raises(ValueError, match="SEALED"):
         store.materialize(set_id, tmp_path / "before")
-    with store.database.transaction() as cursor:
-        store.seal(set_id, cursor)
+    with store.database.transaction() as connection:
+        store.seal(set_id, connection)
     store.materialize(set_id, tmp_path / "after")
     assert (tmp_path / "after" / TARGET_PATH).read_bytes() == MANIFEST_BYTES
 
 
 def test_gc_preserves_referenced_and_active_worker_artifacts(store, project, attempt):
     source = store.capture(*project)
-    with store.database.transaction() as cursor:
-        cursor.execute("UPDATE runtime_project SET source_set_id=%s WHERE project_id=%s", (source, project[0]))
+    with store.database.transaction() as connection:
+        connection.exec_driver_sql(
+            "UPDATE runtime_project SET source_set_id=%s WHERE project_id=%s", (source, project[0])
+        )
     assert not store.delete_unreferenced(source)
     staged = store.capture(*project, producer_attempt_id=attempt)
     assert not store.delete_unreferenced(staged)
@@ -204,18 +208,18 @@ def test_restoration_rejects_unsafe_database_paths_before_writes(store, project,
     set_id = str(uuid4())
     digest = hashlib.sha256(b"x").hexdigest()
     manifest = b"".join(name.encode() + b"\0" + digest.encode() + b"\0" + b"1\0" for name in sorted(names))
-    with store.database.transaction() as cursor:
-        cursor.execute(
+    with store.database.transaction() as connection:
+        connection.exec_driver_sql(
             """INSERT INTO runtime_artifact_set(set_id,project_id,kind,state,file_count,raw_bytes,content_digest)
             VALUES (%s,%s,'SOURCE','STAGING',%s,%s,%s)""",
             (set_id, project[0], len(names), len(names), hashlib.sha256(manifest).hexdigest()),
         )
         for name in names:
-            cursor.execute("""INSERT INTO runtime_artifact_file
+            connection.exec_driver_sql("""INSERT INTO runtime_artifact_file
                 (set_id,relative_path,content,codec,raw_sha256,raw_size,stored_size)
                 VALUES (%s,%s,%s,'raw',%s,%s,%s)""",
                            (set_id, name, b"x", digest, 1, 1))
-        cursor.execute("UPDATE runtime_artifact_set SET state='SEALED' WHERE set_id=%s", (set_id,))
+        connection.exec_driver_sql("UPDATE runtime_artifact_set SET state='SEALED' WHERE set_id=%s", (set_id,))
     destination = tmp_path / "bad"
     with pytest.raises(ValueError):
         store.materialize(set_id, destination)
@@ -269,14 +273,14 @@ def test_corrupt_bytes_and_decompression_over_limit_are_rejected(store, project,
     manifest_digest = hashlib.sha256(
         b"file.sql\0" + declared_digest.encode() + b"\0" + b"8\0"
     ).hexdigest()
-    with store.database.transaction() as cursor:
-        cursor.execute("""INSERT INTO runtime_artifact_set
+    with store.database.transaction() as connection:
+        connection.exec_driver_sql("""INSERT INTO runtime_artifact_set
             (set_id,project_id,kind,state,file_count,raw_bytes,content_digest)
             VALUES (%s,%s,'SOURCE','STAGING',1,8,%s)""", (set_id, project[0], manifest_digest))
-        cursor.execute("""INSERT INTO runtime_artifact_file
+        connection.exec_driver_sql("""INSERT INTO runtime_artifact_file
             (set_id,relative_path,content,codec,raw_sha256,raw_size,stored_size)
             VALUES (%s,'file.sql',%s,%s,%s,8,%s)""", (set_id, content, codec, declared_digest, len(content)))
-        cursor.execute("UPDATE runtime_artifact_set SET state='SEALED' WHERE set_id=%s", (set_id,))
+        connection.exec_driver_sql("UPDATE runtime_artifact_set SET state='SEALED' WHERE set_id=%s", (set_id,))
     limited = ArtifactStore(store.database, max_file_bytes=128)
     with pytest.raises(ValueError, match="checksum|size"):
         limited.materialize(set_id, tmp_path / "corrupt")

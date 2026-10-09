@@ -37,8 +37,8 @@ def test_cross_branch_release_and_production_default_are_rejected(store, tmp_pat
 
 def test_deleted_branch_rejects_new_catalog(store, tmp_path):
     runtime, project, a, _, ra, _ = published_pair(store, tmp_path)
-    with store.db.transaction() as cursor:
-        cursor.execute("UPDATE runtime_branch SET status='DELETED' WHERE branch_id=%s", (a,))
+    with store.db.transaction() as connection:
+        connection.exec_driver_sql("UPDATE runtime_branch SET status='DELETED' WHERE branch_id=%s", (a,))
     with pytest.raises(ReleaseGone):
         PublicationService(runtime, branch_id=a).catalog(project, ra["release_id"])
 

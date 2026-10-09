@@ -1,12 +1,12 @@
 """短事务连接池；迁移仅由管理命令显式执行。"""
 
-from contextlib import contextmanager
+from contextlib import AbstractContextManager
 from pathlib import Path
-from threading import BoundedSemaphore
 
-from psycopg2 import OperationalError
-from psycopg2.extras import RealDictCursor
-from psycopg2.pool import ThreadedConnectionPool
+from psycopg2.extensions import new_array_type, new_type, parse_dsn, register_type
+from sqlalchemy import Connection, create_engine, event
+
+from dbt_metricflow_service.storage.rows import row_dict
 
 SCHEMA_VERSION = 5
 MIGRATION_PATH = Path(__file__).parent / "migrations" / "001_runtime.sql"
@@ -24,47 +24,49 @@ class Database:
     """每次事务独占连接，连接数和等待线程均受调用方执行器约束。"""
 
     def __init__(self, dsn: str, max_connections: int = 8):
-        # 信号量使短时并发等待连接归还，避免连接池立即抛出耗尽错误。
-        self._pool = ThreadedConnectionPool(1, max_connections, dsn, connect_timeout=5, options=CONNECTION_OPTIONS)
-        self._slots = BoundedSemaphore(max_connections)
+        parameters = parse_dsn(dsn)
+        parameters["options"] = (parameters.get("options", "") + " " + CONNECTION_OPTIONS).strip()
+        parameters["connect_timeout"] = 5
+        self.engine = create_engine(
+            "postgresql+psycopg2://", connect_args=parameters,
+            pool_size=max_connections, max_overflow=0, pool_timeout=5, pool_pre_ping=True,
+        )
+        event.listen(self.engine, "connect", _string_uuids)
 
-    @contextmanager
-    def transaction(self):
-        # psycopg2 的事务上下文在异常时回滚，成功时提交后再归还连接。
-        if not self._slots.acquire(timeout=5):
-            raise OperationalError("Runtime database pool acquisition timed out")
-        try:
-            connection = self._pool.getconn()
-            try:
-                with connection, connection.cursor(cursor_factory=RealDictCursor) as cursor:
-                    yield cursor
-            finally:
-                self._pool.putconn(connection)
-        finally:
-            self._slots.release()
+    def transaction(self) -> AbstractContextManager[Connection]:
+        return self.engine.begin()
 
     def migrate(self):
         # 部署管理命令串行化迁移；普通服务启动仅调用 check。
-        with self.transaction() as cursor:
-            cursor.execute(MIGRATION_LOCK_SQL)
-            cursor.execute(VERSION_TABLE_SQL)
+        with self.transaction() as connection:
+            sql_result = connection.exec_driver_sql(MIGRATION_LOCK_SQL, execution_options={"no_parameters": True})
+            sql_result = connection.exec_driver_sql(VERSION_TABLE_SQL, execution_options={"no_parameters": True})
             version = 0
-            if cursor.fetchone()["table_name"]:
-                cursor.execute(CHECK_SQL)
-                versions = [row["version"] for row in cursor.fetchall()]
+            if row_dict(sql_result)["table_name"]:
+                sql_result = connection.exec_driver_sql(CHECK_SQL, execution_options={"no_parameters": True})
+                versions = [row["version"] for row in sql_result.mappings()]
                 if len(versions) != 1 or not 1 <= versions[0] <= SCHEMA_VERSION:
                     raise RuntimeError("Unsupported runtime database schema")
                 version = versions[0]
             for migration in MIGRATIONS[version:]:
-                cursor.execute(migration.read_text(encoding="utf-8"))
+                sql_result = connection.exec_driver_sql(
+                    migration.read_text(encoding="utf-8"), execution_options={"no_parameters": True}
+                )
 
     def check(self):
         # 拒绝未迁移数据库以及当前代码不认识的 schema。
-        with self.transaction() as cursor:
-            cursor.execute(CHECK_SQL)
-            versions = [row["version"] for row in cursor.fetchall()]
+        with self.transaction() as connection:
+            sql_result = connection.exec_driver_sql(CHECK_SQL, execution_options={"no_parameters": True})
+            versions = [row["version"] for row in sql_result.mappings()]
             if versions != [SCHEMA_VERSION]:
                 raise RuntimeError("Unsupported runtime database schema")
 
     def close(self):
-        self._pool.closeall()
+        self.engine.dispose()
+
+
+def _string_uuids(connection, _record):
+    # 只配置本 Engine 的连接，保留 Store 既有的字符串 UUID 契约。
+    uuid_type = new_type((2950,), "RUNTIME_UUID", lambda value, _cursor: value)
+    register_type(uuid_type, connection)
+    register_type(new_array_type((2951,), "RUNTIME_UUID_ARRAY", uuid_type), connection)

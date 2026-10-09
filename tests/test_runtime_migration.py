@@ -174,10 +174,10 @@ def test_register_valid_bindings_and_confirm_stopped_release_write_guard(databas
     assert jobs.project(project_id)["binding_config"] == binding
     jobs.reserve("DBT_COMMAND", project_id, {}, write=True, toolchain_version=project_id)
     claim = jobs.claim(uuid4(), toolchain_version=project_id)
-    with db.transaction() as cursor:
-        cursor.execute("UPDATE runtime_attempt SET state='EXPIRED_UNCONFIRMED' WHERE attempt_id=%s",
+    with db.transaction() as connection:
+        connection.exec_driver_sql("UPDATE runtime_attempt SET state='EXPIRED_UNCONFIRMED' WHERE attempt_id=%s",
                        (claim["current_attempt_id"],))
-        cursor.execute("UPDATE runtime_job SET status='FAILED' WHERE job_id=%s", (claim["job_id"],))
+        connection.exec_driver_sql("UPDATE runtime_job SET status='FAILED' WHERE job_id=%s", (claim["job_id"],))
     assert reconcile_attempt(db, claim["current_attempt_id"], confirm_external_stopped=True)
     assert jobs.project(project_id)["busy_job_id"] is None
 

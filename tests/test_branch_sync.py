@@ -44,8 +44,8 @@ def test_missed_event_is_found_on_scan(context, repository):
     sync.scan(project_id=project)
     git(repository, "checkout", branch.git_ref.removeprefix("refs/heads/"))
     git(repository, "commit", "--allow-empty", "-m", "missed push")
-    with service.runtime.db.transaction() as cursor:
-        cursor.execute(SQL_DUE, (project,))
+    with service.runtime.db.transaction() as connection:
+        connection.exec_driver_sql(SQL_DUE, (project,))
     sync.scan(project_id=project)
     row = service.store.get(project, str(branch.branch_id))
     assert row["publication_sequence"] == 2
@@ -77,8 +77,8 @@ def test_failed_same_input_is_not_auto_retried(context):
     sync, service, project, branch = scanner(context)
     sync.scan(project_id=project)
     first = service.store.get(project, str(branch.branch_id))
-    with service.runtime.db.transaction() as cursor:
-        cursor.execute(SQL_FAIL, (first["latest_release_id"],))
+    with service.runtime.db.transaction() as connection:
+        connection.exec_driver_sql(SQL_FAIL, (first["latest_release_id"],))
     sync.signal(project, branch.git_ref)
     sync.scan(project_id=project)
     assert service.store.get(project, str(branch.branch_id))["latest_release_id"] == first["latest_release_id"]

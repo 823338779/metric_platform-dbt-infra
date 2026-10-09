@@ -2,6 +2,8 @@
 
 from uuid import uuid4
 
+from dbt_metricflow_service.storage.rows import row_dict
+
 SQL_ENSURE_MAIN = """INSERT INTO runtime_branch
  (branch_id,project_id,git_ref,mode,status,binding_config,config_version)
  SELECT %s,project_id,'refs/heads/main','PRODUCTION','ACTIVE',binding_config,config_version
@@ -35,35 +37,35 @@ class BranchStore:
         self.db = db
 
     @staticmethod
-    def ensure_production(cursor, project_id, preview_profile=None):
+    def ensure_production(connection, project_id, preview_profile=None):
         # 项目注册事务内更新生产绑定，已存在分支的身份和指针不变。
-        cursor.execute(SQL_ENSURE_MAIN, (str(uuid4()), project_id))
+        connection.exec_driver_sql(SQL_ENSURE_MAIN, (str(uuid4()), project_id))
         # 新任务沿用分支 schema 并取得最新受控配置，旧候选的配置检查将失败。
-        cursor.execute(SQL_REFRESH_PREVIEWS, (preview_profile, project_id, preview_profile))
+        connection.exec_driver_sql(SQL_REFRESH_PREVIEWS, (preview_profile, project_id, preview_profile))
 
     def get(self, project_id: str, branch_id: str) -> dict:
         # 项目和分支必须同时匹配，防止其他项目的 UUID 穿透。
-        with self.db.transaction() as cursor:
-            cursor.execute(SQL_BRANCH, (project_id, branch_id))
-            row = cursor.fetchone()
+        with self.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_BRANCH, (project_id, branch_id))
+            row = row_dict(sql_result)
             if not row:
                 raise KeyError(branch_id)
             return dict(row)
 
     def production(self, project_id: str) -> dict:
         # 无分支旧接口总是定位固定生产分支。
-        with self.db.transaction() as cursor:
-            cursor.execute(SQL_PRODUCTION, (project_id,))
-            row = cursor.fetchone()
+        with self.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_PRODUCTION, (project_id,))
+            row = row_dict(sql_result)
             if not row:
                 raise KeyError(project_id)
             return dict(row)
 
     def list(self, project_id: str) -> list[dict]:
         # 保留已删除身份，供旧工作区诊断和历史结果读取。
-        with self.db.transaction() as cursor:
-            cursor.execute(SQL_BRANCHES, (project_id,))
-            return [dict(row) for row in cursor.fetchall()]
+        with self.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_BRANCHES, (project_id,))
+            return [dict(row) for row in sql_result.mappings()]
 
     def execution_binding(self, project_id: str, branch_id: str) -> dict:
         # 只供内部任务封存使用，公开 BranchView 永远不包含这些配置。

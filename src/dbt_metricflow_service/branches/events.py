@@ -7,6 +7,8 @@ import json
 
 from fastapi import APIRouter, HTTPException, Request, Response
 
+from dbt_metricflow_service.storage.rows import row_dict
+
 from ..platform.bindings import HEADS_PREFIX, validate_git_ref
 from .sync import SQL_SIGNAL
 
@@ -70,24 +72,26 @@ def create_branch_event_router(runtime) -> APIRouter:
 
         def signal():
             # 仓库身份从服务配置核对；同事务更新已登记分支后才返回 202。
-            with runtime.db.transaction() as cursor:
-                cursor.execute(SQL_REPOSITORY, (remote,))
-                projects = cursor.fetchall()
+            with runtime.db.transaction() as connection:
+                sql_result = connection.exec_driver_sql(SQL_REPOSITORY, (remote,))
+                projects = [dict(row) for row in sql_result.mappings()]
                 if not projects:
                     raise HTTPException(403, detail={CODE: "untrusted_repository"})
                 # 删除事实先持久化；相同 delivery 的重放不能关闭后来新登记的身份。
                 if delivery:
                     digest = hashlib.sha256(raw).hexdigest()
-                    cursor.execute(SQL_EVENT, (delivery, digest))
-                    if not cursor.fetchone():
-                        cursor.execute(SQL_EVENT_DIGEST, (delivery,))
-                        if cursor.fetchone()["payload_digest"] != digest:
+                    sql_result = connection.exec_driver_sql(SQL_EVENT, (delivery, digest))
+                    if not row_dict(sql_result):
+                        sql_result = connection.exec_driver_sql(SQL_EVENT_DIGEST, (delivery,))
+                        if row_dict(sql_result)["payload_digest"] != digest:
                             raise HTTPException(409, detail={CODE: "event_identity_conflict"})
                         return 0
                 changed = 0
                 for project in projects:
-                    cursor.execute(SQL_DELETE_EVENT if kind == DELETE else SQL_SIGNAL, (project["project_id"], ref))
-                    changed += cursor.rowcount
+                    sql_result = connection.exec_driver_sql(
+                        SQL_DELETE_EVENT if kind == DELETE else SQL_SIGNAL, (project["project_id"], ref)
+                    )
+                    changed += sql_result.rowcount
                 return changed
 
         count = await asyncio.to_thread(signal)

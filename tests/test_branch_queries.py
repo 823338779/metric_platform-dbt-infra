@@ -87,8 +87,8 @@ def test_deleted_branch_keeps_accepted_results_readable(store, tmp_path):
     service = selected(runtime, a)
     body = request(ra, uuid4().hex)
     accepted = service.submit_query(project, body, IDENTITY)
-    with store.db.transaction() as cursor:
-        cursor.execute(SQL_DELETE, (a,))
+    with store.db.transaction() as connection:
+        connection.exec_driver_sql(SQL_DELETE, (a,))
     assert service.query_status(project, accepted["queryId"])["releaseId"] == ra["release_id"]
     assert service.submit_query(project, body, IDENTITY) == accepted
     with pytest.raises(ReleaseGone):

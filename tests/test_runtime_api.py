@@ -85,9 +85,11 @@ async def test_volatile_input_is_not_stored_and_queued_owner_loss_finishes(runti
     job_id = str(accepted.id)
     row = runtimes[1].jobs.get(job_id)
     assert "private-request-marker" not in str(row)
-    with runtimes[1].db.transaction() as cursor:
-        cursor.execute("UPDATE runtime_job SET input_lease_expires_at=clock_timestamp()-interval '1 second' "
-                       "WHERE job_id=%s", (job_id,))
+    with runtimes[1].db.transaction() as connection:
+        connection.exec_driver_sql(
+            "UPDATE runtime_job SET input_lease_expires_at=clock_timestamp()-interval '1 second' WHERE job_id=%s",
+            (job_id,),
+        )
     runtimes[1].jobs.recover()
     failed = runtimes[1].cli_record(job_id)
     assert failed.status.value == "failed"

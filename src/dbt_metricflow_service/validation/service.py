@@ -3,6 +3,8 @@
 import hashlib
 import json
 
+from dbt_metricflow_service.storage.rows import row_dict
+
 from ..storage.artifacts import VALIDATION_INPUT_FILE
 from ..storage.branches import SQL_BRANCH_LOCK, BranchStore
 from ..storage.jobs import (
@@ -51,24 +53,24 @@ class DraftValidationService:
             context = {"branchId": branch_id, "workspaceId": request.workspace_id,
                        "draftRevision": request.draft_revision}
         digest = changes_digest_v2(request.changes) if version2 else changes_digest(request.changes)
-        with self.runtime.db.transaction() as cursor:
-            cursor.execute(SQL_SELECT_PG_ADVISORY_XACT_LOCK_HASHTEXTEXTENDED,
+        with self.runtime.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_SELECT_PG_ADVISORY_XACT_LOCK_HASHTEXTEXTENDED,
                            (scope + ":" + request.idempotency_key,))
-            cursor.execute(SQL_SELECT_FROM_RUNTIME_JOB_2, (scope, request.idempotency_key))
-            prior = cursor.fetchone()
+            sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB_2, (scope, request.idempotency_key))
+            prior = row_dict(sql_result)
             if prior:
                 saved = prior["request_json"]
                 if (saved["baseCommitSha"] != request.base_commit_sha or saved["changesDigest"] != digest
                         or any(saved.get(key) != value for key, value in context.items())):
                     raise StoreConflict("validation key already binds another draft")
                 return ValidationReceipt(validation_id=prior["job_id"], state=prior["status"])
-            cursor.execute(SQL_SELECT_FROM_RUNTIME_PROJECT, (project_id,))
-            project = cursor.fetchone()
+            sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_PROJECT, (project_id,))
+            project = row_dict(sql_result)
             if not project:
                 raise KeyError(project_id)
             if version2:
-                cursor.execute(SQL_BRANCH_LOCK, (project_id, branch_id, branch_id))
-                project = cursor.fetchone()
+                sql_result = connection.exec_driver_sql(SQL_BRANCH_LOCK, (project_id, branch_id, branch_id))
+                project = row_dict(sql_result)
                 if not project or project["status"] != "ACTIVE":
                     raise StoreConflict("branch is not active")
             if project["config_version"] != self.runtime.settings.config_version:
@@ -80,7 +82,7 @@ class DraftValidationService:
                 raise ValueError("project binding is incomplete")
             payload = request.model_dump_json(by_alias=True).encode()
             input_set = self.runtime.artifacts.capture_validation_input(
-                project_id, payload, cursor, version=2 if version2 else 1)
+                project_id, payload, connection, version=2 if version2 else 1)
             snapshot = {"baseCommitSha": request.base_commit_sha, "changesDigest": digest,
                         "projectSubdir": binding["projectSubdir"], "bindingDigest": binding_digest(binding), **context}
             if version2:
@@ -90,7 +92,7 @@ class DraftValidationService:
                 idempotency_key=request.idempotency_key, input_set_id=input_set,
                 config_version=project["config_version"], toolchain_version=self.runtime.toolchain,
                 profile_binding_id=binding["profileBindingId"], retry_policy="READ_ONLY",
-                timeout_seconds=self.runtime.settings.command_timeout_seconds, branch_id=branch_id, _cursor=cursor,
+                timeout_seconds=self.runtime.settings.command_timeout_seconds, branch_id=branch_id, _cursor=connection,
             )
             return ValidationReceipt(validation_id=job["job_id"], state=job["status"])
 

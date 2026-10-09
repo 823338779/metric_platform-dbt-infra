@@ -24,8 +24,8 @@ def prepared(store, tmp_path, project=None):
                "toolchainVersion": toolchain}
     release = store.create_candidate(project, request, uuid4().hex)
     job = jobs.reserve(BUILD, project, {**request, "releaseId": release["release_id"]}, toolchain_version=toolchain)
-    with store.db.transaction() as cursor:
-        cursor.execute(SQL_ATTACH_RUN, (job["job_id"], release["release_id"]))
+    with store.db.transaction() as connection:
+        connection.exec_driver_sql(SQL_ATTACH_RUN, (job["job_id"], release["release_id"]))
     job = jobs.claim(str(uuid4()), toolchain_version=toolchain)
     directory = tmp_path / uuid4().hex
     target = directory / "target"
@@ -63,8 +63,8 @@ def test_seal_failure_preserves_old_publication(store, tmp_path):
     jobs.finish(job["job_id"], job["lease_token"], output_set_id=output)
     jobs, candidate, _, next_output, artifacts = prepared(store, tmp_path, job["project_id"])
 
-    def broken_seal(set_id, cursor):
-        artifacts.seal(set_id, cursor)
+    def broken_seal(set_id, connection):
+        artifacts.seal(set_id, connection)
         raise ValueError("injected after seal")
 
     with pytest.raises(ValueError, match="injected"):
@@ -90,8 +90,8 @@ def test_failed_job_marks_candidate_failed_without_changing_pointer(store, tmp_p
 
 def test_expired_worker_cannot_publish(store, tmp_path):
     jobs, job, release, output, _ = prepared(store, tmp_path)
-    with store.db.transaction() as cursor:
-        cursor.execute("UPDATE runtime_attempt SET lease_expires_at=clock_timestamp()-interval '1 second' "
+    with store.db.transaction() as connection:
+        connection.exec_driver_sql("UPDATE runtime_attempt SET lease_expires_at=clock_timestamp()-interval '1 second' "
                        "WHERE attempt_id=%s", (job["attempt_id"],))
     assert jobs.finish(job["job_id"], job["lease_token"], output_set_id=output) is False
     assert store.get_release(job["project_id"], release["release_id"])["state"] != "PUBLISHED"
@@ -99,8 +99,10 @@ def test_expired_worker_cannot_publish(store, tmp_path):
 
 def test_wrong_source_proof_cannot_publish(store, tmp_path):
     jobs, job, release, output, artifacts = prepared(store, tmp_path)
-    with store.db.transaction() as cursor:
-        cursor.execute("UPDATE runtime_artifact_set SET source_commit_sha=%s WHERE set_id=%s", ("c" * 40, output))
+    with store.db.transaction() as connection:
+        connection.exec_driver_sql(
+            "UPDATE runtime_artifact_set SET source_commit_sha=%s WHERE set_id=%s", ("c" * 40, output)
+        )
     with pytest.raises(ValueError, match="输入"):
         jobs.finish(job["job_id"], job["lease_token"], output_set_id=output)
     assert artifacts.metadata(output)["state"] == "STAGING"
@@ -111,8 +113,8 @@ def test_failure_after_pointer_update_rolls_back_entire_publication(store, tmp_p
     jobs, job, release, output, artifacts = prepared(store, tmp_path)
     original = PublicationStore.publish_in_transaction
 
-    def fail_after_pointer(self, cursor, **kwargs):
-        original(self, cursor, **kwargs)
+    def fail_after_pointer(self, connection, **kwargs):
+        original(self, connection, **kwargs)
         raise ValueError("injected after pointer")
 
     monkeypatch.setattr(PublicationStore, "publish_in_transaction", fail_after_pointer)

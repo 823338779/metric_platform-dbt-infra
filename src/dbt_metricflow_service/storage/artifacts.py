@@ -11,9 +11,11 @@ from uuid import uuid4
 import psycopg2
 import yaml
 from psycopg2.extras import Json
+from sqlalchemy.exc import IntegrityError
 
 from dbt_metricflow_service.execution.artifacts import _is_link
 from dbt_metricflow_service.storage.postgres import Database
+from dbt_metricflow_service.storage.rows import row_dict
 
 # 快照边界限定数据库占用，以及还原时单文件解压的最大内存。
 MAX_FILE_BYTES = 64 * 1024 * 1024
@@ -231,8 +233,8 @@ class ArtifactStore:
             files.append({"relative_path": relative, "path": path, "raw_size": size,
                           "raw_sha256": None, "executable": bool(path.stat().st_mode & stat.S_IXUSR)})
         set_id = str(uuid4())
-        with self.database.transaction() as cursor:
-            cursor.execute(SQL_INSERT_SET, (
+        with self.database.transaction() as connection:
+            connection.exec_driver_sql(SQL_INSERT_SET, (
                 set_id, project_id, producer_attempt_id, kind, STAGING, metadata.get("source_set_id"),
                 metadata.get("source_commit_sha"), metadata.get("project_digest"),
                 metadata.get("config_version", "1"), metadata.get("toolchain_version", "1"),
@@ -246,17 +248,17 @@ class ArtifactStore:
                 if len(content) != item["raw_size"]:
                     raise ValueError("artifact file changed during capture")
                 item["raw_sha256"] = hashlib.sha256(content).hexdigest()
-                cursor.execute(SQL_INSERT_FILE, (
+                connection.exec_driver_sql(SQL_INSERT_FILE, (
                     set_id, item["relative_path"], psycopg2.Binary(content), RAW, item["raw_sha256"],
                     len(content), len(content), mimetypes.guess_type(item["relative_path"])[0] or DEFAULT_MEDIA_TYPE,
                     item["executable"],
                 ))
-            cursor.execute(SQL_DIGEST, (_digest(files), set_id))
+            connection.exec_driver_sql(SQL_DIGEST, (_digest(files), set_id))
             if producer_attempt_id is None:
-                self.seal(set_id, cursor)
+                self.seal(set_id, connection)
         return set_id
 
-    def capture_validation_input(self, project_id: str, payload: bytes, cursor, *, version: int = 1) -> str:
+    def capture_validation_input(self, project_id: str, payload: bytes, connection, *, version: int = 1) -> str:
         """与 job 受理共用事务；专用输入不放宽普通项目快照的文件白名单。"""
         if len(payload) > min(MAX_VALIDATION_INPUT_BYTES, self.max_file_bytes, self.max_set_bytes):
             raise ValueError("validation input exceeds byte limit")
@@ -269,36 +271,36 @@ class ArtifactStore:
         set_id = str(uuid4())
         item = {"relative_path": VALIDATION_INPUT_FILE, "raw_sha256": hashlib.sha256(payload).hexdigest(),
                 "raw_size": len(payload)}
-        cursor.execute(SQL_INSERT_SET, (
+        connection.exec_driver_sql(SQL_INSERT_SET, (
             set_id, project_id, None, VALIDATION_INPUT, STAGING, None, None, None,
             "1", "1", "1", _digest([item]), 1, len(payload), Json({}), Json({}), Json({}),
         ))
-        cursor.execute(SQL_INSERT_FILE, (
+        connection.exec_driver_sql(SQL_INSERT_FILE, (
             set_id, VALIDATION_INPUT_FILE, psycopg2.Binary(payload), RAW, item["raw_sha256"],
             len(payload), len(payload), DEFAULT_MEDIA_TYPE, False,
         ))
-        self.seal(set_id, cursor)
+        self.seal(set_id, connection)
         return set_id
 
     def metadata(self, set_id: str) -> dict:
-        with self.database.transaction() as cursor:
-            cursor.execute(SQL_SET, (set_id,))
-            row = cursor.fetchone()
+        with self.database.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_SET, (set_id,))
+            row = row_dict(sql_result)
             if row is None:
                 raise ValueError("artifact set does not exist")
             return {**row["metadata"], **dict(row)}
 
-    def seal(self, set_id: str, cursor) -> None:
+    def seal(self, set_id: str, connection) -> None:
         # 调用方负责租约校验；同一事务锁定集合并核对完整内容后才能发布。
-        cursor.execute(SQL_SET + FOR_UPDATE, (set_id,))
-        row = cursor.fetchone()
+        sql_result = connection.exec_driver_sql(SQL_SET + FOR_UPDATE, (set_id,))
+        row = row_dict(sql_result)
         if row is None or row["state"] not in {STAGING, SEALED}:
             raise ValueError("artifact set cannot be sealed")
-        cursor.execute(SQL_FILES, (set_id,))
-        files = cursor.fetchall()
+        sql_result = connection.exec_driver_sql(SQL_FILES, (set_id,))
+        files = [dict(row) for row in sql_result.mappings()]
         self._validate(row, files)
         if row["state"] == STAGING:
-            cursor.execute(SQL_SEAL, (SEALED, set_id))
+            sql_result = connection.exec_driver_sql(SQL_SEAL, (SEALED, set_id))
 
     def _validate(self, metadata: dict, files: list[dict]) -> None:
         _check_paths([row["relative_path"] for row in files])
@@ -313,13 +315,13 @@ class ArtifactStore:
     def read_file(self, set_id: str, relative_path: str) -> bytes:
         # 仅读取指定文件即可进行 API 前置校验，不必还原整个项目目录。
         relative_path = _relative(relative_path).as_posix()
-        with self.database.transaction() as cursor:
-            cursor.execute(SQL_SET + FOR_SHARE, (set_id,))
-            metadata = cursor.fetchone()
+        with self.database.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_SET + FOR_SHARE, (set_id,))
+            metadata = row_dict(sql_result)
             if metadata is None or metadata["state"] != SEALED:
                 raise ValueError("only SEALED artifact files can be read")
-            cursor.execute(SQL_FILE, (set_id, relative_path))
-            row = cursor.fetchone()
+            sql_result = connection.exec_driver_sql(SQL_FILE, (set_id, relative_path))
+            row = row_dict(sql_result)
             if row is None:
                 raise ValueError("artifact file does not exist")
             return _decode(row, self.max_file_bytes)
@@ -331,13 +333,13 @@ class ArtifactStore:
             raise ValueError("artifact destination cannot contain links")
         if destination.exists() and (not destination.is_dir() or any(destination.iterdir())):
             raise ValueError("artifact destination must be an empty directory")
-        with self.database.transaction() as cursor:
-            cursor.execute(SQL_SET + FOR_SHARE, (set_id,))
-            metadata = cursor.fetchone()
+        with self.database.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_SET + FOR_SHARE, (set_id,))
+            metadata = row_dict(sql_result)
             if metadata is None or metadata["state"] != SEALED:
                 raise ValueError("only SEALED artifact sets can be materialized")
-            cursor.execute(SQL_FILES, (set_id,))
-            files = cursor.fetchall()
+            sql_result = connection.exec_driver_sql(SQL_FILES, (set_id,))
+            files = [dict(row) for row in sql_result.mappings()]
             self._validate(metadata, files)
             destination.mkdir(parents=True, exist_ok=True)
             for row in files:
@@ -351,16 +353,18 @@ class ArtifactStore:
     def delete_unreferenced(self, set_id: str) -> bool:
         # 引用外键与集合行锁共同阻止 GC 删除正在发布或仍被任务引用的版本。
         try:
-            with self.database.transaction() as cursor:
-                cursor.execute(SQL_GC_LOCK, (set_id,))
-                if cursor.fetchone() is None:
+            with self.database.transaction() as connection:
+                sql_result = connection.exec_driver_sql(SQL_GC_LOCK, (set_id,))
+                if row_dict(sql_result) is None:
                     return False
-                cursor.execute(SQL_GC_ELIGIBLE, (set_id,) * 8)
-                if not cursor.fetchone()["eligible"]:
+                sql_result = connection.exec_driver_sql(SQL_GC_ELIGIBLE, (set_id,) * 8)
+                if not row_dict(sql_result)["eligible"]:
                     return False
-                cursor.execute(SQL_DELETING, (set_id,))
-                cursor.execute(SQL_DELETE_FILES, (set_id,))
-                cursor.execute(SQL_DELETE_SET, (set_id,))
+                sql_result = connection.exec_driver_sql(SQL_DELETING, (set_id,))
+                sql_result = connection.exec_driver_sql(SQL_DELETE_FILES, (set_id,))
+                sql_result = connection.exec_driver_sql(SQL_DELETE_SET, (set_id,))
                 return True
-        except psycopg2.errors.ForeignKeyViolation:
-            return False
+        except IntegrityError as error:
+            if error.orig.pgcode == "23503":
+                return False
+            raise

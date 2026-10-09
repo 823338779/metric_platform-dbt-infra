@@ -24,6 +24,7 @@ from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.jobs import JobStore
 from dbt_metricflow_service.storage.postgres import Database
+from dbt_metricflow_service.storage.rows import row_dict
 
 # 管理命令及历史格式常量集中定义，所有请求正文均经公开模型验证。
 MIGRATE = "migrate"
@@ -112,8 +113,8 @@ def import_project(db: Database, settings: Settings, project_id: str, directory:
     """导入当前源码及已有解析产物；最终事务一次替换同源的两个项目指针。"""
     project_id = _project_id(project_id)
     artifacts = _artifacts(db, settings)
-    with db.transaction() as cursor:
-        cursor.execute(SQL_INSERT_PROJECT, (project_id, settings.config_version))
+    with db.transaction() as connection:
+        connection.exec_driver_sql(SQL_INSERT_PROJECT, (project_id, settings.config_version))
     metadata = {"config_version": settings.config_version,
                 "toolchain_version": settings.toolchain_version or current_toolchain()}
     source_id = artifacts.capture(project_id, directory, metadata=metadata)
@@ -122,8 +123,8 @@ def import_project(db: Database, settings: Settings, project_id: str, directory:
         if (directory / TARGET / MANIFEST).is_file():
             output_id = artifacts.capture(project_id, directory, kind=EXECUTION,
                                           metadata={**metadata, "source_set_id": source_id})
-        with db.transaction() as cursor:
-            cursor.execute(SQL_UPDATE_PROJECT, (source_id, output_id, settings.config_version, project_id))
+        with db.transaction() as connection:
+            connection.exec_driver_sql(SQL_UPDATE_PROJECT, (source_id, output_id, settings.config_version, project_id))
     except BaseException:
         if output_id:
             artifacts.delete_unreferenced(output_id)
@@ -194,8 +195,8 @@ def _legacy_row(db: Database, settings: Settings, row: dict, kind: str) -> str:
         config_version = request["configVersion"]
         schema = SCHEMA_PREFIX + UUID(identifier).hex
         profile = request["profileBindingId"]
-        with db.transaction() as cursor:
-            cursor.execute(SQL_INSERT_PROJECT, (project_id, config_version))
+        with db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_INSERT_PROJECT, (project_id, config_version))
         if state == READY:
             location = _json(directory / PROJECT_PATH_FILE, settings.max_artifact_file_bytes)
             project = Path(location["path"])
@@ -246,10 +247,10 @@ def _legacy_row(db: Database, settings: Settings, row: dict, kind: str) -> str:
     fingerprint = hashlib.sha256(json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     attached = False
     try:
-        with db.transaction() as cursor:
-            cursor.execute(SQL_LOCK_IMPORT, (identifier,))
-            cursor.execute(SQL_EXISTING, (identifier,))
-            existing = cursor.fetchone()
+        with db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_LOCK_IMPORT, (identifier,))
+            sql_result = connection.exec_driver_sql(SQL_EXISTING, (identifier,))
+            existing = row_dict(sql_result)
             if existing:
                 if (existing["error_detail"] or {}).get(IMPORT_DIGEST) != fingerprint:
                     raise ValueError("legacy import content is different from the existing record")
@@ -257,7 +258,7 @@ def _legacy_row(db: Database, settings: Settings, row: dict, kind: str) -> str:
             succeeded = state in {READY, CLEANED}
             status = SUCCEEDED if succeeded else FAILED
             lifecycle = (CLEANED if state == CLEANED else ACTIVE) if kind == BUILD else None
-            cursor.execute(SQL_INSERT_JOB, (
+            sql_result = connection.exec_driver_sql(SQL_INSERT_JOB, (
                 identifier, kind, project_id, parent["job_id"] if parent else None, kind,
                 row["idempotency_key"], row["fingerprint"], Json(request),
                 parent["output_set_id"] if parent else source_id, output_id, config_version,
@@ -265,14 +266,16 @@ def _legacy_row(db: Database, settings: Settings, row: dict, kind: str) -> str:
                 row.get("error_code"), Json({IMPORT_DIGEST: fingerprint}),
             ))
             attempt_id = str(uuid4())
-            cursor.execute(SQL_INSERT_ATTEMPT, (attempt_id, identifier, str(uuid4()), str(uuid4()), status))
+            sql_result = connection.exec_driver_sql(
+                SQL_INSERT_ATTEMPT, (attempt_id, identifier, str(uuid4()), str(uuid4()), status)
+            )
             if state == FAILED:
                 # SQLite 没有可靠的外部停止证据，迁移失败记录默认保留清理保护。
-                cursor.execute(SQL_UNCONFIRMED_IMPORT, (attempt_id,))
-            cursor.execute(SQL_ATTACH_ATTEMPT, (attempt_id, identifier))
+                sql_result = connection.exec_driver_sql(SQL_UNCONFIRMED_IMPORT, (attempt_id,))
+            sql_result = connection.exec_driver_sql(SQL_ATTACH_ATTEMPT, (attempt_id, identifier))
             if state == READY:
                 payload = validation if kind == BUILD else result
-                cursor.execute(SQL_INSERT_RESULT, (identifier, attempt_id, Json(payload)))
+                sql_result = connection.exec_driver_sql(SQL_INSERT_RESULT, (identifier, attempt_id, Json(payload)))
         attached = True
         return identifier
     finally:
@@ -299,9 +302,9 @@ def reconcile_attempt(db: Database, attempt_id: str, *, confirm_external_stopped
     """运维核实外部执行结束后释放保护；不提供自动判定或 HTTP 入口。"""
     if not confirm_external_stopped:
         raise ValueError("explicit external execution stop confirmation is required")
-    with db.transaction() as cursor:
-        cursor.execute(SQL_ATTEMPT, (str(UUID(attempt_id)),))
-        attempt = cursor.fetchone()
+    with db.transaction() as connection:
+        sql_result = connection.exec_driver_sql(SQL_ATTEMPT, (str(UUID(attempt_id)),))
+        attempt = row_dict(sql_result)
     if not attempt or attempt["state"] != "EXPIRED_UNCONFIRMED":
         raise ValueError("attempt is not awaiting external stop confirmation")
     return JobStore(db).confirm_stopped(attempt_id, attempt["lease_token"])
@@ -369,9 +372,9 @@ def main(argv: list[str] | None = None) -> None:
             else:
                 if args.older_than_hours < 0 or not 1 <= args.limit <= 1000:
                     raise ValueError("GC age and limit are invalid")
-                with db.transaction() as cursor:
-                    cursor.execute(SQL_GC, (args.older_than_hours, args.limit))
-                    identifiers = [row["set_id"] for row in cursor.fetchall()]
+                with db.transaction() as connection:
+                    sql_result = connection.exec_driver_sql(SQL_GC, (args.older_than_hours, args.limit))
+                    identifiers = [row["set_id"] for row in sql_result.mappings()]
                 store = _artifacts(db, settings)
                 result = {"deleted": sum(store.delete_unreferenced(identifier) for identifier in identifiers)}
         print(json.dumps(result, ensure_ascii=False))

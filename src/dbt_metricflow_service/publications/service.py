@@ -4,6 +4,8 @@ import hashlib
 import json
 from uuid import uuid4
 
+from dbt_metricflow_service.storage.rows import row_dict
+
 from ..platform.bindings import ProjectBinding, observe_revision
 from ..platform.models import PlatformQueryRequest, QueryMode
 from ..platform.namespace import validate_schema_name
@@ -105,9 +107,11 @@ class PublicationService:
         # 既有幂等请求返回原版本，不因远端 main 已推进而创建另一候选。
         branches = BranchStore(self.runtime.db)
         branch = branches.get(project_id, branch_id) if branch_id else self._branch(project_id)
-        with self.runtime.db.transaction() as cursor:
-            cursor.execute(SQL_BRANCH_BY_KEY, (project_id, branch["branch_id"], idempotency_key))
-            existing = cursor.fetchone()
+        with self.runtime.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(
+                SQL_BRANCH_BY_KEY, (project_id, branch["branch_id"], idempotency_key)
+            )
+            existing = row_dict(sql_result)
             if existing:
                 return existing
         project = self.runtime.jobs.project(project_id)
@@ -124,27 +128,31 @@ class PublicationService:
                    "businessTimezone": binding.get("businessTimezone", DEFAULT_TIMEZONE),
                    "projectSubdir": configured.project_subdir, "gitRef": branch["git_ref"]}
         # 候选和可领取任务同事务出现，杜绝 worker 先完成再关联发布的竞态。
-        with self.runtime.db.transaction() as cursor:
+        with self.runtime.db.transaction() as connection:
             # Git I/O 前的序号必须仍有效；扫描和显式入口共用同一个受理 CAS。
-            cursor.execute(SQL_PARENT_LOCK, (project_id,))
-            cursor.execute(SQL_BRANCH_LOCK, (project_id, branch["branch_id"], branch["branch_id"]))
-            current = cursor.fetchone()
+            sql_result = connection.exec_driver_sql(SQL_PARENT_LOCK, (project_id,))
+            sql_result = connection.exec_driver_sql(
+                SQL_BRANCH_LOCK, (project_id, branch["branch_id"], branch["branch_id"])
+            )
+            current = row_dict(sql_result)
             expected = branch["publication_sequence"] if _expected_sequence is None else _expected_sequence
             if (current["publication_sequence"] != expected
                     or current["config_version"] != branch["config_version"]
                     or current["binding_config"] != branch["binding_config"]):
                 # 并发同键可恢复原受理；其他旧观测必须重试并重新读取 Git。
-                cursor.execute(SQL_BRANCH_BY_KEY, (project_id, branch["branch_id"], idempotency_key))
-                prior = cursor.fetchone()
+                sql_result = connection.exec_driver_sql(
+                    SQL_BRANCH_BY_KEY, (project_id, branch["branch_id"], idempotency_key)
+                )
+                prior = row_dict(sql_result)
                 if prior:
                     return prior
                 raise StoreConflict("分支在源码观察期间已变化，请重新受理")
             release = self.store.create_candidate(project_id, request, idempotency_key,
-                                                  branch_id=branch["branch_id"], _cursor=cursor)
+                                                  branch_id=branch["branch_id"], _cursor=connection)
             # 扫描在外部 Git I/O 期间失去租约时，回滚候选及序号，不能迟到受理。
             if _scan_token is not None:
-                cursor.execute(SQL_SCAN_OWNED, (project_id, branch["branch_id"], _scan_token))
-                if not cursor.fetchone():
+                sql_result = connection.exec_driver_sql(SQL_SCAN_OWNED, (project_id, branch["branch_id"], _scan_token))
+                if not row_dict(sql_result):
                     raise StoreConflict("分支扫描租约已失效")
             if release["run_id"]:
                 return release
@@ -159,15 +167,15 @@ class PublicationService:
                 config_version=branch["config_version"], toolchain_version=self.runtime.toolchain,
                 schema_name=schema, profile_binding_id=configured.profile_binding_id,
                 timeout_seconds=self.runtime.settings.command_timeout_seconds,
-                expected_revision=project["revision"], _cursor=cursor,
+                expected_revision=project["revision"], _cursor=connection,
             )
-            cursor.execute(SQL_ATTACH_RUN, (job["job_id"], release["release_id"]))
+            sql_result = connection.exec_driver_sql(SQL_ATTACH_RUN, (job["job_id"], release["release_id"]))
             return {**release, "run_id": job["job_id"]}
 
     def projects(self) -> list[dict]:
-        with self.runtime.db.transaction() as cursor:
-            cursor.execute(SQL_PROJECTS)
-            projects = cursor.fetchall()
+        with self.runtime.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_PROJECTS)
+            projects = [dict(row) for row in sql_result.mappings()]
         return [self.publication(row["project_id"]) for row in projects]
 
     def _descriptor(self, row):
@@ -196,9 +204,9 @@ class PublicationService:
 
     def releases(self, project_id: str) -> list[dict]:
         branch = self._branch(project_id)
-        with self.runtime.db.transaction() as cursor:
-            cursor.execute(SQL_RELEASES, (project_id, branch["branch_id"]))
-            rows = cursor.fetchall()
+        with self.runtime.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_RELEASES, (project_id, branch["branch_id"]))
+            rows = [dict(row) for row in sql_result.mappings()]
         return [self._descriptor(row) for row in rows]
 
     def release(self, project_id: str, release_id: str) -> dict:
@@ -334,9 +342,9 @@ class PublicationService:
         if (not row or row["kind"] != "QUERY_OPTIONS" or row["project_id"] != project_id
                 or row["branch_id"] != self._branch(project_id)["branch_id"]):
             raise KeyError(options_job_id)
-        with self.runtime.db.transaction() as cursor:
-            cursor.execute(SQL_QUERY_RELEASE, (project_id, row["parent_run_id"]))
-            release = cursor.fetchone()
+        with self.runtime.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_QUERY_RELEASE, (project_id, row["parent_run_id"]))
+            release = row_dict(sql_result)
         if not release:
             raise KeyError(options_job_id)
         _, catalog = self._catalog(project_id, release["release_id"])
@@ -434,15 +442,17 @@ class PublicationService:
         if engine.start_time and engine.end_time and engine.start_time > engine.end_time:
             raise invalid_selection("invalid_time_range", "endTime", "结束时间不能早于开始时间。")
         # 与发布共用项目行锁；parent 先锁保持现有 JobStore 与清理的锁顺序。
-        with self.runtime.db.transaction() as cursor:
-            cursor.execute(SQL_SELECT_FROM_RUNTIME_JOB_4, (release["run_id"],))
-            parent = cursor.fetchone()
-            cursor.execute(SQL_PARENT_LOCK, (project_id,))
-            cursor.execute(SQL_BRANCH_LOCK, (project_id, branch["branch_id"], branch["branch_id"]))
-            project = cursor.fetchone()
+        with self.runtime.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB_4, (release["run_id"],))
+            parent = row_dict(sql_result)
+            sql_result = connection.exec_driver_sql(SQL_PARENT_LOCK, (project_id,))
+            sql_result = connection.exec_driver_sql(
+                SQL_BRANCH_LOCK, (project_id, branch["branch_id"], branch["branch_id"])
+            )
+            project = row_dict(sql_result)
             # 等锁期间另一请求可能已受理同一幂等键；先恢复它再判断版本。
-            cursor.execute(SQL_SELECT_FROM_RUNTIME_JOB_2, (scope, request.idempotency_key))
-            prior = cursor.fetchone()
+            sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB_2, (scope, request.idempotency_key))
+            prior = row_dict(sql_result)
             if prior:
                 return recover(prior)
             if project["status"] != ACTIVE_BRANCH or project["active_release_id"] != release["release_id"]:
@@ -454,7 +464,7 @@ class PublicationService:
                 parent_run_id=parent["job_id"], input_set_id=parent["output_set_id"],
                 config_version=parent["config_version"], toolchain_version=parent["toolchain_version"],
                 profile_binding_id=parent["profile_binding_id"], schema_name=parent["schema_name"],
-                timeout_seconds=self.runtime.settings.command_timeout_seconds, _cursor=cursor,
+                timeout_seconds=self.runtime.settings.command_timeout_seconds, _cursor=connection,
             )
         return query_receipt(row, project_id, request.release_id)
 
@@ -464,18 +474,18 @@ class PublicationService:
 
     def _query_context(self, project_id: str, query_id: str) -> tuple[dict, dict]:
         """只读任务与发布身份，状态轮询绝不加载 runtime_job_result.payload_json。"""
-        with self.runtime.db.transaction() as cursor:
-            cursor.execute(SQL_QUERY_ALIAS, (project_id, query_id))
-            alias = cursor.fetchone()
+        with self.runtime.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_QUERY_ALIAS, (project_id, query_id))
+            alias = row_dict(sql_result)
         target_id = alias["target_id"] if alias else query_id
         row = self.runtime.jobs.get(target_id)
         if (not row or row["project_id"] != project_id or row["kind"] != QUERY_KIND
                 or row["branch_id"] != self._branch(project_id)["branch_id"]):
             raise KeyError(query_id)
         # 已受理查询只按其固定 run 读取，不重新检查当前活动指针。
-        with self.runtime.db.transaction() as cursor:
-            cursor.execute(SQL_QUERY_RELEASE, (project_id, row["parent_run_id"]))
-            release = cursor.fetchone()
+        with self.runtime.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_QUERY_RELEASE, (project_id, row["parent_run_id"]))
+            release = row_dict(sql_result)
         if not release or not alias and not row["request_json"].get("publicationRequest"):
             raise KeyError(query_id)
         public = row["request_json"].get("publicationRequest") or {}

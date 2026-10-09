@@ -61,8 +61,10 @@ def test_historical_snapshot_without_timezone_retries_without_rewriting_engine(s
     accepted = service.submit_query(job["project_id"], request, "platform")
     saved = service.runtime.jobs.get(accepted["queryId"])["request_json"]
     saved.pop("businessTimezone")
-    with store.db.transaction() as cursor:
-        cursor.execute("UPDATE runtime_job SET request_json=%s WHERE job_id=%s", (Json(saved), accepted["queryId"]))
+    with store.db.transaction() as connection:
+        connection.exec_driver_sql(
+            "UPDATE runtime_job SET request_json=%s WHERE job_id=%s", (Json(saved), accepted["queryId"])
+        )
     equivalent = PublishedQueryRequest.model_validate({**request.model_dump(by_alias=True),
                                                        "startTime": "2026-09-30T16:00:00Z"})
     assert service.submit_query(job["project_id"], equivalent, "platform") == accepted

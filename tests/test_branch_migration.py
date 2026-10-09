@@ -4,11 +4,10 @@ import hashlib
 from contextlib import contextmanager
 from uuid import uuid4
 
-from psycopg2 import sql
-
 from dbt_metricflow_service.storage.branches import BranchStore
 from dbt_metricflow_service.storage.jobs import JobStore
 from dbt_metricflow_service.storage.postgres import MIGRATIONS, Database
+from dbt_metricflow_service.storage.rows import row_dict
 from tests.test_publication_storage import store as store
 from tests.test_publication_transaction import prepared
 
@@ -47,9 +46,12 @@ class ScopedDatabase:
     @contextmanager
     def transaction(self):
         # 所有准备、迁移与断言都在同一个独立命名空间内。
-        with self.db.transaction() as cursor:
-            cursor.execute(sql.SQL(SEARCH_PATH).format(sql.Identifier(self.schema)))
-            yield cursor
+        with self.db.transaction() as connection:
+            connection.exec_driver_sql(
+                SEARCH_PATH.format(connection.dialect.identifier_preparer.quote(self.schema)),
+                execution_options={"no_parameters": True},
+            )
+            yield connection
 
     migrate = Database.migrate
 
@@ -60,48 +62,56 @@ def test_upgrade_preserves_production_identities(store):
     scoped = ScopedDatabase(store.db, schema)
     run, query, release, artifact = (str(uuid4()) for _ in range(4))
     digest = hashlib.sha256(CONTENT).hexdigest()
-    with store.db.transaction() as cursor:
-        cursor.execute(sql.SQL(CREATE_SCHEMA).format(sql.Identifier(schema)))
+    with store.db.transaction() as connection:
+        sql_result = connection.exec_driver_sql(
+            CREATE_SCHEMA.format(connection.dialect.identifier_preparer.quote(schema)),
+            execution_options={"no_parameters": True},
+        )
     try:
-        with scoped.transaction() as cursor:
+        with scoped.transaction() as connection:
             for migration in MIGRATIONS[:3]:
-                cursor.execute(migration.read_text(encoding=UTF8))
-            cursor.execute(SQL_PROJECT, (PROJECT,))
-            cursor.execute(SQL_JOB, (run, PROJECT, BUILD, None))
-            cursor.execute(SQL_JOB, (query, PROJECT, QUERY, run))
-            cursor.execute(SQL_ARTIFACT, (artifact, PROJECT))
-            cursor.execute(SQL_FILE, (artifact, CONTENT, digest, len(CONTENT), len(CONTENT)))
-            cursor.execute(SQL_SEAL, (artifact,))
-            cursor.execute(SQL_RELEASE, (release, PROJECT, run, artifact, digest))
-            cursor.execute(SQL_POINTER, (release, PROJECT))
-            cursor.execute(SQL_RELEASES)
-            before_release = dict(cursor.fetchone())
-            cursor.execute(SQL_JOBS)
-            before_jobs = [dict(row) for row in cursor.fetchall()]
-            cursor.execute(SQL_ARTIFACTS)
-            before_files = cursor.fetchall()
+                sql_result = connection.exec_driver_sql(
+                    migration.read_text(encoding=UTF8), execution_options={"no_parameters": True}
+                )
+            sql_result = connection.exec_driver_sql(SQL_PROJECT, (PROJECT,))
+            sql_result = connection.exec_driver_sql(SQL_JOB, (run, PROJECT, BUILD, None))
+            sql_result = connection.exec_driver_sql(SQL_JOB, (query, PROJECT, QUERY, run))
+            sql_result = connection.exec_driver_sql(SQL_ARTIFACT, (artifact, PROJECT))
+            sql_result = connection.exec_driver_sql(SQL_FILE, (artifact, CONTENT, digest, len(CONTENT), len(CONTENT)))
+            sql_result = connection.exec_driver_sql(SQL_SEAL, (artifact,))
+            sql_result = connection.exec_driver_sql(SQL_RELEASE, (release, PROJECT, run, artifact, digest))
+            sql_result = connection.exec_driver_sql(SQL_POINTER, (release, PROJECT))
+            sql_result = connection.exec_driver_sql(SQL_RELEASES, execution_options={"no_parameters": True})
+            before_release = dict(row_dict(sql_result))
+            sql_result = connection.exec_driver_sql(SQL_JOBS, execution_options={"no_parameters": True})
+            before_jobs = [dict(row) for row in sql_result.mappings()]
+            sql_result = connection.exec_driver_sql(SQL_ARTIFACTS, execution_options={"no_parameters": True})
+            before_files = [dict(row) for row in sql_result.mappings()]
         scoped.migrate()
         branch = BranchStore(scoped).production(PROJECT)
         scoped.migrate()
         assert BranchStore(scoped).list(PROJECT) == [branch]
         assert branch["active_release_id"] == branch["latest_release_id"] == release
         assert branch["publication_sequence"] == 1
-        with scoped.transaction() as cursor:
-            cursor.execute(SQL_RELEASES)
-            after_release = dict(cursor.fetchone())
+        with scoped.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_RELEASES, execution_options={"no_parameters": True})
+            after_release = dict(row_dict(sql_result))
             assert after_release.pop("branch_id") == branch["branch_id"]
             assert after_release == before_release
-            cursor.execute(SQL_JOBS)
-            after_jobs = [dict(row) for row in cursor.fetchall()]
+            sql_result = connection.exec_driver_sql(SQL_JOBS, execution_options={"no_parameters": True})
+            after_jobs = [dict(row) for row in sql_result.mappings()]
             for row in after_jobs:
                 assert row.pop("branch_id") == branch["branch_id"]
             assert after_jobs == before_jobs
-            cursor.execute(SQL_ARTIFACTS)
-            assert cursor.fetchall() == before_files
+            sql_result = connection.exec_driver_sql(SQL_ARTIFACTS, execution_options={"no_parameters": True})
+            assert [dict(row) for row in sql_result.mappings()] == before_files
     finally:
         # 只移除本测试创建的随机 schema，不清理共享测试表。
-        with store.db.transaction() as cursor:
-            cursor.execute(sql.SQL(DROP_SCHEMA).format(sql.Identifier(schema)))
+        with store.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(
+                DROP_SCHEMA.format(connection.dialect.identifier_preparer.quote(schema)),
+                execution_options={"no_parameters": True},
+            )
 
 
 def test_legacy_project_facade_reads_production_pointer(store, tmp_path):

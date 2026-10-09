@@ -7,7 +7,8 @@ import json
 import logging
 import time
 
-from psycopg2 import Error as DatabaseError
+from sqlalchemy.exc import DBAPIError as DatabaseError
+from sqlalchemy.exc import TimeoutError as PoolTimeout
 
 from dbt_metricflow_service.runtime.executor import ERROR_COMMAND_FAILED, ExecutionError, RuntimeExecutor, _thread
 
@@ -46,7 +47,7 @@ class Worker:
         while not self._stopping:
             try:
                 await _thread(synchronizer.scan)
-            except (DatabaseError, RuntimeError) as error:
+            except (DatabaseError, PoolTimeout, RuntimeError) as error:
                 logger.warning(FAILURE_LOG, type(error).__name__)
             await asyncio.sleep(self.runtime.settings.branch_poll_seconds)
 
@@ -72,7 +73,7 @@ class Worker:
                     row = await asyncio.to_thread(self.runtime.jobs.get, job_id)
                     if row and row["status"] in ("FAILED", "SUCCEEDED"):
                         self.runtime.discard_input(job_id)
-            except (DatabaseError, RuntimeError) as error:
+            except (DatabaseError, PoolTimeout, RuntimeError) as error:
                 logger.warning(FAILURE_LOG, type(error).__name__)
             await asyncio.sleep(self.runtime.settings.heartbeat_seconds)
 
@@ -87,7 +88,7 @@ class Worker:
                 if job is not None:
                     await self._execute(job)
                     continue
-            except (DatabaseError, RuntimeError) as error:
+            except (DatabaseError, PoolTimeout, RuntimeError) as error:
                 # 不记录连接异常原文，避免 DSN 或服务配置进入日志。
                 logger.warning(FAILURE_LOG, type(error).__name__)
             await asyncio.sleep(POLL_SECONDS)
@@ -135,7 +136,7 @@ class Worker:
             await asyncio.to_thread(
                 self.runtime.jobs.fail, job["job_id"], job["lease_token"], code, detail, stopped=stopped,
             )
-        except (DatabaseError, RuntimeError):
+        except (DatabaseError, PoolTimeout, RuntimeError):
             # 无法提交时不伪造终态，后续恢复扫描根据已持久阶段作出决定。
             logger.warning(FAILURE_LOG, code)
 
@@ -151,7 +152,7 @@ class Worker:
                     execution.cancel()
                     return
                 last_confirmed = time.monotonic()
-            except (DatabaseError, RuntimeError):
+            except (DatabaseError, PoolTimeout, RuntimeError):
                 if time.monotonic() - last_confirmed >= self.runtime.settings.lease_seconds / 2:
                     execution.cancel()
                     return

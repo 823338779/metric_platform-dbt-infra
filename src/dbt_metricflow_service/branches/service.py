@@ -8,6 +8,8 @@ from uuid import uuid4
 
 from psycopg2.extras import Json
 
+from dbt_metricflow_service.storage.rows import row_dict
+
 from ..platform.bindings import (
     GIT_BARE,
     GIT_FETCH,
@@ -115,28 +117,28 @@ class BranchService:
 
     def _prior(self, project_id, key, operation):
         # 同键重试先恢复固定操作，不受随后 ref 或生产指针推进影响。
-        with self.runtime.db.transaction() as cursor:
-            cursor.execute(SQL_OPERATION, (project_id, key))
-            row = cursor.fetchone()
+        with self.runtime.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_OPERATION, (project_id, key))
+            row = row_dict(sql_result)
         if row and row["operation_json"] != operation:
             raise StoreConflict("分支操作键已用于不同输入")
         return row
 
     def _intent(self, project_id, request, operation, ref, base_sha, base_input):
         # 项目锁只保护短暂登记；有效 ref 唯一索引防止并发接管。
-        with self.runtime.db.transaction() as cursor:
-            cursor.execute(SQL_LOCK_PROJECT, (project_id,))
-            project = cursor.fetchone()
+        with self.runtime.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_LOCK_PROJECT, (project_id,))
+            project = row_dict(sql_result)
             if not project:
                 raise KeyError(project_id)
-            cursor.execute(SQL_OPERATION, (project_id, request.idempotency_key))
-            prior = cursor.fetchone()
+            sql_result = connection.exec_driver_sql(SQL_OPERATION, (project_id, request.idempotency_key))
+            prior = row_dict(sql_result)
             if prior:
                 if prior["operation_json"] != operation:
                     raise StoreConflict("分支操作键已用于不同输入")
                 return prior
-            cursor.execute(SQL_LIVE_REF, (project_id, ref))
-            if cursor.fetchone():
+            sql_result = connection.exec_driver_sql(SQL_LIVE_REF, (project_id, ref))
+            if row_dict(sql_result):
                 raise StoreConflict("分支已登记")
             profile = self.runtime.settings.branch_preview_profile_binding_id
             if not profile:
@@ -144,17 +146,17 @@ class BranchService:
             identifier = uuid4()
             config = {**project["binding_config"], "profileBindingId": profile,
                       "schemaName": SCHEMA_PREFIX + identifier.hex}
-            cursor.execute(SQL_BRANCH_LOCK, (project_id, None, None))
-            main = cursor.fetchone()
+            sql_result = connection.exec_driver_sql(SQL_BRANCH_LOCK, (project_id, None, None))
+            main = row_dict(sql_result)
             source_id = str(request.source_branch_id) if isinstance(request, CreateBranchRequest) else None
-            cursor.execute(SQL_BASE_RELEASE, (project_id, base_sha, source_id, source_id))
-            baseline = cursor.fetchone()
-            cursor.execute(SQL_INSERT, (str(identifier), project_id, ref, base_sha,
+            sql_result = connection.exec_driver_sql(SQL_BASE_RELEASE, (project_id, base_sha, source_id, source_id))
+            baseline = row_dict(sql_result)
+            sql_result = connection.exec_driver_sql(SQL_INSERT, (str(identifier), project_id, ref, base_sha,
                                         baseline["release_id"] if baseline else None,
                                         main["active_release_id"], base_input,
                                         Json(config), project["config_version"], request.idempotency_key,
                                         Json(operation)))
-            return cursor.fetchone()
+            return row_dict(sql_result)
 
     def _validate_baseline(self, binding, sha, ref):
         # 固定基线封存到数据库；ref 删除后仍可审计，外键阻止 GC 回收。
@@ -167,9 +169,9 @@ class BranchService:
 
     def _activate(self, row, head):
         # 激活和首次扫描信号同事务，重试不会多发信号。
-        with self.runtime.db.transaction() as cursor:
-            cursor.execute(SQL_ACTIVATE, (head, row["branch_id"]))
-            activated = cursor.fetchone()
+        with self.runtime.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_ACTIVATE, (head, row["branch_id"]))
+            activated = row_dict(sql_result)
         return activated or self.store.get(row["project_id"], row["branch_id"])
 
     def create(self, project_id: str, request: CreateBranchRequest) -> BranchView:
@@ -241,9 +243,9 @@ class BranchService:
         binding = self._binding(project_id)
         before = self.store.get(project_id, branch_id)
         observed = self._remote_head(binding, before["git_ref"]) if before["status"] == BranchStatus.ACTIVE else None
-        with self.runtime.db.transaction() as cursor:
-            cursor.execute(SQL_BRANCH_LOCK, (project_id, branch_id, branch_id))
-            row = cursor.fetchone()
+        with self.runtime.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_BRANCH_LOCK, (project_id, branch_id, branch_id))
+            row = row_dict(sql_result)
             if not row:
                 raise KeyError(branch_id)
             if row["mode"] == BranchMode.PRODUCTION:
@@ -256,8 +258,8 @@ class BranchService:
             elif row["status"] != BranchStatus.ACTIVE or row["version"] != expected_version:
                 raise StoreConflict("分支版本已变化")
             else:
-                cursor.execute(SQL_DELETING, (observed, branch_id))
-                row = cursor.fetchone()
+                sql_result = connection.exec_driver_sql(SQL_DELETING, (observed, branch_id))
+                row = row_dict(sql_result)
         head = self._remote_head(binding, row["git_ref"])
         if head is not None:
             if head != row["observed_head_sha"]:
@@ -268,7 +270,7 @@ class BranchService:
                 _git(cache, GIT_INIT, GIT_BARE)
                 _git(cache, GIT_PUSH, GIT_LEASE + row["git_ref"] + REFSPEC_SEPARATOR + head,
                      GIT_SEPARATOR, binding.remote, REFSPEC_SEPARATOR + row["git_ref"])
-        with self.runtime.db.transaction() as cursor:
-            cursor.execute(SQL_DELETED, (branch_id,))
-            deleted = cursor.fetchone()
+        with self.runtime.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_DELETED, (branch_id,))
+            deleted = row_dict(sql_result)
         return branch_view(deleted or self.store.get(project_id, branch_id))

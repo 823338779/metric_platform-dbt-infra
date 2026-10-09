@@ -9,7 +9,8 @@ from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
-from psycopg2 import Error as DatabaseError
+from sqlalchemy.exc import DBAPIError as DatabaseError
+from sqlalchemy.exc import TimeoutError as PoolTimeout
 
 from dbt_metricflow_service import __version__
 from dbt_metricflow_service.api.limits import RequestBodyLimitMiddleware
@@ -63,6 +64,7 @@ def create_runtime_app(settings):
         return JSONResponse(status_code=503, content={"detail": {"code": "runtime_unavailable"}})
 
     app.add_exception_handler(DatabaseError, unavailable)
+    app.add_exception_handler(PoolTimeout, unavailable)
     app.add_exception_handler(RuntimeUnavailable, unavailable)
 
     @app.exception_handler(ProjectBusy)

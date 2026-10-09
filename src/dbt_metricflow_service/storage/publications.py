@@ -5,6 +5,8 @@ from uuid import UUID, uuid4
 
 from psycopg2.extras import Json
 
+from dbt_metricflow_service.storage.rows import row_dict
+
 from ..publications.models import BindingMode, PublishedCatalog
 from .artifacts import MAX_FILE_BYTES, SQL_FILE, SQL_SET, _decode
 from .branches import SQL_BRANCH_LOCK, SQL_BRANCH_READ, SQL_PARENT_LOCK
@@ -64,66 +66,87 @@ class PublicationStore:
         # 分支行串行化候选序号与请求幂等；不同分支互不淘汰。
         if not idempotency_key:
             raise ValueError("候选幂等键不能为空")
-        with nullcontext(_cursor) if _cursor is not None else self.db.transaction() as cursor:
-            cursor.execute(SQL_PARENT_LOCK, (project_id,))
-            cursor.execute(SQL_BRANCH_LOCK, (project_id, branch_id, branch_id))
-            project = cursor.fetchone()
+        with nullcontext(_cursor) if _cursor is not None else self.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_PARENT_LOCK, (project_id,))
+            sql_result = connection.exec_driver_sql(SQL_BRANCH_LOCK, (project_id, branch_id, branch_id))
+            project = row_dict(sql_result)
             if not project:
                 raise KeyError(project_id)
-            cursor.execute(SQL_BRANCH_BY_KEY, (project_id, project["branch_id"], idempotency_key))
-            prior = cursor.fetchone()
+            sql_result = connection.exec_driver_sql(
+                SQL_BRANCH_BY_KEY, (project_id, project["branch_id"], idempotency_key)
+            )
+            prior = row_dict(sql_result)
             if prior:
                 if prior["request_json"] != request:
                     raise StoreConflict("候选幂等键已用于不同输入")
                 return prior
             if project["status"] != ACTIVE:
                 raise StoreConflict("分支当前不接受新候选")
-            cursor.execute(SQL_CANDIDATE, (str(uuid4()), project_id, project["publication_sequence"] + 1,
-                                          idempotency_key, Json(request), project["active_release_id"],
-                                          project["branch_id"]))
-            result = cursor.fetchone()
-            cursor.execute(SQL_SEQUENCE, (result["release_id"], request.get("commitSha"), request.get("commitSha"),
-                                          project_id, project["branch_id"]))
+            sql_result = connection.exec_driver_sql(
+                SQL_CANDIDATE,
+                (
+                    str(uuid4()),
+                    project_id,
+                    project["publication_sequence"] + 1,
+                    idempotency_key,
+                    Json(request),
+                    project["active_release_id"],
+                    project["branch_id"],
+                ),
+            )
+            result = row_dict(sql_result)
+            sql_result = connection.exec_driver_sql(
+                SQL_SEQUENCE,
+                (
+                    result["release_id"],
+                    request.get("commitSha"),
+                    request.get("commitSha"),
+                    project_id,
+                    project["branch_id"],
+                ),
+            )
             return result
 
     def get_release(self, project_id: str, release_id) -> dict:
-        with self.db.transaction() as cursor:
-            cursor.execute(SQL_RELEASE, (project_id, str(release_id), str(release_id)))
-            row = cursor.fetchone()
+        with self.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_RELEASE, (project_id, str(release_id), str(release_id)))
+            row = row_dict(sql_result)
             if not row:
                 raise KeyError(str(release_id))
             return row
 
     def get_publication(self, project_id: str, *, branch_id: str | None = None) -> dict:
         # 在单一事务读取指针和记录，发布身份一旦取定就不替换成后续版本。
-        with self.db.transaction() as cursor:
-            cursor.execute(SQL_BRANCH_READ, (project_id, branch_id, branch_id))
-            project = cursor.fetchone()
+        with self.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_BRANCH_READ, (project_id, branch_id, branch_id))
+            project = row_dict(sql_result)
             if not project:
                 raise KeyError(project_id)
             active = None
             if project["active_release_id"]:
                 active_id = project["active_release_id"]
-                cursor.execute(SQL_RELEASE, (project_id, active_id, active_id))
-                active = dict(cursor.fetchone())
+                sql_result = connection.exec_driver_sql(SQL_RELEASE, (project_id, active_id, active_id))
+                active = dict(row_dict(sql_result))
             return {"projectId": project_id, "activePublication": active}
 
-    def publish_in_transaction(self, cursor, *, job_id: UUID, attempt_token: str,
+    def publish_in_transaction(self, connection, *, job_id: UUID, attempt_token: str,
                                release_id: UUID, output_set_id: UUID) -> None:
         # 调用者持有 job/attempt 锁；与受理及清理保持 job → project → release 顺序。
-        job = JobStore(self.db)._authorized(cursor, job_id, attempt_token)
+        job = JobStore(self.db)._authorized(connection, job_id, attempt_token)
         if not job:
             raise ValueError("发布租约已失效")
-        cursor.execute(SQL_PARENT_LOCK, (job["project_id"],))
+        sql_result = connection.exec_driver_sql(SQL_PARENT_LOCK, (job["project_id"],))
         # 从不可变候选读取分支；先锁分支再锁候选，与受理顺序一致。
-        cursor.execute(SQL_RELEASE, (job["project_id"], str(release_id), str(release_id)))
-        identity = cursor.fetchone()
+        sql_result = connection.exec_driver_sql(SQL_RELEASE, (job["project_id"], str(release_id), str(release_id)))
+        identity = row_dict(sql_result)
         if not identity:
             raise ValueError("发布与执行身份不匹配")
-        cursor.execute(SQL_BRANCH_LOCK, (job["project_id"], identity["branch_id"], identity["branch_id"]))
-        project = cursor.fetchone()
-        cursor.execute(SQL_BY_RUN, (str(job_id),))
-        release = cursor.fetchone()
+        sql_result = connection.exec_driver_sql(
+            SQL_BRANCH_LOCK, (job["project_id"], identity["branch_id"], identity["branch_id"])
+        )
+        project = row_dict(sql_result)
+        sql_result = connection.exec_driver_sql(SQL_BY_RUN, (str(job_id),))
+        release = row_dict(sql_result)
         if (not release or release["release_id"] != str(release_id)
                 or job["branch_id"] != release["branch_id"]):
             raise ValueError("发布与执行身份不匹配")
@@ -132,10 +155,10 @@ class PublicationStore:
         if (project["status"] != ACTIVE or project["publication_sequence"] != release["sequence"]
                 or project["active_release_id"] != release["baseline_release_id"]
                 or project["config_version"] != job["config_version"]):
-            cursor.execute(SQL_SUPERSEDE, (str(release_id),))
+            sql_result = connection.exec_driver_sql(SQL_SUPERSEDE, (str(release_id),))
             return
-        cursor.execute(SQL_SET, (str(output_set_id),))
-        output = cursor.fetchone()
+        sql_result = connection.exec_driver_sql(SQL_SET, (str(output_set_id),))
+        output = row_dict(sql_result)
         if (not output or output["state"] != SEALED or output["project_id"] != job["project_id"]
                 or output["producer_attempt_id"] != job["current_attempt_id"]
                 or output["validation_json"].get("publicationValidated") is not True):
@@ -147,8 +170,8 @@ class PublicationStore:
                 for field, column in INPUT_FIELDS.items())
                 or output["source_set_id"] != job["input_set_id"]):
             raise ValueError("发布产物与候选输入不匹配")
-        cursor.execute(SQL_FILE, (str(output_set_id), CATALOG_PATH))
-        file = cursor.fetchone()
+        sql_result = connection.exec_driver_sql(SQL_FILE, (str(output_set_id), CATALOG_PATH))
+        file = row_dict(sql_result)
         if not file:
             raise ValueError("发布展示文件未入库")
         catalog = PublishedCatalog.model_validate_json(_decode(file, MAX_FILE_BYTES))
@@ -160,16 +183,16 @@ class PublicationStore:
                     or binding.mode == BindingMode.REUSED and str(binding.creator_run_id) == str(job_id)):
                 raise ValueError("物理绑定创建者身份不匹配")
             if binding.creator_run_id:
-                cursor.execute(SQL_RUN, (str(binding.creator_run_id),))
-                creator = cursor.fetchone()
+                sql_result = connection.exec_driver_sql(SQL_RUN, (str(binding.creator_run_id),))
+                creator = row_dict(sql_result)
                 if (not creator or creator["project_id"] != job["project_id"]
                         or creator["branch_id"] != release["branch_id"]
                         or creator["kind"] != BUILD_RUN or creator["run_lifecycle"] != ACTIVE
                         or binding.mode == BindingMode.REUSED and creator["status"] != SUCCEEDED):
                     raise ValueError("物理绑定所属项目不匹配")
-            cursor.execute(SQL_RELATION, (str(release_id), binding.native_id,
+            sql_result = connection.exec_driver_sql(SQL_RELATION, (str(release_id), binding.native_id,
                                          str(binding.creator_run_id) if binding.creator_run_id else None,
                                          Json(binding.model_dump(mode="json", by_alias=True))))
-        cursor.execute(SQL_PUBLISH, (str(output_set_id), file["raw_sha256"],
+        sql_result = connection.exec_driver_sql(SQL_PUBLISH, (str(output_set_id), file["raw_sha256"],
                                     output["validation_json"].get("buildMode", "FULL_BUILD"), str(release_id)))
-        cursor.execute(SQL_POINTER, (str(release_id), job["project_id"], project["branch_id"]))
+        sql_result = connection.exec_driver_sql(SQL_POINTER, (str(release_id), job["project_id"], project["branch_id"]))

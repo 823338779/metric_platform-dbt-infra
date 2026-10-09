@@ -127,9 +127,9 @@ async def test_actual_executor_finishes_without_replacing_any_pointer(runtime, t
     runtime.settings.max_result_bytes = 16 * 1024 * 1024
     runtime.toolchain = "test"
     # 按项目外的随机工具链隔离认领，避免取到其他测试遗留队列。
-    with runtime.db.transaction() as cursor:
+    with runtime.db.transaction() as connection:
         runtime.toolchain = uuid4().hex
-        cursor.execute("UPDATE runtime_job SET toolchain_version=%s WHERE job_id=%s",
+        connection.exec_driver_sql("UPDATE runtime_job SET toolchain_version=%s WHERE job_id=%s",
                        (runtime.toolchain, str(receipt.validation_id)))
     job = runtime.jobs.claim(str(uuid4()), toolchain_version=runtime.toolchain)
     executor = RuntimeExecutor(runtime.settings, runtime.jobs, runtime.artifacts)

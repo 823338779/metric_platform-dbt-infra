@@ -49,8 +49,8 @@ def claim(store):
 
 
 def expire(store, job):
-    with store.db.transaction() as cursor:
-        cursor.execute(
+    with store.db.transaction() as connection:
+        connection.exec_driver_sql(
             "UPDATE runtime_attempt SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE attempt_id=%s",
             (job["attempt_id"],),
         )
@@ -92,8 +92,8 @@ def test_expired_write_cannot_renew_or_publish_or_release_lock(store):
 def test_queued_volatile_input_expires_without_claim(store):
     name = project(store)
     row = reserve(store, name, input_mode="VOLATILE", pinned_instance_id=str(uuid4()), write=True)
-    with store.db.transaction() as cursor:
-        cursor.execute(
+    with store.db.transaction() as connection:
+        connection.exec_driver_sql(
             "UPDATE runtime_job SET input_lease_expires_at=clock_timestamp()-interval '1 second' WHERE job_id=%s",
             (row["job_id"],),
         )
@@ -107,16 +107,18 @@ def test_readonly_retry_retains_unconfirmed_attempt_and_cleanup_gate(store):
     parent = store.reserve(BUILD, name, {}, toolchain_version=VERSION)
     run = claim(store)
     # 引用保护测试直接提供已发布父任务；发布证据在单独测试验证。
-    with store.db.transaction() as cursor:
-        cursor.execute("UPDATE runtime_job SET status='SUCCEEDED' WHERE job_id=%s", (run["job_id"],))
+    with store.db.transaction() as connection:
+        connection.exec_driver_sql("UPDATE runtime_job SET status='SUCCEEDED' WHERE job_id=%s", (run["job_id"],))
     # 测试夹具只提供空封存集合；产物完整性由独立产物测试验证。
     set_id = str(uuid4())
-    with store.db.transaction() as cursor:
-        cursor.execute(
+    with store.db.transaction() as connection:
+        connection.exec_driver_sql(
             "INSERT INTO runtime_artifact_set(set_id,project_id,kind,state) VALUES(%s,%s,'EXECUTION','SEALED')",
             (set_id, name),
         )
-        cursor.execute("UPDATE runtime_job SET output_set_id=%s WHERE job_id=%s", (set_id, parent["job_id"]))
+        connection.exec_driver_sql(
+            "UPDATE runtime_job SET output_set_id=%s WHERE job_id=%s", (set_id, parent["job_id"])
+        )
     query = store.reserve(
         QUERY, name, {}, parent_run_id=parent["job_id"], retry_policy="READ_ONLY", toolchain_version=VERSION
     )
@@ -127,8 +129,10 @@ def test_readonly_retry_retains_unconfirmed_attempt_and_cleanup_gate(store):
     expire(store, attempt)
     store.recover()
     assert store.get(query["job_id"])["status"] == "QUEUED"
-    with store.db.transaction() as cursor:
-        cursor.execute("UPDATE runtime_job SET available_at=clock_timestamp() WHERE job_id=%s", (query["job_id"],))
+    with store.db.transaction() as connection:
+        connection.exec_driver_sql(
+            "UPDATE runtime_job SET available_at=clock_timestamp() WHERE job_id=%s", (query["job_id"],)
+        )
     next_attempt = claim(store)
     assert store.finish(next_attempt["job_id"], next_attempt["lease_token"], {"rows": [["123456789.00001"]]})
     with pytest.raises(CleanupBlocked):
@@ -178,9 +182,9 @@ def test_finish_rechecks_lease_after_artifact_sealing(store, tmp_path):
     artifacts = ArtifactStore(store.db)
     output = artifacts.capture(name, tmp_path, producer_attempt_id=attempt["attempt_id"], kind="EXECUTION")
 
-    def seal_then_expire(set_id, cursor):
-        artifacts.seal(set_id, cursor)
-        cursor.execute(
+    def seal_then_expire(set_id, connection):
+        artifacts.seal(set_id, connection)
+        connection.exec_driver_sql(
             "UPDATE runtime_attempt SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE attempt_id=%s",
             (attempt["attempt_id"],),
         )
@@ -202,7 +206,7 @@ def test_cleanup_uses_parent_versions_and_can_clean_failed_build(store):
 
 
 def test_sealed_set_cannot_be_demoted_or_rewritten(store, tmp_path):
-    from psycopg2 import IntegrityError
+    from sqlalchemy.exc import IntegrityError
 
     from dbt_metricflow_service.storage.artifacts import ArtifactStore
 
@@ -211,8 +215,8 @@ def test_sealed_set_cannot_be_demoted_or_rewritten(store, tmp_path):
     (tmp_path / "dbt_project.yml").write_text("name: immutable_test\n", encoding="utf-8")
     set_id = ArtifactStore(store.db).capture(name, tmp_path)
     for change in ("state='STAGING'", "metadata='{\"changed\":true}'::jsonb"):
-        with pytest.raises(IntegrityError), store.db.transaction() as cursor:
-            cursor.execute("UPDATE runtime_artifact_set SET " + change + " WHERE set_id=%s", (set_id,))
+        with pytest.raises(IntegrityError), store.db.transaction() as connection:
+            connection.exec_driver_sql("UPDATE runtime_artifact_set SET " + change + " WHERE set_id=%s", (set_id,))
 
 
 def test_idempotency_cannot_reuse_another_project(store):
@@ -258,9 +262,10 @@ def test_options_retry_rejects_elapsed_deadline(store):
     row = store.reserve("QUERY_OPTIONS", name, {}, toolchain_version=VERSION)
     attempt = claim(store)
     store.fail(row["job_id"], attempt["lease_token"], "TRANSIENT_FAILURE")
-    with store.db.transaction() as cursor:
-        cursor.execute("UPDATE runtime_job SET deadline_at=clock_timestamp()-interval '1 second' WHERE job_id=%s",
-                       (row["job_id"],))
+    with store.db.transaction() as connection:
+        connection.exec_driver_sql(
+            "UPDATE runtime_job SET deadline_at=clock_timestamp()-interval '1 second' WHERE job_id=%s", (row["job_id"],)
+        )
     assert not store.requeue_options(row["job_id"])
 
 

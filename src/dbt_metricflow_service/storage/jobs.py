@@ -7,6 +7,8 @@ from uuid import uuid4
 
 from psycopg2.extras import Json
 
+from dbt_metricflow_service.storage.rows import row_dict
+
 from .branches import BranchStore
 from .postgres import Database
 
@@ -256,16 +258,16 @@ class JobStore:
     def register_project(self, project_id, binding_config=None, config_version="1", source_set_id=None,
                          preview_profile=None):
         # 项目导入与普通任务受理锁同一项目行，换源时立即移除旧输出指针。
-        with self.db.transaction() as cursor:
-            cursor.execute(
+        with self.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(
                 SQL_INSERT_INTO_RUNTIME_PROJECT,
                 (project_id, Json(binding_config or {}), config_version),
             )
-            cursor.execute(SQL_SELECT_FROM_RUNTIME_PROJECT, (project_id,))
-            current = cursor.fetchone()
+            sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_PROJECT, (project_id,))
+            current = row_dict(sql_result)
             if source_set_id is not None:
-                cursor.execute(SQL_SELECT_FROM_RUNTIME_ARTIFACT_SET, (source_set_id,))
-                source = cursor.fetchone()
+                sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_ARTIFACT_SET, (source_set_id,))
+                source = row_dict(sql_result)
                 if (
                     not source
                     or source["state"] != SEALED
@@ -274,7 +276,7 @@ class JobStore:
                 ):
                     raise ValueError("Project source must be a sealed source of the same project")
             changed = source_set_id is not None and current["source_set_id"] != str(source_set_id)
-            cursor.execute(
+            sql_result = connection.exec_driver_sql(
                 SQL_UPDATE_RUNTIME_PROJECT_SET_2,
                 (
                     Json(binding_config if binding_config is not None else current["binding_config"]),
@@ -284,29 +286,29 @@ class JobStore:
                     project_id,
                 ),
             )
-            result = dict(cursor.fetchone())
-            BranchStore.ensure_production(cursor, project_id, preview_profile)
+            result = dict(row_dict(sql_result))
+            BranchStore.ensure_production(connection, project_id, preview_profile)
             return result
 
     def project(self, project_id):
-        with self.db.transaction() as cursor:
-            cursor.execute(SQL_SELECT_FROM_RUNTIME_PROJECT_2, (project_id,))
-            return cursor.fetchone()
+        with self.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_PROJECT_2, (project_id,))
+            return row_dict(sql_result)
 
     def get(self, job_id):
-        with self.db.transaction() as cursor:
-            cursor.execute(SQL_SELECT_FROM_RUNTIME_JOB, (str(job_id),))
-            return cursor.fetchone()
+        with self.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB, (str(job_id),))
+            return row_dict(sql_result)
 
     def by_key(self, scope, key):
-        with self.db.transaction() as cursor:
-            cursor.execute(SQL_SELECT_FROM_RUNTIME_JOB_2, (scope, key))
-            return cursor.fetchone()
+        with self.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB_2, (scope, key))
+            return row_dict(sql_result)
 
     def result(self, job_id):
-        with self.db.transaction() as cursor:
-            cursor.execute(SQL_SELECT_FROM_RUNTIME_JOB_RESULT, (str(job_id),))
-            return cursor.fetchone()
+        with self.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB_RESULT, (str(job_id),))
+            return row_dict(sql_result)
 
     def reserve(
         self,
@@ -335,20 +337,20 @@ class JobStore:
         _cursor=None,
     ):
         # 幂等作用域先串行化；parent 锁统一先于项目行和子任务，避免清理受理穿透。
-        with nullcontext(_cursor) if _cursor is not None else self.db.transaction() as cursor:
+        with nullcontext(_cursor) if _cursor is not None else self.db.transaction() as connection:
             if idempotency_key is not None:
                 idempotency_scope = idempotency_scope or kind
-                cursor.execute(
+                sql_result = connection.exec_driver_sql(
                     SQL_SELECT_PG_ADVISORY_XACT_LOCK_HASHTEXTEXTENDED, (idempotency_scope + ":" + idempotency_key,)
                 )
             parent = None
             if parent_run_id is not None:
-                cursor.execute(SQL_SELECT_FROM_RUNTIME_JOB_4, (str(parent_run_id),))
-                parent = cursor.fetchone()
+                sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB_4, (str(parent_run_id),))
+                parent = row_dict(sql_result)
                 if not parent or parent["kind"] != BUILD_RUN or parent["project_id"] != project_id:
                     raise ValueError("Parent must be a BUILD_RUN of this project")
-            cursor.execute(SQL_SELECT_FROM_RUNTIME_PROJECT, (project_id,))
-            project = cursor.fetchone()
+            sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_PROJECT, (project_id,))
+            project = row_dict(sql_result)
             if not project:
                 raise ValueError("Project is not registered")
             # 前置 manifest 校验之后若项目发生导入，拒绝混用旧输入与新配置。
@@ -381,11 +383,11 @@ class JobStore:
             )
             fingerprint = hashlib.sha256(encoded.encode()).hexdigest()
             if idempotency_key is not None:
-                cursor.execute(
+                sql_result = connection.exec_driver_sql(
                     SQL_SELECT_FROM_RUNTIME_JOB_2,
                     (idempotency_scope, idempotency_key),
                 )
-                prior = cursor.fetchone()
+                prior = row_dict(sql_result)
                 if prior:
                     # 旧库摘要算法不同；迁移任务按原公开请求比较，保留旧幂等语义。
                     if (prior["error_detail"] or {}).get(LEGACY_IMPORT_DIGEST):
@@ -399,8 +401,8 @@ class JobStore:
             if parent and (parent["status"] != SUCCEEDED or parent["run_lifecycle"] != ACTIVE):
                 raise CleanupBlocked("Run is not ready and active")
             if input_set_id is not None:
-                cursor.execute(SQL_SELECT_STATE_PROJECT_ID, (input_set_id,))
-                artifact = cursor.fetchone()
+                sql_result = connection.exec_driver_sql(SQL_SELECT_STATE_PROJECT_ID, (input_set_id,))
+                artifact = row_dict(sql_result)
                 if not artifact or artifact["state"] != SEALED or artifact["project_id"] != project_id:
                     raise ValueError("Input artifact set is not available")
             elif parent:
@@ -408,7 +410,7 @@ class JobStore:
             if write and project["busy_job_id"] is not None:
                 raise ProjectBusy("project_busy")
             identifier = str(job_id or uuid4())
-            cursor.execute(
+            sql_result = connection.exec_driver_sql(
                 SQL_INSERT_INTO_RUNTIME_JOB,
                 (
                     identifier,
@@ -434,79 +436,79 @@ class JobStore:
                     max_attempts,
                 ),
             )
-            result = cursor.fetchone()
+            result = row_dict(sql_result)
             # 发布类任务继承固定候选或父 run 的分支，普通任务保持无分支。
             if parent and branch_id is not None and parent["branch_id"] != branch_id:
                 raise ValueError("父任务与分支归属不匹配")
             branch_id = parent["branch_id"] if parent else branch_id
             if safe_request.get(RELEASE_FIELD):
-                cursor.execute(SQL_RELEASE_BRANCH, (project_id, safe_request[RELEASE_FIELD]))
-                release = cursor.fetchone()
+                sql_result = connection.exec_driver_sql(SQL_RELEASE_BRANCH, (project_id, safe_request[RELEASE_FIELD]))
+                release = row_dict(sql_result)
                 if not release or branch_id is not None and branch_id != release["branch_id"]:
                     raise ValueError("任务与发布分支归属不匹配")
                 branch_id = release["branch_id"]
             if branch_id is not None:
-                cursor.execute(SQL_ASSIGN_BRANCH, (branch_id, identifier))
-                result = cursor.fetchone()
+                sql_result = connection.exec_driver_sql(SQL_ASSIGN_BRANCH, (branch_id, identifier))
+                result = row_dict(sql_result)
             if write:
-                cursor.execute(SQL_UPDATE_RUNTIME_PROJECT_SET_3, (identifier, project_id))
+                sql_result = connection.exec_driver_sql(SQL_UPDATE_RUNTIME_PROJECT_SET_3, (identifier, project_id))
             return result
 
     def requeue_options(self, job_id):
         # 同步选项的明确终止失败可重试，沿用原截止时间和总尝试上限。
-        with self.db.transaction() as cursor:
-            cursor.execute(SQL_SELECT_FROM_RUNTIME_JOB, (str(job_id),))
-            row = cursor.fetchone()
+        with self.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB, (str(job_id),))
+            row = row_dict(sql_result)
             if row and row["parent_run_id"]:
-                cursor.execute(SQL_SELECT_FROM_RUNTIME_JOB_4, (row["parent_run_id"],))
-                parent = cursor.fetchone()
+                sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB_4, (row["parent_run_id"],))
+                parent = row_dict(sql_result)
                 if parent["run_lifecycle"] != ACTIVE:
                     return False
-            cursor.execute(SQL_OPTIONS_RETRY, (str(job_id),))
-            return cursor.rowcount == 1
+            sql_result = connection.exec_driver_sql(SQL_OPTIONS_RETRY, (str(job_id),))
+            return sql_result.rowcount == 1
 
     def claim(self, worker_id, *, config_version="1", config_versions=None, toolchain_version="default", kinds=None):
         # 短事务领取一个任务，跳过其他 worker 已锁住的任务；VOLATILE 输入必须仍有效。
-        with self.db.transaction() as cursor:
+        with self.db.transaction() as connection:
             versions = config_versions if config_versions is not None else [config_version]
-            cursor.execute(
+            sql_result = connection.exec_driver_sql(
                 SQL_SELECT_FROM_RUNTIME_JOB_3,
                 (versions, toolchain_version, kinds, kinds, str(worker_id)),
             )
-            job = cursor.fetchone()
+            job = row_dict(sql_result)
             if not job:
                 return None
             attempt_id, token = str(uuid4()), str(uuid4())
-            cursor.execute(
+            sql_result = connection.exec_driver_sql(
                 SQL_INSERT_INTO_RUNTIME_ATTEMPT,
                 (attempt_id, job["job_id"], job["attempt_no"] + 1, str(worker_id), token, self.lease_seconds),
             )
-            cursor.execute(
+            sql_result = connection.exec_driver_sql(
                 SQL_UPDATE_RUNTIME_JOB_SET,
                 (attempt_id, job["job_id"]),
             )
-            result = dict(cursor.fetchone())
+            result = dict(row_dict(sql_result))
             result.update(attempt_id=attempt_id, lease_token=token)
             return result
 
-    def _authorized(self, cursor, job_id, token):
+    def _authorized(self, connection, job_id, token):
         # 清理和子任务更新都先锁 parent；每次修改同时核对 current attempt、token 和数据库时间。
-        cursor.execute(SQL_SELECT_PARENT_RUN_ID_FROM, (str(job_id),))
-        reference = cursor.fetchone()
+        sql_result = connection.exec_driver_sql(SQL_SELECT_PARENT_RUN_ID_FROM, (str(job_id),))
+        reference = row_dict(sql_result)
         if reference and reference["parent_run_id"]:
-            cursor.execute(SQL_SELECT_JOB_ID_FROM, (reference["parent_run_id"],))
-        cursor.execute(
+            sql_result = connection.exec_driver_sql(SQL_SELECT_JOB_ID_FROM, (reference["parent_run_id"],))
+        sql_result = connection.exec_driver_sql(
             SQL_SELECT_J_A,
             (str(job_id), str(token)),
         )
-        return cursor.fetchone()
+        return row_dict(sql_result)
 
     def heartbeat(self, job_id, token):
-        with self.db.transaction() as cursor:
-            job = self._authorized(cursor, job_id, token)
+        with self.db.transaction() as connection:
+            job = self._authorized(connection, job_id, token)
             if not job:
                 return False
-            cursor.execute(
+            connection.exec_driver_sql(
                 SQL_UPDATE_RUNTIME_ATTEMPT_SET,
                 (self.lease_seconds, job["attempt_id"]),
             )
@@ -514,25 +516,25 @@ class JobStore:
 
     def heartbeat_inputs(self, worker_id, job_ids=None):
         # 排队等待期也需要输入续租；已经过期的输入租约不能通过迟到心跳复活。
-        with self.db.transaction() as cursor:
-            cursor.execute(
+        with self.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(
                 SQL_UPDATE_RUNTIME_JOB_SET_2,
                 (self.lease_seconds, str(worker_id), job_ids, job_ids),
             )
-            return cursor.rowcount
+            return sql_result.rowcount
 
     def phase(self, job_id, token, phase, *, external=False, external_execution_refs=None):
-        with self.db.transaction() as cursor:
-            job = self._authorized(cursor, job_id, token)
+        with self.db.transaction() as connection:
+            job = self._authorized(connection, job_id, token)
             if not job:
                 return False
-            cursor.execute(SQL_UPDATE_RUNTIME_JOB_SET_3, (phase, str(job_id)))
+            connection.exec_driver_sql(SQL_UPDATE_RUNTIME_JOB_SET_3, (phase, str(job_id)))
             if job["request_json"].get("releaseId"):
                 from .publications import SQL_PHASE
 
-                cursor.execute(SQL_PHASE, (phase, str(job_id)))
+                connection.exec_driver_sql(SQL_PHASE, (phase, str(job_id)))
             if external:
-                cursor.execute(
+                connection.exec_driver_sql(
                     SQL_UPDATE_RUNTIME_ATTEMPT_SET_5,
                     (Json(external_execution_refs or {}), job["attempt_id"]),
                 )
@@ -540,22 +542,22 @@ class JobStore:
 
     def attach_input(self, job_id, token, set_id):
         # 首次构建的源码在外部写入前固定，后续准备阶段重试可复用该集合。
-        with self.db.transaction() as cursor:
-            job = self._authorized(cursor, job_id, token)
+        with self.db.transaction() as connection:
+            job = self._authorized(connection, job_id, token)
             if not job:
                 return False
-            cursor.execute(SQL_SELECT_FROM_RUNTIME_ARTIFACT_SET, (set_id,))
-            source = cursor.fetchone()
+            sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_ARTIFACT_SET, (set_id,))
+            source = row_dict(sql_result)
             if not source or source["state"] != SEALED or source["project_id"] != job["project_id"]:
                 raise ValueError("Invalid source artifact set")
             if job["input_set_id"] is not None and job["input_set_id"] != str(set_id):
                 raise ValueError("Job input is immutable after admission")
-            cursor.execute(SQL_UPDATE_RUNTIME_JOB_SET_4, (set_id, str(job_id)))
+            sql_result = connection.exec_driver_sql(SQL_UPDATE_RUNTIME_JOB_SET_4, (set_id, str(job_id)))
             return True
 
-    def _release_project(self, cursor, job_id):
+    def _release_project(self, connection, job_id):
         # 只有所有外部执行都确认结束，才释放通用写锁。
-        cursor.execute(
+        connection.exec_driver_sql(
             SQL_UPDATE_RUNTIME_PROJECT_SET,
             (str(job_id), str(job_id)),
         )
@@ -577,8 +579,8 @@ class JobStore:
         encoded = json.dumps(payload or {}, ensure_ascii=False, separators=(",", ":"))
         if len(encoded.encode()) > self.max_result_bytes:
             raise ValueError("Job result exceeds configured size limit")
-        with self.db.transaction() as cursor:
-            job = self._authorized(cursor, job_id, token)
+        with self.db.transaction() as connection:
+            job = self._authorized(connection, job_id, token)
             if not job:
                 return False
             if job["kind"] == BUILD_RUN and output_set_id is None:
@@ -586,15 +588,15 @@ class JobStore:
             if output_set_id is not None:
                 if job["input_mode"] == VOLATILE:
                     raise ValueError("Volatile resources cannot publish durable project artifacts")
-                cursor.execute(SQL_SELECT_FROM_RUNTIME_ARTIFACT_SET_2, (output_set_id,))
-                output = cursor.fetchone()
+                sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_ARTIFACT_SET_2, (output_set_id,))
+                output = row_dict(sql_result)
                 if not output or output["producer_attempt_id"] != job["attempt_id"] or output["kind"] != EXECUTION:
                     raise ValueError("Output must belong to the authorized attempt")
                 if output["project_id"] != job["project_id"]:
                     raise ValueError("Output belongs to a different project")
                 if job["kind"] == BUILD_RUN:
-                    cursor.execute(SQL_SELECT_RELATIVE_PATH_FROM, (output_set_id,))
-                    files = {row["relative_path"] for row in cursor.fetchall()}
+                    sql_result = connection.exec_driver_sql(SQL_SELECT_RELATIVE_PATH_FROM, (output_set_id,))
+                    files = {row["relative_path"] for row in sql_result.mappings()}
                     if not REQUIRED_BUILD_FILES.issubset(files):
                         raise ValueError("BUILD_RUN output is missing required native artifacts")
                     if not all(output["validation_json"].get(flag) is True for flag in REQUIRED_VALIDATION_FLAGS):
@@ -603,8 +605,8 @@ class JobStore:
                     from .artifacts import ArtifactStore
 
                     seal = ArtifactStore(self.db).seal
-                seal(output_set_id, cursor)
-            cursor.execute(
+                seal(output_set_id, connection)
+            sql_result = connection.exec_driver_sql(
                 SQL_INSERT_INTO_RUNTIME_JOB_RESULT,
                 (
                     str(job_id),
@@ -623,72 +625,76 @@ class JobStore:
                 from .publications import PublicationStore
 
                 PublicationStore(self.db).publish_in_transaction(
-                    cursor, job_id=job_id, attempt_token=token,
+                    connection, job_id=job_id, attempt_token=token,
                     release_id=job["request_json"]["releaseId"], output_set_id=output_set_id,
                 )
             # 封存校验可能耗时；提交前重新 fencing，失效时连同已封存文件状态一起回滚。
-            if not self._authorized(cursor, job_id, token):
-                cursor.connection.rollback()
+            if not self._authorized(connection, job_id, token):
+                connection.rollback()
                 return False
-            cursor.execute(
+            sql_result = connection.exec_driver_sql(
                 SQL_UPDATE_RUNTIME_ATTEMPT_SET_2,
                 (job["attempt_id"],),
             )
-            cursor.execute(
+            sql_result = connection.exec_driver_sql(
                 SQL_UPDATE_RUNTIME_JOB_SET_5,
                 (output_set_id, str(job_id)),
             )
             if job["kind"] == RUN_CLEANUP:
-                cursor.execute(SQL_UPDATE_RUNTIME_JOB_SET_8, (job["parent_run_id"],))
+                sql_result = connection.exec_driver_sql(SQL_UPDATE_RUNTIME_JOB_SET_8, (job["parent_run_id"],))
                 # schema 删除已经确认；保留任务/结果与幂等墓碑，将无引用文件交给 GC。
-                cursor.execute(SQL_RELEASE_RUN_ARTIFACTS, (job["parent_run_id"], job["parent_run_id"]))
+                sql_result = connection.exec_driver_sql(
+                    SQL_RELEASE_RUN_ARTIFACTS, (job["parent_run_id"], job["parent_run_id"])
+                )
             if job["kind"] == DBT_COMMAND and output_set_id is not None:
-                cursor.execute(
+                sql_result = connection.exec_driver_sql(
                     SQL_UPDATE_RUNTIME_PROJECT_SET_4,
                     (output_set_id, job["project_id"], job["config_version"], job["input_set_id"], job["input_set_id"]),
                 )
-            self._release_project(cursor, job_id)
+            self._release_project(connection, job_id)
             return True
 
     def fail(self, job_id, token, error_code, detail=None, *, stopped=True):
         # 错误详情也有字节预算，禁止在失败路径写入无限增长的异常堆栈。
         if len(json.dumps(detail or {}, ensure_ascii=False).encode()) > self.max_diagnostic_bytes:
             detail = {"message": "Diagnostic exceeded configured size limit"}
-        with self.db.transaction() as cursor:
-            job = self._authorized(cursor, job_id, token)
+        with self.db.transaction() as connection:
+            job = self._authorized(connection, job_id, token)
             if not job:
                 return False
-            cursor.execute(
+            connection.exec_driver_sql(
                 SQL_UPDATE_RUNTIME_ATTEMPT_SET_3,
                 (stopped, stopped, job["attempt_id"]),
             )
-            cursor.execute(
+            connection.exec_driver_sql(
                 SQL_UPDATE_RUNTIME_JOB_SET_6,
                 (error_code, Json(detail or {}), str(job_id)),
             )
             from .publications import SQL_FAIL
 
-            cursor.execute(SQL_FAIL, (error_code, str(job_id)))
-            self._release_project(cursor, job_id)
+            connection.exec_driver_sql(SQL_FAIL, (error_code, str(job_id)))
+            self._release_project(connection, job_id)
             return True
 
     def recover(self):
         # 恢复只处理过期租约/截止时间，健康实例的 RUNNING 任务不会被启动流程打断。
-        with self.db.transaction() as cursor:
-            cursor.execute(SQL_SELECT_J_FROM)
-            jobs = cursor.fetchall()
+        with self.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_SELECT_J_FROM)
+            jobs = [dict(row) for row in sql_result.mappings()]
             for job in jobs:
-                cursor.execute(SQL_SELECT_CLOCK_TIMESTAMP_AS)
-                now = cursor.fetchone()["now"]
+                sql_result = connection.exec_driver_sql(SQL_SELECT_CLOCK_TIMESTAMP_AS)
+                now = row_dict(sql_result)["now"]
                 attempt = None
                 if job["current_attempt_id"]:
-                    cursor.execute(SQL_SELECT_FROM_RUNTIME_ATTEMPT_2, (job["current_attempt_id"],))
-                    attempt = cursor.fetchone()
+                    sql_result = connection.exec_driver_sql(
+                        SQL_SELECT_FROM_RUNTIME_ATTEMPT_2, (job["current_attempt_id"],)
+                    )
+                    attempt = row_dict(sql_result)
                 external = bool(attempt and attempt["execution_stage"] == EXTERNAL)
                 lost = job["input_mode"] == VOLATILE and job["input_lease_expires_at"] <= now
                 timed_out = job["deadline_at"] <= now
                 if attempt:
-                    cursor.execute(
+                    sql_result = connection.exec_driver_sql(
                         SQL_UPDATE_RUNTIME_ATTEMPT_SET_6,
                         (EXPIRED_UNCONFIRMED if external else STOPPED, external, attempt["attempt_id"]),
                     )
@@ -702,7 +708,7 @@ class JobStore:
                 )
                 if retry:
                     delay = 5 if job["attempt_no"] <= 1 else 15
-                    cursor.execute(
+                    sql_result = connection.exec_driver_sql(
                         SQL_UPDATE_RUNTIME_JOB_SET_9,
                         (delay, job["job_id"]),
                     )
@@ -710,83 +716,83 @@ class JobStore:
                     code = (
                         INPUT_LOST if lost else TIMEOUT if timed_out else OUTCOME_UNKNOWN if external else LEASE_EXPIRED
                     )
-                    cursor.execute(
+                    sql_result = connection.exec_driver_sql(
                         SQL_UPDATE_RUNTIME_JOB_SET_6,
                         (code, Json({"externalOutcomeUnknown": external}), job["job_id"]),
                     )
                     from .publications import SQL_FAIL
 
-                    cursor.execute(SQL_FAIL, (code, job["job_id"]))
-                    self._release_project(cursor, job["job_id"])
+                    sql_result = connection.exec_driver_sql(SQL_FAIL, (code, job["job_id"]))
+                    self._release_project(connection, job["job_id"])
             return len(jobs)
 
     def confirm_stopped(self, attempt_id, token):
         # 失效执行者仅可凭自己的 token 确认停止，不能改写公开结果。
-        with self.db.transaction() as cursor:
-            cursor.execute(
+        with self.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(
                 SQL_SELECT_JOB_ID_FROM_2,
                 (str(attempt_id), str(token)),
             )
-            attempt = cursor.fetchone()
+            attempt = row_dict(sql_result)
             if not attempt:
                 return False
-            cursor.execute(SQL_SELECT_FROM_RUNTIME_JOB_4, (attempt["job_id"],))
-            job = cursor.fetchone()
-            cursor.execute(
+            sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB_4, (attempt["job_id"],))
+            job = row_dict(sql_result)
+            sql_result = connection.exec_driver_sql(
                 SQL_UPDATE_RUNTIME_ATTEMPT_SET_4,
                 (str(attempt_id),),
             )
             if job["status"] in (SUCCEEDED, FAILED):
-                self._release_project(cursor, job["job_id"])
+                self._release_project(connection, job["job_id"])
             return True
 
     def reserve_cleanup(self, parent_run_id, toolchain_version="default"):
         # 与查询受理锁同一 parent；阻止所有排队/执行任务和任何未确认停止的历史 attempt。
-        with self.db.transaction() as cursor:
-            cursor.execute(SQL_SELECT_FROM_RUNTIME_JOB_4, (str(parent_run_id),))
-            parent = cursor.fetchone()
+        with self.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB_4, (str(parent_run_id),))
+            parent = row_dict(sql_result)
             if not parent or parent["kind"] != BUILD_RUN:
                 raise ValueError("Run does not exist")
             # 首版保留发布历史，连同复用来源一起保护；旧 cleanup 接口不能绕过。
             from .publications import SQL_PROTECTED_RUN
 
-            cursor.execute(SQL_PROTECTED_RUN, (str(parent_run_id), str(parent_run_id)))
-            if cursor.fetchone():
+            sql_result = connection.exec_driver_sql(SQL_PROTECTED_RUN, (str(parent_run_id), str(parent_run_id)))
+            if row_dict(sql_result):
                 raise CleanupBlocked("run_cleanup_blocked")
-            cursor.execute(SQL_SELECT_FROM_RUNTIME_JOB_5, (str(parent_run_id),))
-            existing = cursor.fetchone()
+            sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB_5, (str(parent_run_id),))
+            existing = row_dict(sql_result)
             if existing:
                 if existing["status"] == FAILED:
-                    cursor.execute(
+                    sql_result = connection.exec_driver_sql(
                         SQL_SELECT_FROM_RUNTIME_ATTEMPT_3,
                         (existing["job_id"],),
                     )
-                    if cursor.fetchone():
+                    if row_dict(sql_result):
                         raise CleanupBlocked("Cleanup outcome is still unknown")
-                    cursor.execute(
+                    sql_result = connection.exec_driver_sql(
                         SQL_UPDATE_RUNTIME_JOB_SET_10,
                         (existing["job_id"],),
                     )
-                    return cursor.fetchone()
+                    return row_dict(sql_result)
                 return existing
-            cursor.execute(
+            sql_result = connection.exec_driver_sql(
                 SQL_SELECT_FROM_RUNTIME_JOB_6,
                 (str(parent_run_id), str(parent_run_id)),
             )
-            if cursor.fetchone():
+            if row_dict(sql_result):
                 raise CleanupBlocked("run_cleanup_blocked")
-            cursor.execute(
+            sql_result = connection.exec_driver_sql(
                 SQL_SELECT_FROM_RUNTIME_ATTEMPT,
                 (str(parent_run_id), str(parent_run_id)),
             )
-            if cursor.fetchone():
+            if row_dict(sql_result):
                 raise CleanupBlocked("run_cleanup_blocked")
             if not (parent["output_set_id"] or parent["input_set_id"]):
-                cursor.execute(SQL_EXTERNAL_ATTEMPT, (str(parent_run_id),))
-                if cursor.fetchone():
+                sql_result = connection.exec_driver_sql(SQL_EXTERNAL_ATTEMPT, (str(parent_run_id),))
+                if row_dict(sql_result):
                     raise CleanupBlocked("Restore source artifacts before cleaning a run that executed externally")
-            cursor.execute(SQL_UPDATE_RUNTIME_JOB_SET_7, (str(parent_run_id),))
-            cursor.execute(
+            sql_result = connection.exec_driver_sql(SQL_UPDATE_RUNTIME_JOB_SET_7, (str(parent_run_id),))
+            sql_result = connection.exec_driver_sql(
                 SQL_INSERT_INTO_RUNTIME_JOB_2,
                 (
                     str(uuid4()),
@@ -802,4 +808,4 @@ class JobStore:
                     parent["output_set_id"] or parent["input_set_id"],
                 ),
             )
-            return cursor.fetchone()
+            return row_dict(sql_result)

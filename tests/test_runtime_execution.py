@@ -19,6 +19,7 @@ from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.jobs import JobStore
 from dbt_metricflow_service.storage.postgres import Database
+from dbt_metricflow_service.storage.rows import row_dict
 from tests.test_platform_bindings import digest, git
 
 # 测试使用真实存储与进程；仅把外部仓库命令替换为 Python 子进程。
@@ -94,8 +95,8 @@ def claimed(execution, kind, request):
     """直接建立有效认领输入，执行测试不重复覆盖 HTTP 受理策略。"""
     executor, database, project_id, set_id = execution
     toolchain = str(uuid4())
-    with database.transaction() as cursor:
-        cursor.execute(INSERT_JOB_SQL, (str(uuid4()), kind, project_id, Json(request), toolchain, set_id))
+    with database.transaction() as connection:
+        connection.exec_driver_sql(INSERT_JOB_SQL, (str(uuid4()), kind, project_id, Json(request), toolchain, set_id))
     return executor.jobs.claim(str(uuid4()), toolchain_version=toolchain)
 
 
@@ -125,8 +126,8 @@ def execution(tmp_path):
     source.mkdir()
     (source / PROJECT_FILE).write_text(PROJECT_TEXT, encoding="utf-8")
     set_id = artifacts.capture(project_id, source)
-    with database.transaction() as cursor:
-        cursor.execute(SET_PROJECT_SQL, (set_id, project_id))
+    with database.transaction() as connection:
+        connection.exec_driver_sql(SET_PROJECT_SQL, (set_id, project_id))
     settings = Settings(
         projects_root=tmp_path / "unused", profiles_dir=tmp_path / "profiles",
         command_timeout_seconds=5, max_output_bytes=256, temp_root=tmp_path / "work",
@@ -155,14 +156,14 @@ async def test_generic_execution_restores_snapshot_and_captures_new_output(execu
     assert result.payload["status"] == "succeeded"
     assert result.payload["stdout"].strip() == "execution finished"
     assert result.output_set_id != source_set
-    with database.transaction() as cursor:
-        executor.artifacts.seal(result.output_set_id, cursor)
+    with database.transaction() as connection:
+        executor.artifacts.seal(result.output_set_id, connection)
     restored = tmp_path / "output"
     executor.artifacts.materialize(result.output_set_id, restored)
     assert json.loads((restored / TARGET_FILE).read_text())["metrics"] == []
-    with database.transaction() as cursor:
-        cursor.execute(GET_ATTEMPT_SQL, (job["attempt_id"],))
-        assert cursor.fetchone()["execution_stage"] == "EXTERNAL"
+    with database.transaction() as connection:
+        sql_result = connection.exec_driver_sql(GET_ATTEMPT_SQL, (job["attempt_id"],))
+        assert row_dict(sql_result)["execution_stage"] == "EXTERNAL"
     assert not (executor.settings.temp_root / str(job["job_id"]) / str(job["attempt_id"])).exists()
 
 
@@ -197,22 +198,24 @@ async def test_oversized_programmatic_result_is_rejected_before_parsing(executio
 async def test_cleanup_before_source_attachment_has_no_external_work(execution):
     executor, database, _, _ = execution
     job = claimed(execution, "RUN_CLEANUP", {})
-    with database.transaction() as cursor:
-        cursor.execute("UPDATE runtime_job SET input_set_id=NULL WHERE job_id=%s", (job["job_id"],))
+    with database.transaction() as connection:
+        sql_result = connection.exec_driver_sql(
+            "UPDATE runtime_job SET input_set_id=NULL WHERE job_id=%s", (job["job_id"],)
+        )
     job["input_set_id"] = None
     result = await executor.execute(job)
     assert result.payload == {}
-    with database.transaction() as cursor:
-        cursor.execute(GET_ATTEMPT_SQL, (job["attempt_id"],))
-        assert cursor.fetchone()["execution_stage"] == "PREPARING"
+    with database.transaction() as connection:
+        sql_result = connection.exec_driver_sql(GET_ATTEMPT_SQL, (job["attempt_id"],))
+        assert row_dict(sql_result)["execution_stage"] == "PREPARING"
 
 
 async def test_expired_lease_does_not_start_child(execution, monkeypatch, tmp_path):
     executor, database, _, _ = execution
     marker = tmp_path / "must-not-exist"
     job = claimed(execution, "QUERY_OPTIONS", {"mode": "OPTIONS", "metrics": ["orders"]})
-    with database.transaction() as cursor:
-        cursor.execute(
+    with database.transaction() as connection:
+        connection.exec_driver_sql(
             "UPDATE runtime_attempt SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE attempt_id=%s",
             (job["attempt_id"],),
         )
@@ -275,9 +278,9 @@ async def test_fixed_build_pins_git_source_preserves_results_and_requires_probe(
         if spec.argv[0] == "dbt":
             persisted = executor.jobs.get(job["job_id"])
             assert persisted["input_set_id"] is not None
-            with database.transaction() as cursor:
-                cursor.execute(GET_ATTEMPT_SQL, (job["attempt_id"],))
-                assert cursor.fetchone()["execution_stage"] == "EXTERNAL"
+            with database.transaction() as connection:
+                sql_result = connection.exec_driver_sql(GET_ATTEMPT_SQL, (job["attempt_id"],))
+                assert row_dict(sql_result)["execution_stage"] == "EXTERNAL"
             spec = dataclasses.replace(spec, argv=(sys.executable, "-c", BUILD_CODE, spec.argv[1]))
         return await original_submit(runner, project, spec)
 
@@ -290,10 +293,11 @@ async def test_fixed_build_pins_git_source_preserves_results_and_requires_probe(
     if not probe_passed:
         with pytest.raises(ValueError):
             await executor.execute(job)
-        with database.transaction() as cursor:
-            cursor.execute("SELECT count(*) AS n FROM runtime_artifact_set WHERE producer_attempt_id=%s",
-                           (job["attempt_id"],))
-            assert cursor.fetchone()["n"] == 0
+        with database.transaction() as connection:
+            sql_result = connection.exec_driver_sql(
+                "SELECT count(*) AS n FROM runtime_artifact_set WHERE producer_attempt_id=%s", (job["attempt_id"],)
+            )
+            assert row_dict(sql_result)["n"] == 0
         return
     result = await executor.execute(job)
     persisted = executor.jobs.get(job["job_id"])
@@ -335,10 +339,11 @@ async def test_resource_input_and_derived_output_never_persist(execution, monkey
         executor.jobs.fail(job["job_id"], job["lease_token"], error.value.code, error.value.payload)
         persisted = executor.jobs.get(job["job_id"])
     assert "private-resource-marker" not in json.dumps(persisted, default=str)
-    with database.transaction() as cursor:
-        cursor.execute("SELECT count(*) AS n FROM runtime_artifact_set WHERE producer_attempt_id=%s",
-                       (job["attempt_id"],))
-        assert cursor.fetchone()["n"] == 0
+    with database.transaction() as connection:
+        sql_result = connection.exec_driver_sql(
+            "SELECT count(*) AS n FROM runtime_artifact_set WHERE producer_attempt_id=%s", (job["attempt_id"],)
+        )
+        assert row_dict(sql_result)["n"] == 0
 
 
 async def test_timeout_retains_bounded_diagnostics_and_unknown_stop(execution, monkeypatch):
@@ -439,19 +444,20 @@ async def test_source_only_cleanup_drops_schema_without_semantic_manifest(execut
     (source / PROJECT_FILE).write_text(PROJECT_TEXT + "profile: cleanup_fixture\n", encoding="utf-8")
     set_id = executor.artifacts.capture(project_id, source)
     job = claimed(execution, "RUN_CLEANUP", {})
-    with database.transaction() as cursor:
-        cursor.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
-        cursor.execute("UPDATE runtime_job SET input_set_id=%s,schema_name=%s WHERE job_id=%s",
+    with database.transaction() as connection:
+        sql_result = connection.exec_driver_sql(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+        sql_result = connection.exec_driver_sql("UPDATE runtime_job SET input_set_id=%s,schema_name=%s WHERE job_id=%s",
                        (set_id, schema, job["job_id"]))
     job.update(input_set_id=set_id, schema_name=schema)
     executor.settings = dataclasses.replace(executor.settings, command_timeout_seconds=30)
     try:
         result = await executor.execute(job)
         assert result.payload == {"cleaned": True}
-        with database.transaction() as cursor:
-            cursor.execute("SELECT 1 FROM pg_namespace WHERE nspname=%s", (schema,))
-            assert cursor.fetchone() is None
+        with database.transaction() as connection:
+            sql_result = connection.exec_driver_sql("SELECT 1 FROM pg_namespace WHERE nspname=%s", (schema,))
+            assert row_dict(sql_result) is None
     finally:
-        with database.transaction() as cursor:
-            cursor.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
-
+        with database.transaction() as connection:
+            sql_result = connection.exec_driver_sql(
+                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema))
+            )

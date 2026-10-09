@@ -3,10 +3,11 @@
 from uuid import uuid4
 
 import pytest
-from psycopg2 import IntegrityError
+from sqlalchemy.exc import IntegrityError
 
 from dbt_metricflow_service.storage.branches import BranchStore
 from dbt_metricflow_service.storage.jobs import JobStore, StoreConflict
+from dbt_metricflow_service.storage.rows import row_dict
 from tests.test_publication_storage import store as store
 
 SQL_BRANCH_TABLE = "SELECT to_regclass('runtime_branch') AS name"
@@ -26,8 +27,8 @@ BUILD = "BUILD_RUN"
 def preview(store, project):
     # 生命周期由后续服务负责；存储测试只准备合法的 ACTIVE 分支。
     identifier = str(uuid4())
-    with store.db.transaction() as cursor:
-        cursor.execute(SQL_PREVIEW, (identifier, project, REF_PREFIX + uuid4().hex))
+    with store.db.transaction() as connection:
+        connection.exec_driver_sql(SQL_PREVIEW, (identifier, project, REF_PREFIX + uuid4().hex))
     return identifier
 
 
@@ -36,15 +37,15 @@ def test_new_project_has_one_production_branch(store):
     project = PROJECT_PREFIX + uuid4().hex
     jobs = JobStore(store.db)
     jobs.register_project(project)
-    with store.db.transaction() as cursor:
-        cursor.execute(SQL_BRANCH_TABLE)
-        assert cursor.fetchone()["name"] is not None, "项目注册必须准备独立分支存储"
-        cursor.execute(SQL_MAIN, (project,))
-        original = cursor.fetchall()
+    with store.db.transaction() as connection:
+        sql_result = connection.exec_driver_sql(SQL_BRANCH_TABLE)
+        assert row_dict(sql_result)["name"] is not None, "项目注册必须准备独立分支存储"
+        sql_result = connection.exec_driver_sql(SQL_MAIN, (project,))
+        original = [dict(row) for row in sql_result.mappings()]
     jobs.register_project(project)
-    with store.db.transaction() as cursor:
-        cursor.execute(SQL_MAIN, (project,))
-        current = cursor.fetchall()
+    with store.db.transaction() as connection:
+        sql_result = connection.exec_driver_sql(SQL_MAIN, (project,))
+        current = [dict(row) for row in sql_result.mappings()]
     assert len(current) == len(original) == 1
     assert current[0]["branch_id"] == original[0]["branch_id"]
     assert current[0]["git_ref"] == MAIN_REF
@@ -77,8 +78,8 @@ def test_cross_project_and_branch_references_are_rejected(store):
     with pytest.raises(KeyError):
         store.create_candidate(other, REQUEST, KEY, branch_id=branch_a)
     release = store.create_candidate(project, REQUEST, KEY, branch_id=branch_a)
-    with pytest.raises(IntegrityError), store.db.transaction() as cursor:
-        cursor.execute(SQL_BAD_POINTER, (release["release_id"], branch_b))
+    with pytest.raises(IntegrityError), store.db.transaction() as connection:
+        connection.exec_driver_sql(SQL_BAD_POINTER, (release["release_id"], branch_b))
 
 
 def test_publication_job_inherits_release_branch(store):

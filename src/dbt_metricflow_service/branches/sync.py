@@ -5,7 +5,10 @@ import json
 import logging
 from uuid import uuid4
 
-from psycopg2 import Error as DatabaseError
+from sqlalchemy.exc import DBAPIError as DatabaseError
+from sqlalchemy.exc import TimeoutError as PoolTimeout
+
+from dbt_metricflow_service.storage.rows import row_dict
 
 from ..platform.bindings import ProjectBinding, observe_revision, validate_git_ref
 from ..publications.service import PublicationService
@@ -54,33 +57,43 @@ class BranchSynchronizer:
     def signal(self, project_id: str, git_ref: str) -> None:
         # 持久提交信号版本后才能响应事件 202；未知和删除身份不会被复活。
         validate_git_ref(git_ref)
-        with self.runtime.db.transaction() as cursor:
-            cursor.execute(SQL_SIGNAL, (project_id, git_ref))
+        with self.runtime.db.transaction() as connection:
+            connection.exec_driver_sql(SQL_SIGNAL, (project_id, git_ref))
 
     def scan(self, *, project_id: str | None = None) -> None:
         # 每轮有界枚举，逐个取得租约；Git I/O 始终发生在事务之外。
-        with self.runtime.db.transaction() as cursor:
-            cursor.execute(SQL_CANDIDATES, (project_id, project_id, SCAN_LIMIT))
-            candidates = cursor.fetchall()
+        with self.runtime.db.transaction() as connection:
+            sql_result = connection.exec_driver_sql(SQL_CANDIDATES, (project_id, project_id, SCAN_LIMIT))
+            candidates = [dict(row) for row in sql_result.mappings()]
         for candidate in candidates:
             token = str(uuid4())
-            with self.runtime.db.transaction() as cursor:
-                cursor.execute(SQL_CLAIM, (token, SCAN_LEASE_SECONDS, candidate["project_id"], candidate["branch_id"]))
-                row = cursor.fetchone()
+            with self.runtime.db.transaction() as connection:
+                sql_result = connection.exec_driver_sql(
+                    SQL_CLAIM, (token, SCAN_LEASE_SECONDS, candidate["project_id"], candidate["branch_id"])
+                )
+                row = row_dict(sql_result)
             if row is None:
                 continue
             succeeded = False
             try:
                 self._reconcile(row, token)
                 succeeded = True
-            except (ValueError, KeyError, RuntimeError, DatabaseError) as error:
+            except (ValueError, KeyError, RuntimeError, DatabaseError, PoolTimeout) as error:
                 # 错误类型足够诊断可重试失败，不能泄漏远端凭据或数据库地址。
                 logger.warning(FAILURE_LOG, type(error).__name__)
             finally:
-                with self.runtime.db.transaction() as cursor:
-                    cursor.execute(SQL_RELEASE_LEASE, (succeeded, row["signal_version"], row["signal_version"],
-                                                        self.runtime.settings.branch_poll_seconds,
-                                                        row["branch_id"], token))
+                with self.runtime.db.transaction() as connection:
+                    sql_result = connection.exec_driver_sql(
+                        SQL_RELEASE_LEASE,
+                        (
+                            succeeded,
+                            row["signal_version"],
+                            row["signal_version"],
+                            self.runtime.settings.branch_poll_seconds,
+                            row["branch_id"],
+                            token,
+                        ),
+                    )
 
     def _reconcile(self, row, token):
         # 中断的创建/删除先恢复原操作，绝不按新事件 payload 猜测状态。
@@ -102,8 +115,8 @@ class BranchSynchronizer:
         if head is None:
             if row["mode"] != PREVIEW:
                 raise ValueError("生产分支暂不可读取")
-            with self.runtime.db.transaction() as cursor:
-                cursor.execute(SQL_EXTERNAL_DELETE, (branch_id, token))
+            with self.runtime.db.transaction() as connection:
+                connection.exec_driver_sql(SQL_EXTERNAL_DELETE, (branch_id, token))
             return
         sha, digest = observe_revision(configured, self.runtime.settings.temp_root, git_ref=row["git_ref"])
         # 确定性身份包含全部构建输入；同一次失败输入不会被定时器无限重试。
@@ -112,5 +125,5 @@ class BranchSynchronizer:
         release = PublicationService(self.runtime).submit(project_id, key, branch_id=branch_id,
                                                 _observed=(sha, digest), _scan_token=token,
                                                 _expected_sequence=row["publication_sequence"])
-        with self.runtime.db.transaction() as cursor:
-            cursor.execute(SQL_OBSERVED, (sha, sha, branch_id, token, release["sequence"]))
+        with self.runtime.db.transaction() as connection:
+            connection.exec_driver_sql(SQL_OBSERVED, (sha, sha, branch_id, token, release["sequence"]))

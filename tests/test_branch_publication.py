@@ -68,13 +68,13 @@ def test_failed_latest_keeps_branch_active_release(store, tmp_path):
 def test_deleted_branch_or_expired_attempt_cannot_publish(store, tmp_path):
     project, a, b = branch_pair(store)
     jobs, job, release, output, _ = prepared(SelectedStore(store.db, a), tmp_path, project)
-    with store.db.transaction() as cursor:
-        cursor.execute(SQL_DELETE, (a,))
+    with store.db.transaction() as connection:
+        connection.exec_driver_sql(SQL_DELETE, (a,))
     assert jobs.finish(job["job_id"], job["lease_token"], output_set_id=output)
     assert store.get_release(project, release["release_id"])["state"] == SUPERSEDED
     jobs, job, _, output, _ = prepared(SelectedStore(store.db, b), tmp_path, project)
-    with store.db.transaction() as cursor:
-        cursor.execute(SQL_EXPIRE, (job["attempt_id"],))
+    with store.db.transaction() as connection:
+        connection.exec_driver_sql(SQL_EXPIRE, (job["attempt_id"],))
     assert not jobs.finish(job["job_id"], job["lease_token"], output_set_id=output)
     assert store.get_publication(project, branch_id=b)["activePublication"] is None
 
@@ -84,7 +84,7 @@ def test_deleted_branch_keeps_published_run_protected(store, tmp_path):
     project, a, _ = branch_pair(store)
     jobs, job, _, output, _ = prepared(SelectedStore(store.db, a), tmp_path, project)
     assert jobs.finish(job["job_id"], job["lease_token"], output_set_id=output)
-    with store.db.transaction() as cursor:
-        cursor.execute(SQL_DELETE, (a,))
+    with store.db.transaction() as connection:
+        connection.exec_driver_sql(SQL_DELETE, (a,))
     with pytest.raises(CleanupBlocked):
         jobs.reserve_cleanup(job["job_id"])
