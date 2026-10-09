@@ -20,6 +20,16 @@ CYCLIC_FOREIGN_KEYS = (
 
 def schema_shape(connection: Connection) -> dict:
     """Read the fixed historical contract, scoped to the current schema's OIDs."""
+    quoting = connection.exec_driver_sql("SHOW quote_all_identifiers").scalar_one()
+    connection.exec_driver_sql("SET LOCAL quote_all_identifiers=off")
+    shape = _schema_shape(connection)
+    # A database error propagates to the outer transaction's rollback, which also
+    # restores local settings. On success preserve the caller's display options.
+    connection.exec_driver_sql("SELECT set_config('quote_all_identifiers',%s,true)", (quoting,))
+    return shape
+
+
+def _schema_shape(connection: Connection) -> dict:
     tables = connection.exec_driver_sql(
         "SELECT c.oid,c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
         "WHERE n.nspname=current_schema() AND c.relkind IN ('r','p') AND left(c.relname,8)='runtime_'",
@@ -38,7 +48,9 @@ def schema_shape(connection: Connection) -> dict:
             "WHERE a.attrelid=%s AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum", (oid,),
         ).all()
         constraints = connection.exec_driver_sql(
-            "SELECT pg_get_constraintdef(oid,true),convalidated FROM pg_constraint WHERE conrelid=%s", (oid,),
+            "SELECT pg_get_constraintdef(c.oid,true),c.convalidated AND NOT EXISTS "
+            "(SELECT 1 FROM pg_trigger t WHERE t.tgconstraint=c.oid AND t.tgenabled NOT IN ('O','A')) "
+            "FROM pg_constraint c WHERE c.conrelid=%s", (oid,),
         ).all()
         indexes = connection.exec_driver_sql(
             "SELECT indisunique,indisvalid,pg_get_indexdef(indexrelid,0,true) FROM pg_index WHERE indrelid=%s", (oid,),

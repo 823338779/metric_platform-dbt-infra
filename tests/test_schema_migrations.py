@@ -78,6 +78,29 @@ def test_check_requires_supported_alembic_head():
             db.migrate()
 
 
+def test_disabled_foreign_key_enforcement_rejects_adoption():
+    with isolated_database() as db:
+        prepare_legacy(db, 5)
+        with db.transaction() as connection:
+            connection.exec_driver_sql("ALTER TABLE runtime_project DISABLE TRIGGER ALL")
+        with pytest.raises(RuntimeError):
+            db.migrate()
+
+
+@pytest.mark.parametrize("version", [0, 5])
+def test_identifier_display_setting_does_not_change_schema_contract(version):
+    from dbt_metricflow_service.storage.schema import migrate
+
+    with isolated_database() as db:
+        if version:
+            prepare_legacy(db, version)
+        with db.transaction() as connection:
+            connection.exec_driver_sql("SET LOCAL quote_all_identifiers=on")
+            migrate(connection)
+            assert connection.exec_driver_sql("SHOW quote_all_identifiers").scalar_one() == "on"
+        db.check()
+
+
 def test_concurrent_migration_is_serialized():
     with isolated_database() as db:
         with ThreadPoolExecutor(max_workers=2) as workers:

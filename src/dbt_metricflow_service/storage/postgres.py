@@ -6,7 +6,6 @@ from pathlib import Path
 from psycopg2.extensions import new_array_type, new_type, parse_dsn, register_type
 from sqlalchemy import Connection, create_engine, event
 
-SCHEMA_VERSION = 5
 MIGRATION_PATH = Path(__file__).parent / "migrations" / "001_runtime.sql"
 MIGRATIONS = (MIGRATION_PATH, MIGRATION_PATH.with_name("002_publication.sql"),
               MIGRATION_PATH.with_name("003_agent_draft_validation.sql"),

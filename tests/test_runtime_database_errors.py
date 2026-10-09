@@ -1,6 +1,7 @@
 """Framework database failures retain the runtime API and worker contract."""
 
 import asyncio
+from types import SimpleNamespace
 from uuid import uuid4
 
 import httpx
@@ -51,6 +52,26 @@ async def test_worker_survives_database_error(runtime_pair, monkeypatch, error):
     monkeypatch.setattr(runtimes[0].jobs, "claim", claim)
     await asyncio.wait_for(worker._slot(), timeout=3)
     assert calls == 2
+
+
+@pytest.mark.parametrize("error", [DBAPIError(None, None, Exception("offline")), TimeoutError("busy")])
+async def test_heartbeat_failure_cancels_unconfirmed_execution(runtime_pair, monkeypatch, error):
+    runtimes, _ = runtime_pair
+    worker = Worker(runtimes[0])
+    monkeypatch.setattr(worker.runtime, "settings", SimpleNamespace(heartbeat_seconds=0.01, lease_seconds=0.02))
+
+    def offline(*args):
+        raise error
+
+    monkeypatch.setattr(worker.runtime.jobs, "heartbeat", offline)
+    execution = asyncio.create_task(asyncio.sleep(10))
+    try:
+        await asyncio.wait_for(worker._heartbeat({"job_id": str(uuid4()), "lease_token": str(uuid4())}, execution), 1)
+        await asyncio.gather(execution, return_exceptions=True)
+        assert execution.cancelled()
+    finally:
+        execution.cancel()
+        await asyncio.gather(execution, return_exceptions=True)
 
 
 def test_gc_only_swallows_foreign_key_violation(runtime_pair, monkeypatch):
