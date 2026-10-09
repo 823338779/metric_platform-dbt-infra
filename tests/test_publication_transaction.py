@@ -131,3 +131,38 @@ def test_committed_publication_cannot_be_failed_after_response_loss(store, tmp_p
     assert jobs.finish(job["job_id"], job["lease_token"], output_set_id=output)
     assert jobs.fail(job["job_id"], job["lease_token"], "RESPONSE_LOST") is False
     assert store.get_release(job["project_id"], release["release_id"])["state"] == "PUBLISHED"
+
+
+def test_candidate_and_job_share_transaction(store):
+    from dbt_metricflow_service.storage.branches import BranchStore
+
+    jobs = JobStore(store.db)
+    project = "atomic-" + uuid4().hex
+    jobs.register_project(project)
+    branches = BranchStore(store.db)
+    before = branches.production(project)
+    key = uuid4().hex
+    with pytest.raises(ValueError, match="after insert"), store.db.transaction() as connection:
+        release = store.create_candidate_in_transaction(connection, project, {}, key)
+        job = jobs.reserve_in_transaction(connection, BUILD, project, {"releaseId": release["release_id"]})
+        raise ValueError("after insert")
+    assert jobs.get(job["job_id"]) is None
+    with pytest.raises(KeyError):
+        store.get_release(project, release["release_id"])
+    assert branches.production(project)["publication_sequence"] == before["publication_sequence"]
+
+
+def test_lost_lease_after_publish_rolls_back(store, tmp_path, monkeypatch):
+    jobs, job, release, output, artifacts = prepared(store, tmp_path)
+    original = PublicationStore.publish_in_transaction
+
+    def publish_then_lose_lease(self, connection, **kwargs):
+        original(self, connection, **kwargs)
+        monkeypatch.setattr(jobs, "_authorized", lambda *args: None)
+
+    monkeypatch.setattr(PublicationStore, "publish_in_transaction", publish_then_lose_lease)
+    assert jobs.finish(job["job_id"], job["lease_token"], output_set_id=output) is False
+    assert jobs.result(job["job_id"]) is None
+    assert artifacts.metadata(output)["state"] == "STAGING"
+    assert store.get_release(job["project_id"], release["release_id"])["state"] == "PREPARING"
+    assert store.get_publication(job["project_id"])["activePublication"] is None

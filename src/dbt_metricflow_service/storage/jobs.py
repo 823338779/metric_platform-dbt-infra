@@ -2,10 +2,10 @@
 
 import hashlib
 import json
-from contextlib import nullcontext
 from uuid import uuid4
 
 from psycopg2.extras import Json
+from sqlalchemy import Connection
 
 from dbt_metricflow_service.storage.rows import row_dict
 
@@ -218,6 +218,10 @@ SQL_RELEASE_BRANCH = "SELECT branch_id FROM runtime_release WHERE project_id=%s 
 SQL_ASSIGN_BRANCH = "UPDATE runtime_job SET branch_id=%s WHERE job_id=%s RETURNING *"
 
 
+class _FinishLeaseLost(Exception):
+    """Abort all writes when the final lease check fails."""
+
+
 class StoreConflict(ValueError):
     """幂等键已用于不同请求。"""
 
@@ -334,125 +338,173 @@ class JobStore:
         write=False,
         expected_revision=None,
         branch_id=None,
-        _cursor=None,
     ):
         # 幂等作用域先串行化；parent 锁统一先于项目行和子任务，避免清理受理穿透。
-        with nullcontext(_cursor) if _cursor is not None else self.db.transaction() as connection:
-            if idempotency_key is not None:
-                idempotency_scope = idempotency_scope or kind
-                sql_result = connection.exec_driver_sql(
-                    SQL_SELECT_PG_ADVISORY_XACT_LOCK_HASHTEXTEXTENDED, (idempotency_scope + ":" + idempotency_key,)
-                )
-            parent = None
-            if parent_run_id is not None:
-                sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB_4, (str(parent_run_id),))
-                parent = row_dict(sql_result)
-                if not parent or parent["kind"] != BUILD_RUN or parent["project_id"] != project_id:
-                    raise ValueError("Parent must be a BUILD_RUN of this project")
-            sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_PROJECT, (project_id,))
-            project = row_dict(sql_result)
-            if not project:
-                raise ValueError("Project is not registered")
-            # 前置 manifest 校验之后若项目发生导入，拒绝混用旧输入与新配置。
-            if expected_revision is not None and (
-                project["revision"] != expected_revision or project["config_version"] != config_version
-            ):
-                raise StoreConflict("Project changed during request validation; retry")
-            if input_set_id is None:
-                if parent:
-                    input_set_id = parent["output_set_id"]
-                elif kind in (DBT_COMMAND, MF_COMMAND):
-                    input_set_id = project["current_output_set_id"] or project["source_set_id"]
-            safe_request = _safe_request(request_json)
-            encoded = json.dumps(
-                [
-                    {"input": fingerprint or safe_request, "branchId": branch_id} if branch_id else
-                    fingerprint or safe_request,
-                    kind,
-                    project_id,
-                    str(parent_run_id) if parent_run_id else None,
-                    input_set_id,
-                    input_mode,
-                    profile_binding_id,
-                    config_version,
-                    toolchain_version,
-                ],
-                sort_keys=True,
-                separators=(",", ":"),
-                default=str,
+        with self.db.transaction() as connection:
+            return self.reserve_in_transaction(
+                connection, kind, project_id, request_json,
+                job_id=job_id,
+                fingerprint=fingerprint,
+                idempotency_scope=idempotency_scope,
+                idempotency_key=idempotency_key,
+                parent_run_id=parent_run_id,
+                input_set_id=input_set_id,
+                input_mode=input_mode,
+                pinned_instance_id=pinned_instance_id,
+                config_version=config_version,
+                toolchain_version=toolchain_version,
+                schema_name=schema_name,
+                profile_binding_id=profile_binding_id,
+                retry_policy=retry_policy,
+                max_attempts=max_attempts,
+                timeout_seconds=timeout_seconds,
+                write=write,
+                expected_revision=expected_revision,
+                branch_id=branch_id,
             )
-            fingerprint = hashlib.sha256(encoded.encode()).hexdigest()
-            if idempotency_key is not None:
-                sql_result = connection.exec_driver_sql(
-                    SQL_SELECT_FROM_RUNTIME_JOB_2,
-                    (idempotency_scope, idempotency_key),
-                )
-                prior = row_dict(sql_result)
-                if prior:
-                    # 旧库摘要算法不同；迁移任务按原公开请求比较，保留旧幂等语义。
-                    if (prior["error_detail"] or {}).get(LEGACY_IMPORT_DIGEST):
-                        comparable = {key: value for key, value in safe_request.items() if key != BINDING_FIELD}
-                        if (prior["kind"] == kind and prior["project_id"] == project_id
-                                and prior["request_json"] == comparable):
-                            return prior
-                    if prior["request_fingerprint"] != fingerprint:
-                        raise StoreConflict("Idempotency key belongs to another request")
-                    return prior
-            if parent and (parent["status"] != SUCCEEDED or parent["run_lifecycle"] != ACTIVE):
-                raise CleanupBlocked("Run is not ready and active")
-            if input_set_id is not None:
-                sql_result = connection.exec_driver_sql(SQL_SELECT_STATE_PROJECT_ID, (input_set_id,))
-                artifact = row_dict(sql_result)
-                if not artifact or artifact["state"] != SEALED or artifact["project_id"] != project_id:
-                    raise ValueError("Input artifact set is not available")
-            elif parent:
-                raise ValueError("Parent has no published artifact set")
-            if write and project["busy_job_id"] is not None:
-                raise ProjectBusy("project_busy")
-            identifier = str(job_id or uuid4())
+
+    def reserve_in_transaction(
+        self,
+        connection: Connection,
+        kind,
+        project_id,
+        request_json,
+        *,
+        job_id=None,
+        fingerprint=None,
+        idempotency_scope=None,
+        idempotency_key=None,
+        parent_run_id=None,
+        input_set_id=None,
+        input_mode=DURABLE,
+        pinned_instance_id=None,
+        config_version="1",
+        toolchain_version="default",
+        schema_name=None,
+        profile_binding_id=None,
+        retry_policy="PREPARATION_ONLY",
+        max_attempts=3,
+        timeout_seconds=600,
+        write=False,
+        expected_revision=None,
+        branch_id=None,
+    ):
+        # 幂等作用域先串行化；parent 锁统一先于项目行和子任务，避免清理受理穿透。
+        if idempotency_key is not None:
+            idempotency_scope = idempotency_scope or kind
             sql_result = connection.exec_driver_sql(
-                SQL_INSERT_INTO_RUNTIME_JOB,
-                (
-                    identifier,
-                    kind,
-                    project_id,
-                    parent_run_id,
-                    idempotency_scope,
-                    idempotency_key,
-                    fingerprint,
-                    Json(safe_request),
-                    input_mode,
-                    pinned_instance_id,
-                    input_mode,
-                    self.lease_seconds,
-                    input_set_id,
-                    config_version,
-                    toolchain_version,
-                    schema_name,
-                    profile_binding_id,
-                    ACTIVE if kind == BUILD_RUN else None,
-                    timeout_seconds,
-                    retry_policy,
-                    max_attempts,
-                ),
+                SQL_SELECT_PG_ADVISORY_XACT_LOCK_HASHTEXTEXTENDED, (idempotency_scope + ":" + idempotency_key,)
             )
+        parent = None
+        if parent_run_id is not None:
+            sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB_4, (str(parent_run_id),))
+            parent = row_dict(sql_result)
+            if not parent or parent["kind"] != BUILD_RUN or parent["project_id"] != project_id:
+                raise ValueError("Parent must be a BUILD_RUN of this project")
+        sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_PROJECT, (project_id,))
+        project = row_dict(sql_result)
+        if not project:
+            raise ValueError("Project is not registered")
+        # 前置 manifest 校验之后若项目发生导入，拒绝混用旧输入与新配置。
+        if expected_revision is not None and (
+            project["revision"] != expected_revision or project["config_version"] != config_version
+        ):
+            raise StoreConflict("Project changed during request validation; retry")
+        if input_set_id is None:
+            if parent:
+                input_set_id = parent["output_set_id"]
+            elif kind in (DBT_COMMAND, MF_COMMAND):
+                input_set_id = project["current_output_set_id"] or project["source_set_id"]
+        safe_request = _safe_request(request_json)
+        encoded = json.dumps(
+            [
+                {"input": fingerprint or safe_request, "branchId": branch_id} if branch_id else
+                fingerprint or safe_request,
+                kind,
+                project_id,
+                str(parent_run_id) if parent_run_id else None,
+                input_set_id,
+                input_mode,
+                profile_binding_id,
+                config_version,
+                toolchain_version,
+            ],
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        fingerprint = hashlib.sha256(encoded.encode()).hexdigest()
+        if idempotency_key is not None:
+            sql_result = connection.exec_driver_sql(
+                SQL_SELECT_FROM_RUNTIME_JOB_2,
+                (idempotency_scope, idempotency_key),
+            )
+            prior = row_dict(sql_result)
+            if prior:
+                # 旧库摘要算法不同；迁移任务按原公开请求比较，保留旧幂等语义。
+                if (prior["error_detail"] or {}).get(LEGACY_IMPORT_DIGEST):
+                    comparable = {key: value for key, value in safe_request.items() if key != BINDING_FIELD}
+                    if (prior["kind"] == kind and prior["project_id"] == project_id
+                            and prior["request_json"] == comparable):
+                        return prior
+                if prior["request_fingerprint"] != fingerprint:
+                    raise StoreConflict("Idempotency key belongs to another request")
+                return prior
+        if parent and (parent["status"] != SUCCEEDED or parent["run_lifecycle"] != ACTIVE):
+            raise CleanupBlocked("Run is not ready and active")
+        if input_set_id is not None:
+            sql_result = connection.exec_driver_sql(SQL_SELECT_STATE_PROJECT_ID, (input_set_id,))
+            artifact = row_dict(sql_result)
+            if not artifact or artifact["state"] != SEALED or artifact["project_id"] != project_id:
+                raise ValueError("Input artifact set is not available")
+        elif parent:
+            raise ValueError("Parent has no published artifact set")
+        if write and project["busy_job_id"] is not None:
+            raise ProjectBusy("project_busy")
+        identifier = str(job_id or uuid4())
+        sql_result = connection.exec_driver_sql(
+            SQL_INSERT_INTO_RUNTIME_JOB,
+            (
+                identifier,
+                kind,
+                project_id,
+                parent_run_id,
+                idempotency_scope,
+                idempotency_key,
+                fingerprint,
+                Json(safe_request),
+                input_mode,
+                pinned_instance_id,
+                input_mode,
+                self.lease_seconds,
+                input_set_id,
+                config_version,
+                toolchain_version,
+                schema_name,
+                profile_binding_id,
+                ACTIVE if kind == BUILD_RUN else None,
+                timeout_seconds,
+                retry_policy,
+                max_attempts,
+            ),
+        )
+        result = row_dict(sql_result)
+        # 发布类任务继承固定候选或父 run 的分支，普通任务保持无分支。
+        if parent and branch_id is not None and parent["branch_id"] != branch_id:
+            raise ValueError("父任务与分支归属不匹配")
+        branch_id = parent["branch_id"] if parent else branch_id
+        if safe_request.get(RELEASE_FIELD):
+            sql_result = connection.exec_driver_sql(SQL_RELEASE_BRANCH, (project_id, safe_request[RELEASE_FIELD]))
+            release = row_dict(sql_result)
+            if not release or branch_id is not None and branch_id != release["branch_id"]:
+                raise ValueError("任务与发布分支归属不匹配")
+            branch_id = release["branch_id"]
+        if branch_id is not None:
+            sql_result = connection.exec_driver_sql(SQL_ASSIGN_BRANCH, (branch_id, identifier))
             result = row_dict(sql_result)
-            # 发布类任务继承固定候选或父 run 的分支，普通任务保持无分支。
-            if parent and branch_id is not None and parent["branch_id"] != branch_id:
-                raise ValueError("父任务与分支归属不匹配")
-            branch_id = parent["branch_id"] if parent else branch_id
-            if safe_request.get(RELEASE_FIELD):
-                sql_result = connection.exec_driver_sql(SQL_RELEASE_BRANCH, (project_id, safe_request[RELEASE_FIELD]))
-                release = row_dict(sql_result)
-                if not release or branch_id is not None and branch_id != release["branch_id"]:
-                    raise ValueError("任务与发布分支归属不匹配")
-                branch_id = release["branch_id"]
-            if branch_id is not None:
-                sql_result = connection.exec_driver_sql(SQL_ASSIGN_BRANCH, (branch_id, identifier))
-                result = row_dict(sql_result)
-            if write:
-                sql_result = connection.exec_driver_sql(SQL_UPDATE_RUNTIME_PROJECT_SET_3, (identifier, project_id))
-            return result
+        if write:
+            sql_result = connection.exec_driver_sql(SQL_UPDATE_RUNTIME_PROJECT_SET_3, (identifier, project_id))
+        return result
 
     def requeue_options(self, job_id):
         # 同步选项的明确终止失败可重试，沿用原截止时间和总尝试上限。
@@ -579,80 +631,88 @@ class JobStore:
         encoded = json.dumps(payload or {}, ensure_ascii=False, separators=(",", ":"))
         if len(encoded.encode()) > self.max_result_bytes:
             raise ValueError("Job result exceeds configured size limit")
-        with self.db.transaction() as connection:
-            job = self._authorized(connection, job_id, token)
-            if not job:
-                return False
-            if job["kind"] == BUILD_RUN and output_set_id is None:
-                raise ValueError("BUILD_RUN requires a complete validated output artifact set")
-            if output_set_id is not None:
-                if job["input_mode"] == VOLATILE:
-                    raise ValueError("Volatile resources cannot publish durable project artifacts")
-                sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_ARTIFACT_SET_2, (output_set_id,))
-                output = row_dict(sql_result)
-                if not output or output["producer_attempt_id"] != job["attempt_id"] or output["kind"] != EXECUTION:
-                    raise ValueError("Output must belong to the authorized attempt")
-                if output["project_id"] != job["project_id"]:
-                    raise ValueError("Output belongs to a different project")
-                if job["kind"] == BUILD_RUN:
-                    sql_result = connection.exec_driver_sql(SQL_SELECT_RELATIVE_PATH_FROM, (output_set_id,))
-                    files = {row["relative_path"] for row in sql_result.mappings()}
-                    if not REQUIRED_BUILD_FILES.issubset(files):
-                        raise ValueError("BUILD_RUN output is missing required native artifacts")
-                    if not all(output["validation_json"].get(flag) is True for flag in REQUIRED_VALIDATION_FLAGS):
-                        raise ValueError("BUILD_RUN output lacks successful validation evidence")
-                if seal is None:
-                    from .artifacts import ArtifactStore
+        try:
+            with self.db.transaction() as connection:
+                job = self._authorized(connection, job_id, token)
+                if not job:
+                    return False
+                if job["kind"] == BUILD_RUN and output_set_id is None:
+                    raise ValueError("BUILD_RUN requires a complete validated output artifact set")
+                if output_set_id is not None:
+                    if job["input_mode"] == VOLATILE:
+                        raise ValueError("Volatile resources cannot publish durable project artifacts")
+                    sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_ARTIFACT_SET_2, (output_set_id,))
+                    output = row_dict(sql_result)
+                    if not output or output["producer_attempt_id"] != job["attempt_id"] or output["kind"] != EXECUTION:
+                        raise ValueError("Output must belong to the authorized attempt")
+                    if output["project_id"] != job["project_id"]:
+                        raise ValueError("Output belongs to a different project")
+                    if job["kind"] == BUILD_RUN:
+                        sql_result = connection.exec_driver_sql(SQL_SELECT_RELATIVE_PATH_FROM, (output_set_id,))
+                        files = {row["relative_path"] for row in sql_result.mappings()}
+                        if not REQUIRED_BUILD_FILES.issubset(files):
+                            raise ValueError("BUILD_RUN output is missing required native artifacts")
+                        if not all(output["validation_json"].get(flag) is True for flag in REQUIRED_VALIDATION_FLAGS):
+                            raise ValueError("BUILD_RUN output lacks successful validation evidence")
+                    if seal is None:
+                        from .artifacts import ArtifactStore
 
-                    seal = ArtifactStore(self.db).seal
-                seal(output_set_id, connection)
-            sql_result = connection.exec_driver_sql(
-                SQL_INSERT_INTO_RUNTIME_JOB_RESULT,
-                (
-                    str(job_id),
-                    job["attempt_id"],
-                    Json(payload or {}),
-                    stdout_tail.encode()[-self.max_diagnostic_bytes :].decode(errors="ignore"),
-                    stderr_tail.encode()[-self.max_diagnostic_bytes :].decode(errors="ignore"),
-                    exit_code,
-                    output_truncated
-                    or len(stdout_tail.encode()) > self.max_diagnostic_bytes
-                    or len(stderr_tail.encode()) > self.max_diagnostic_bytes,
-                ),
-            )
-            # 业务发布与封存共用事务；兼容 BUILD_RUN 没有 releaseId 时仍只报告 READY。
-            if job["kind"] == BUILD_RUN and job["request_json"].get("releaseId"):
-                from .publications import PublicationStore
+                        seal = ArtifactStore(self.db).seal
+                    seal(output_set_id, connection)
+                sql_result = connection.exec_driver_sql(
+                    SQL_INSERT_INTO_RUNTIME_JOB_RESULT,
+                    (
+                        str(job_id),
+                        job["attempt_id"],
+                        Json(payload or {}),
+                        stdout_tail.encode()[-self.max_diagnostic_bytes :].decode(errors="ignore"),
+                        stderr_tail.encode()[-self.max_diagnostic_bytes :].decode(errors="ignore"),
+                        exit_code,
+                        output_truncated
+                        or len(stdout_tail.encode()) > self.max_diagnostic_bytes
+                        or len(stderr_tail.encode()) > self.max_diagnostic_bytes,
+                    ),
+                )
+                # 业务发布与封存共用事务；兼容 BUILD_RUN 没有 releaseId 时仍只报告 READY。
+                if job["kind"] == BUILD_RUN and job["request_json"].get("releaseId"):
+                    from .publications import PublicationStore
 
-                PublicationStore(self.db).publish_in_transaction(
-                    connection, job_id=job_id, attempt_token=token,
-                    release_id=job["request_json"]["releaseId"], output_set_id=output_set_id,
-                )
-            # 封存校验可能耗时；提交前重新 fencing，失效时连同已封存文件状态一起回滚。
-            if not self._authorized(connection, job_id, token):
-                connection.rollback()
-                return False
-            sql_result = connection.exec_driver_sql(
-                SQL_UPDATE_RUNTIME_ATTEMPT_SET_2,
-                (job["attempt_id"],),
-            )
-            sql_result = connection.exec_driver_sql(
-                SQL_UPDATE_RUNTIME_JOB_SET_5,
-                (output_set_id, str(job_id)),
-            )
-            if job["kind"] == RUN_CLEANUP:
-                sql_result = connection.exec_driver_sql(SQL_UPDATE_RUNTIME_JOB_SET_8, (job["parent_run_id"],))
-                # schema 删除已经确认；保留任务/结果与幂等墓碑，将无引用文件交给 GC。
+                    PublicationStore(self.db).publish_in_transaction(
+                        connection, job_id=job_id, attempt_token=token,
+                        release_id=job["request_json"]["releaseId"], output_set_id=output_set_id,
+                    )
+                # 封存校验可能耗时；提交前重新 fencing，失效时连同已封存文件状态一起回滚。
+                if not self._authorized(connection, job_id, token):
+                    raise _FinishLeaseLost
                 sql_result = connection.exec_driver_sql(
-                    SQL_RELEASE_RUN_ARTIFACTS, (job["parent_run_id"], job["parent_run_id"])
+                    SQL_UPDATE_RUNTIME_ATTEMPT_SET_2,
+                    (job["attempt_id"],),
                 )
-            if job["kind"] == DBT_COMMAND and output_set_id is not None:
                 sql_result = connection.exec_driver_sql(
-                    SQL_UPDATE_RUNTIME_PROJECT_SET_4,
-                    (output_set_id, job["project_id"], job["config_version"], job["input_set_id"], job["input_set_id"]),
+                    SQL_UPDATE_RUNTIME_JOB_SET_5,
+                    (output_set_id, str(job_id)),
                 )
-            self._release_project(connection, job_id)
-            return True
+                if job["kind"] == RUN_CLEANUP:
+                    sql_result = connection.exec_driver_sql(SQL_UPDATE_RUNTIME_JOB_SET_8, (job["parent_run_id"],))
+                    # schema 删除已经确认；保留任务/结果与幂等墓碑，将无引用文件交给 GC。
+                    sql_result = connection.exec_driver_sql(
+                        SQL_RELEASE_RUN_ARTIFACTS, (job["parent_run_id"], job["parent_run_id"])
+                    )
+                if job["kind"] == DBT_COMMAND and output_set_id is not None:
+                    sql_result = connection.exec_driver_sql(
+                        SQL_UPDATE_RUNTIME_PROJECT_SET_4,
+                        (
+                            output_set_id,
+                            job["project_id"],
+                            job["config_version"],
+                            job["input_set_id"],
+                            job["input_set_id"],
+                        ),
+                    )
+                self._release_project(connection, job_id)
+                return True
+        except _FinishLeaseLost:
+            return False
 
     def fail(self, job_id, token, error_code, detail=None, *, stopped=True):
         # 错误详情也有字节预算，禁止在失败路径写入无限增长的异常堆栈。

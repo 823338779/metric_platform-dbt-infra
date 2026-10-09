@@ -11,6 +11,7 @@ from uuid import uuid4
 import psycopg2
 import yaml
 from psycopg2.extras import Json
+from sqlalchemy import Connection
 from sqlalchemy.exc import IntegrityError
 
 from dbt_metricflow_service.execution.artifacts import _is_link
@@ -258,7 +259,7 @@ class ArtifactStore:
                 self.seal(set_id, connection)
         return set_id
 
-    def capture_validation_input(self, project_id: str, payload: bytes, connection, *, version: int = 1) -> str:
+    def capture_validation_input(self, project_id: str, payload: bytes, connection: Connection, *, version: int = 1) -> str:
         """与 job 受理共用事务；专用输入不放宽普通项目快照的文件白名单。"""
         if len(payload) > min(MAX_VALIDATION_INPUT_BYTES, self.max_file_bytes, self.max_set_bytes):
             raise ValueError("validation input exceeds byte limit")
@@ -290,7 +291,7 @@ class ArtifactStore:
                 raise ValueError("artifact set does not exist")
             return {**row["metadata"], **dict(row)}
 
-    def seal(self, set_id: str, connection) -> None:
+    def seal(self, set_id: str, connection: Connection) -> None:
         # 调用方负责租约校验；同一事务锁定集合并核对完整内容后才能发布。
         sql_result = connection.exec_driver_sql(SQL_SET + FOR_UPDATE, (set_id,))
         row = row_dict(sql_result)

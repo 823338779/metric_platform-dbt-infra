@@ -70,3 +70,18 @@ def test_validation_does_not_occupy_writer_or_change_project_pointers(runtime):
     after = runtime.jobs.project(project)
     for field in ("busy_job_id", "source_set_id", "current_output_set_id", "active_published_release_id"):
         assert after[field] == before[field]
+
+
+def test_validation_input_rolls_back_with_job(runtime):
+    project, request = setup(runtime)
+    with pytest.raises(ValueError, match="after job"), runtime.db.transaction() as connection:
+        set_id = runtime.artifacts.capture_validation_input(project, request.model_dump_json().encode(), connection)
+        job = runtime.jobs.reserve_in_transaction(connection, "DRAFT_VALIDATION", project, {}, input_set_id=set_id)
+        raise ValueError("after job")
+    assert runtime.jobs.get(job["job_id"]) is None
+    with pytest.raises(ValueError, match="does not exist"):
+        runtime.artifacts.metadata(set_id)
+    with runtime.db.transaction() as connection:
+        assert connection.exec_driver_sql(
+            "SELECT count(*) FROM runtime_artifact_file WHERE set_id=%s", (set_id,),
+        ).scalar_one() == 0

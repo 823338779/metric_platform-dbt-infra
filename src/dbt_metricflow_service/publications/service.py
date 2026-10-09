@@ -147,8 +147,8 @@ class PublicationService:
                 if prior:
                     return prior
                 raise StoreConflict("分支在源码观察期间已变化，请重新受理")
-            release = self.store.create_candidate(project_id, request, idempotency_key,
-                                                  branch_id=branch["branch_id"], _cursor=connection)
+            release = self.store.create_candidate_in_transaction(connection, project_id, request, idempotency_key,
+                                                  branch_id=branch["branch_id"])
             # 扫描在外部 Git I/O 期间失去租约时，回滚候选及序号，不能迟到受理。
             if _scan_token is not None:
                 sql_result = connection.exec_driver_sql(SQL_SCAN_OWNED, (project_id, branch["branch_id"], _scan_token))
@@ -160,14 +160,14 @@ class PublicationService:
             schema = (
                 validate_schema_name(configured.schema_name) if configured.schema_name else SCHEMA_PREFIX + run_id.hex
             )
-            job = self.runtime.jobs.reserve(
+            job = self.runtime.jobs.reserve_in_transaction(connection, 
                 BUILD, project_id, {**request, "binding": binding, "releaseId": release["release_id"]},
                 job_id=str(run_id), idempotency_scope=SCOPE + project_id + branch["branch_id"],
                 idempotency_key=idempotency_key,
                 config_version=branch["config_version"], toolchain_version=self.runtime.toolchain,
                 schema_name=schema, profile_binding_id=configured.profile_binding_id,
                 timeout_seconds=self.runtime.settings.command_timeout_seconds,
-                expected_revision=project["revision"], _cursor=connection,
+                expected_revision=project["revision"],
             )
             sql_result = connection.exec_driver_sql(SQL_ATTACH_RUN, (job["job_id"], release["release_id"]))
             return {**release, "run_id": job["job_id"]}
@@ -457,14 +457,14 @@ class PublicationService:
                 return recover(prior)
             if project["status"] != ACTIVE_BRANCH or project["active_release_id"] != release["release_id"]:
                 raise ReleaseGone("发布版本已替代")
-            row = self.runtime.jobs.reserve(
+            row = self.runtime.jobs.reserve_in_transaction(connection, 
                 QUERY_KIND, project_id, {"publicationRequest": public, "businessTimezone": timezone,
                                          "engineRequest": engine.model_dump(mode=JSON_MODE, by_alias=True)},
                 idempotency_scope=scope, idempotency_key=request.idempotency_key,
                 parent_run_id=parent["job_id"], input_set_id=parent["output_set_id"],
                 config_version=parent["config_version"], toolchain_version=parent["toolchain_version"],
                 profile_binding_id=parent["profile_binding_id"], schema_name=parent["schema_name"],
-                timeout_seconds=self.runtime.settings.command_timeout_seconds, _cursor=connection,
+                timeout_seconds=self.runtime.settings.command_timeout_seconds,
             )
         return query_receipt(row, project_id, request.release_id)
 

@@ -1,9 +1,9 @@
 """项目的唯一发布存储。"""
 
-from contextlib import nullcontext
 from uuid import UUID, uuid4
 
 from psycopg2.extras import Json
+from sqlalchemy import Connection
 
 from dbt_metricflow_service.storage.rows import row_dict
 
@@ -62,50 +62,65 @@ class PublicationStore:
         self.db = db
 
     def create_candidate(self, project_id: str, request: dict, idempotency_key: str, *,
-                         branch_id: str | None = None, _cursor=None) -> dict:
+                         branch_id: str | None = None) -> dict:
+        # 分支行串行化候选序号与请求幂等；不同分支互不淘汰。
+        with self.db.transaction() as connection:
+            return self.create_candidate_in_transaction(
+                connection, project_id, request, idempotency_key,
+                branch_id=branch_id,
+            )
+
+    def create_candidate_in_transaction(
+        self,
+        connection: Connection,
+        project_id: str,
+        request: dict,
+        idempotency_key: str,
+        *,
+        branch_id: str | None = None,
+    ) -> dict:
         # 分支行串行化候选序号与请求幂等；不同分支互不淘汰。
         if not idempotency_key:
             raise ValueError("候选幂等键不能为空")
-        with nullcontext(_cursor) if _cursor is not None else self.db.transaction() as connection:
-            sql_result = connection.exec_driver_sql(SQL_PARENT_LOCK, (project_id,))
-            sql_result = connection.exec_driver_sql(SQL_BRANCH_LOCK, (project_id, branch_id, branch_id))
-            project = row_dict(sql_result)
-            if not project:
-                raise KeyError(project_id)
-            sql_result = connection.exec_driver_sql(
-                SQL_BRANCH_BY_KEY, (project_id, project["branch_id"], idempotency_key)
-            )
-            prior = row_dict(sql_result)
-            if prior:
-                if prior["request_json"] != request:
-                    raise StoreConflict("候选幂等键已用于不同输入")
-                return prior
-            if project["status"] != ACTIVE:
-                raise StoreConflict("分支当前不接受新候选")
-            sql_result = connection.exec_driver_sql(
-                SQL_CANDIDATE,
-                (
-                    str(uuid4()),
-                    project_id,
-                    project["publication_sequence"] + 1,
-                    idempotency_key,
-                    Json(request),
-                    project["active_release_id"],
-                    project["branch_id"],
-                ),
-            )
-            result = row_dict(sql_result)
-            sql_result = connection.exec_driver_sql(
-                SQL_SEQUENCE,
-                (
-                    result["release_id"],
-                    request.get("commitSha"),
-                    request.get("commitSha"),
-                    project_id,
-                    project["branch_id"],
-                ),
-            )
-            return result
+        sql_result = connection.exec_driver_sql(SQL_PARENT_LOCK, (project_id,))
+        sql_result = connection.exec_driver_sql(SQL_BRANCH_LOCK, (project_id, branch_id, branch_id))
+        project = row_dict(sql_result)
+        if not project:
+            raise KeyError(project_id)
+        sql_result = connection.exec_driver_sql(
+            SQL_BRANCH_BY_KEY, (project_id, project["branch_id"], idempotency_key)
+        )
+        prior = row_dict(sql_result)
+        if prior:
+            if prior["request_json"] != request:
+                raise StoreConflict("候选幂等键已用于不同输入")
+            return prior
+        if project["status"] != ACTIVE:
+            raise StoreConflict("分支当前不接受新候选")
+        sql_result = connection.exec_driver_sql(
+            SQL_CANDIDATE,
+            (
+                str(uuid4()),
+                project_id,
+                project["publication_sequence"] + 1,
+                idempotency_key,
+                Json(request),
+                project["active_release_id"],
+                project["branch_id"],
+            ),
+        )
+        result = row_dict(sql_result)
+        sql_result = connection.exec_driver_sql(
+            SQL_SEQUENCE,
+            (
+                result["release_id"],
+                request.get("commitSha"),
+                request.get("commitSha"),
+                project_id,
+                project["branch_id"],
+            ),
+        )
+        return result
 
     def get_release(self, project_id: str, release_id) -> dict:
         with self.db.transaction() as connection:
@@ -129,7 +144,7 @@ class PublicationStore:
                 active = dict(row_dict(sql_result))
             return {"projectId": project_id, "activePublication": active}
 
-    def publish_in_transaction(self, connection, *, job_id: UUID, attempt_token: str,
+    def publish_in_transaction(self, connection: Connection, *, job_id: UUID, attempt_token: str,
                                release_id: UUID, output_set_id: UUID) -> None:
         # 调用者持有 job/attempt 锁；与受理及清理保持 job → project → release 顺序。
         job = JobStore(self.db)._authorized(connection, job_id, attempt_token)

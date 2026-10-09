@@ -87,12 +87,12 @@ class DraftValidationService:
                         "projectSubdir": binding["projectSubdir"], "bindingDigest": binding_digest(binding), **context}
             if version2:
                 snapshot["gitRef"] = project["git_ref"]
-            job = self.runtime.jobs.reserve(
+            job = self.runtime.jobs.reserve_in_transaction(connection, 
                 DRAFT_VALIDATION, project_id, snapshot, idempotency_scope=scope,
                 idempotency_key=request.idempotency_key, input_set_id=input_set,
                 config_version=project["config_version"], toolchain_version=self.runtime.toolchain,
                 profile_binding_id=binding["profileBindingId"], retry_policy="READ_ONLY",
-                timeout_seconds=self.runtime.settings.command_timeout_seconds, branch_id=branch_id, _cursor=connection,
+                timeout_seconds=self.runtime.settings.command_timeout_seconds, branch_id=branch_id,
             )
             return ValidationReceipt(validation_id=job["job_id"], state=job["status"])
 
