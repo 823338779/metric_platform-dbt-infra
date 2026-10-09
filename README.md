@@ -80,6 +80,27 @@ uv run --frozen dbt-service-admin register-bindings bindings.json
 uv run --frozen dbt-service-admin publish --project-id sales --idempotency-key sales-release-001
 ```
 
+### PostgreSQL 持久化升级
+
+Runtime 使用 SQLAlchemy Core 管理连接池与事务，保留 PostgreSQL 参数化 SQL；跨 Store 操作共享同一个
+Connection，提交和回滚由最外层事务负责。表结构由包内 Alembic revisions 管理，普通服务启动仅检查版本。
+
+升级前备份服务数据库并停止旧服务/worker，安装新版本后运行原有的 `dbt-service-admin migrate`，
+确认成功后再启动服务；就绪检查会核对数据库版本。配置仍使用 `SERVICE_DATABASE_URL`，兼容 PostgreSQL URL
+和 libpq DSN，SSL 与 search_path 等连接选项继续生效。
+
+首次接管支持空库及旧 `runtime_schema_version` 1–5：先核验历史结构，再执行尚未完成的历史 SQL，最后记录
+Alembic revision。旧版本标记保留为 5，之后新增结构变化只添加 Alembic revision，不再修改或扩展归档 SQL。
+迁移由 advisory lock 串行化，重复执行幂等；升级失败会在同一事务中回滚结构、数据和版本记录。
+
+未知版本、多个版本头、缺失列/约束/触发器等不受支持的历史状态会被拒绝。遇到失败，应先检查错误指出的
+表或版本与备份，不要用 `alembic stamp` 绕过核验。本次接管不提供 downgrade；需要退回旧版本时使用已验证备份。
+历史结构契约保存在 `storage/legacy_schema.json`，由归档 SQL 在 PostgreSQL 16 上提取，不在部署时创建影子库。
+
+数据库回归需要独立 PostgreSQL，设置 `SERVICE_TEST_DATABASE_URL` 后运行 `uv run --frozen pytest -q`。
+安装包回归先运行 `uv build --wheel --out-dir dist/persistence-verification`，将生成 wheel 的绝对路径设置为
+`SERVICE_TEST_WHEEL`，再运行 `uv run --frozen pytest tests/test_migration_package.py -q`。
+
 幂等键代表一次发布请求，重试沿用该键；新的发布使用新键。命令返回候选身份，最终状态通过 `GET /v2/projects/sales/releases` 查看。候选固定 Git `main` 的 SHA、项目摘要、配置版本和工具链；配置或 profile 中影响编译/目标关系的参数变化时，必须同步更新绑定的 `configVersion`。
 
 发布自动选择 `FULL_BUILD`、`SEMANTIC_ONLY` 或 `SELECTIVE_BUILD`。所有模式都发布完整目录；仅语义变更复用已验证物理对象，SQL 变更重建受影响下游，宏、source、配置变化或不能证明兼容时全量构建。模板使用 `env_var` 时保守全构建，不持久化环境变量值。首版不执行行级 incremental，不自动清理发布对象。
