@@ -2,7 +2,7 @@
 
 from uuid import uuid4
 
-from dbt_metricflow_service.publication_models import PublishedQueryRequest
+from dbt_metricflow_service.publications.models import PublishedQueryRequest
 from tests.test_publication_queries import query_service
 from tests.test_publication_storage import store as store
 
@@ -41,7 +41,7 @@ def test_capabilities_disclose_project_path_and_time_contract(store, tmp_path):
 def test_query_error_identifies_invalid_dimension(store, tmp_path):
     import pytest
 
-    from dbt_metricflow_service.publication_errors import PublicationError
+    from dbt_metricflow_service.publications.errors import PublicationError
 
     service, job, release = query_service(store, tmp_path)
     request = PublishedQueryRequest(releaseId=release["release_id"], idempotencyKey=uuid4().hex,

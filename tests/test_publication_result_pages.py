@@ -4,8 +4,8 @@ from uuid import uuid4
 
 import pytest
 
-from dbt_metricflow_service.publication_errors import PublicationError
-from dbt_metricflow_service.publication_models import PublishedQueryRequest
+from dbt_metricflow_service.publications.errors import PublicationError
+from dbt_metricflow_service.publications.models import PublishedQueryRequest
 from tests.test_publication_queries import query_service
 from tests.test_publication_storage import store as store
 
@@ -59,7 +59,7 @@ def test_large_row_is_explicit_error_and_small_page_advances_by_returned_rows(st
 
 
 def test_transport_shrinks_whole_rows_and_explain_preserves_sql(monkeypatch):
-    import dbt_metricflow_service.publication_results as results
+    import dbt_metricflow_service.publications.results as results
 
     monkeypatch.setattr(results, "MAX_PAGE_BYTES", 300)
     rows = [["x" * 100], ["y" * 100]]

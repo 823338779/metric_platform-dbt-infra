@@ -4,15 +4,15 @@ from importlib import import_module
 from types import SimpleNamespace
 from uuid import uuid4
 
-from dbt_metricflow_service.platform_bindings import resolve_draft_revision
-from dbt_metricflow_service.publication import PublicationService
+from dbt_metricflow_service.platform.bindings import resolve_draft_revision
+from dbt_metricflow_service.publications.service import PublicationService
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from tests.test_branch_lifecycle import context as context
 from tests.test_platform_bindings import git
 from tests.test_platform_bindings import repository as repository
 from tests.test_publication_storage import store as store
 
-MODULE = "dbt_metricflow_service.branch_diff"
+MODULE = "dbt_metricflow_service.branches.diff"
 MODEL = "models/a.sql"
 SQL = "select 2 as value\n"
 UTF8 = "utf-8"

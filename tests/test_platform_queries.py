@@ -6,8 +6,8 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from dbt_metricflow_service.platform_models import PlatformQueryRequest
-from dbt_metricflow_service.platform_queries import query_options, serialize_rows, validate_query
+from dbt_metricflow_service.platform.models import PlatformQueryRequest
+from dbt_metricflow_service.platform.queries import query_options, serialize_rows, validate_query
 
 
 class FakeEngine:

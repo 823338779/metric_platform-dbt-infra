@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from dbt_metricflow_service.commands import build_dbt_command, build_metricflow_command
-from dbt_metricflow_service.models import (
+from dbt_metricflow_service.execution.commands import build_dbt_command, build_metricflow_command
+from dbt_metricflow_service.execution.models import (
     DbtCommand,
     DbtJobRequest,
     MetricFlowCommand,

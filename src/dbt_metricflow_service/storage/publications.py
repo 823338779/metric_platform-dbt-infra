@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 
 from psycopg2.extras import Json
 
-from ..publication_models import BindingMode, PublishedCatalog
+from ..publications.models import BindingMode, PublishedCatalog
 from .artifacts import MAX_FILE_BYTES, SQL_FILE, SQL_SET, _decode
 from .branches import SQL_BRANCH_LOCK, SQL_BRANCH_READ, SQL_PARENT_LOCK
 from .jobs import JobStore, StoreConflict

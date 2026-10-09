@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from dbt_metricflow_service.platform_metricflow import cleanup_versioned_relations
-from dbt_metricflow_service.platform_runs import PlatformRunCoordinator
-from dbt_metricflow_service.platform_store import PlatformJobStore, RunState
+from dbt_metricflow_service.platform.metricflow import cleanup_versioned_relations
+from dbt_metricflow_service.platform.runs import PlatformRunCoordinator
+from dbt_metricflow_service.platform.store import PlatformJobStore, RunState
 
 
 def ready_run(tmp_path: Path) -> tuple[PlatformRunCoordinator, object, Path]:

@@ -27,7 +27,7 @@ def runtime_pair(tmp_path):
     dsn = os.getenv("SERVICE_TEST_DATABASE_URL")
     if not dsn:
         pytest.skip("需要独立 SERVICE_TEST_DATABASE_URL 测试库")
-    from dbt_metricflow_service.runtime import Runtime
+    from dbt_metricflow_service.runtime.service import Runtime
     from dbt_metricflow_service.storage.postgres import Database
     db = Database(dsn)
     db.migrate()
@@ -64,7 +64,7 @@ def test_queued_build_reports_preparing_state(runtime_pair):
 
 
 async def test_cli_acceptance_and_result_are_shared_without_local_project(runtime_pair):
-    from dbt_metricflow_service.models import DbtJobRequest
+    from dbt_metricflow_service.execution.models import DbtJobRequest
     runtimes, project = runtime_pair
     accepted = await runtimes[0].submit_cli(DbtJobRequest(project=project, command="parse"))
     record = runtimes[1].cli_record(str(accepted.id))
@@ -76,7 +76,7 @@ async def test_cli_acceptance_and_result_are_shared_without_local_project(runtim
 
 
 async def test_volatile_input_is_not_stored_and_queued_owner_loss_finishes(runtime_pair):
-    from dbt_metricflow_service.models import DbtJobRequest
+    from dbt_metricflow_service.execution.models import DbtJobRequest
     runtimes, project = runtime_pair
     original = "version: 2\n# private-request-marker\n"
     accepted = await runtimes[0].submit_cli(DbtJobRequest(
@@ -99,8 +99,8 @@ async def test_postgres_http_uses_shared_store_without_project_mount(runtime_pai
 
     from httpx import ASGITransport, AsyncClient
 
-    from dbt_metricflow_service.api import create_app
-    from dbt_metricflow_service.jobs import JobRunner
+    from dbt_metricflow_service.api.app import create_app
+    from dbt_metricflow_service.execution.runner import JobRunner
     from dbt_metricflow_service.projects import ProjectRegistry
 
     runtimes, project = runtime_pair
@@ -123,7 +123,7 @@ async def test_postgres_http_uses_shared_store_without_project_mount(runtime_pai
 
 
 async def test_failed_cli_exposes_bounded_exit_diagnostics(runtime_pair):
-    from dbt_metricflow_service.models import DbtJobRequest
+    from dbt_metricflow_service.execution.models import DbtJobRequest
     runtimes, project = runtime_pair
     accepted = await runtimes[0].submit_cli(DbtJobRequest(project=project, command="parse"))
     job = runtimes[1].jobs.claim(str(runtimes[1].instance_id), toolchain_version=runtimes[1].toolchain)

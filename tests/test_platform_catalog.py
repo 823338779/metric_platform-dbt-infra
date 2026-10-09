@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from dbt_metricflow_service.platform_catalog import catalog_from_artifacts
+from dbt_metricflow_service.platform.catalog import catalog_from_artifacts
 
 
 def artifacts(tmp_path: Path) -> Path:

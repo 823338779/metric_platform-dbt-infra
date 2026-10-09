@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from resource_helpers import call_worker, make_resource_project
 
-from dbt_metricflow_service.resource_adapter import _BoundedTextCapture
+from dbt_metricflow_service.resources.adapter import _BoundedTextCapture
 
 logger = logging.getLogger(__name__)
 

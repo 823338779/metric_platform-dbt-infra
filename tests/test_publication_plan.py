@@ -4,7 +4,7 @@ from copy import deepcopy
 
 import pytest
 
-from dbt_metricflow_service.publication_plan import plan_publication, validate_publication_evidence
+from dbt_metricflow_service.publications.plan import plan_publication, validate_publication_evidence
 
 
 def state():

@@ -2,7 +2,7 @@
 
 import pytest
 
-from dbt_metricflow_service.platform_bindings import ProjectBinding, observe_revision, resolve_draft_revision
+from dbt_metricflow_service.platform.bindings import ProjectBinding, observe_revision, resolve_draft_revision
 from tests.test_platform_bindings import git
 from tests.test_platform_bindings import repository as repository
 

@@ -8,9 +8,9 @@ from uuid import UUID
 import pytest
 from fastapi.testclient import TestClient
 
-from dbt_metricflow_service.api import create_app
-from dbt_metricflow_service.jobs import ProjectBusyError
-from dbt_metricflow_service.models import CommandSpec, JobRecord, JobStatus
+from dbt_metricflow_service.api.app import create_app
+from dbt_metricflow_service.execution.models import CommandSpec, JobRecord, JobStatus
+from dbt_metricflow_service.execution.runner import ProjectBusyError
 from dbt_metricflow_service.projects import ProjectRegistry
 from dbt_metricflow_service.settings import Settings
 
@@ -163,7 +163,7 @@ def test_nonblank_resources_submit_fixed_worker_without_echoing_yaml(
     assert response.status_code == 202
     assert marker not in response.text
     command = api_dependencies[2].submissions[0][1]
-    assert command.argv[1:] == ("-m", "dbt_metricflow_service.resource_worker")
+    assert command.argv[1:] == ("-m", "dbt_metricflow_service.resources.worker")
     assert command.stdin_data is not None
 
 

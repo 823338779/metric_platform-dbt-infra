@@ -9,7 +9,7 @@ from tests.test_branch_lifecycle import context as context
 from tests.test_platform_bindings import repository as repository
 from tests.test_publication_storage import store as store
 
-MODULE = "dbt_metricflow_service.branch_api"
+MODULE = "dbt_metricflow_service.branches.api"
 PREFIX = "/v2/projects/"
 BRANCHES = "/branches"
 HEADER = "Authorization"

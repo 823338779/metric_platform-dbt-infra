@@ -5,11 +5,11 @@ import importlib
 import pytest
 from fastapi import HTTPException
 
-from dbt_metricflow_service.publication_api import call
+from dbt_metricflow_service.publications.api import call
 
 
 async def test_structured_error_keeps_legacy_code_and_recovery():
-    spec = importlib.util.find_spec("dbt_metricflow_service.publication_errors")
+    spec = importlib.util.find_spec("dbt_metricflow_service.publications.errors")
     assert spec is not None, "structured publication errors are not implemented"
     error_type = importlib.import_module(spec.name).PublicationError
 

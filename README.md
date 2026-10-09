@@ -28,6 +28,29 @@ worker 启动即核对 main 及已登记分支，随后周期扫描弥补事件�
 uv run --frozen pytest -q tests/test_branch_draft_validation.py tests/integration/test_branch_publication_flow.py
 ```
 
+## Python 包结构
+
+`src/dbt_metricflow_service/` 按职责组织，业务包内使用 `service.py`、`models.py`、`api.py` 等名称，避免在顶层堆叠带业务前缀的模块。
+
+| Package | 职责 |
+| --- | --- |
+| `api` | HTTP 应用装配、兼容模式与 PostgreSQL 模式入口、请求限制 |
+| `branches` | 分支生命周期、差异、事件同步和分支路由 |
+| `publications` | 发布服务、构建计划、目录、查询契约、结果和兼容迁移 |
+| `validation` | 草稿验证模型、任务受理、执行和验证 worker |
+| `platform` | 固定版本项目绑定、命名空间、构建、目录与 MetricFlow 查询 |
+| `runtime` | PostgreSQL 运行时、任务调度、执行器和临时工作区 |
+| `execution` | 通用 CLI 命令、任务模型、子进程运行器和本地产物管理 |
+| `resources` | 请求级 YAML 资源校验、输入协议、命令适配与隔离 worker |
+| `adapters` | 数据仓库 adapter 支持范围和 StarRocks MetricFlow 适配 |
+| `storage` | PostgreSQL 连接、任务、分支、发布、产物存储及 SQL 迁移 |
+
+顶层保留启动入口 `main.py`、管理命令 `admin.py`、配置 `settings.py` 和本地项目注册 `projects.py`。启动命令与 HTTP 接口保持不变；内部 Python 导入使用新路径，例如 `dbt_metricflow_service.publications.service` 和 `dbt_metricflow_service.execution.runner`。
+
+各包的 `__init__.py` 仅说明职责，调用方直接导入具体模块，避免导入一个包时隐式加载全部业务依赖。业务路由放在所属业务包，`api` 负责装配；持久存储和迁移统一放在 `storage`，原有平台兼容模式的 SQLite 存储保留在 `platform.store`。
+
+子进程入口分别为 `dbt_metricflow_service.resources.worker`、`dbt_metricflow_service.validation.worker` 和 `dbt_metricflow_service.platform.metricflow`，新增调用应使用这些模块路径。工具链指纹继续覆盖整个服务源码目录。
+
 ## 版本基线
 
 - Python `3.11` 至 `3.14`；本地推荐 Python `3.12`

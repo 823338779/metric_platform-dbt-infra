@@ -5,7 +5,7 @@ from uuid import UUID
 
 import pytest
 
-from dbt_metricflow_service.platform_namespace import (
+from dbt_metricflow_service.platform.namespace import (
     prepare_versioned_project,
     run_prefix,
     validate_versioned_manifest,

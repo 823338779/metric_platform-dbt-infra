@@ -10,7 +10,7 @@ from uuid import uuid4
 import pytest
 from resource_helpers import make_resource_project
 
-from dbt_metricflow_service.draft_validation_models import DraftChange
+from dbt_metricflow_service.validation.models import DraftChange
 from tests.test_draft_validation_storage import runtime as runtime
 from tests.test_draft_validation_storage import service, setup
 from tests.test_platform_bindings import git
@@ -18,7 +18,7 @@ from tests.test_publication_storage import store as store
 
 
 def validate(tmp_path, modify=None):
-    spec = importlib.util.find_spec("dbt_metricflow_service.draft_validation_worker")
+    spec = importlib.util.find_spec("dbt_metricflow_service.validation.worker")
     assert spec is not None, "isolated dbt validation worker is not implemented"
     project, profiles, *_ = make_resource_project(tmp_path)
     if modify:
@@ -73,7 +73,7 @@ def test_deleted_semantic_definition_is_invalid(tmp_path):
 
 
 def test_missing_profile_environment_is_infrastructure_failure(tmp_path, monkeypatch):
-    from dbt_metricflow_service.draft_validation_worker import validate_project
+    from dbt_metricflow_service.validation.worker import validate_project
 
     monkeypatch.delenv("AGENT_FIXTURE_MISSING_ENV", raising=False)
     project, profiles, _ = make_resource_project(tmp_path)
@@ -85,7 +85,7 @@ def test_missing_profile_environment_is_infrastructure_failure(tmp_path, monkeyp
 
 
 def test_changes_use_complete_paths_and_old_hash(tmp_path):
-    spec = importlib.util.find_spec("dbt_metricflow_service.draft_validation_execution")
+    spec = importlib.util.find_spec("dbt_metricflow_service.validation.execution")
     assert spec is not None, "draft change application is not implemented"
     apply = importlib.import_module(spec.name).apply_changes
     project, *_ = make_resource_project(tmp_path)
@@ -103,8 +103,8 @@ def test_changes_use_complete_paths_and_old_hash(tmp_path):
 
 @pytest.mark.parametrize("schema_from_environment", [False, True])
 async def test_actual_executor_finishes_without_replacing_any_pointer(runtime, tmp_path, schema_from_environment):
-    from dbt_metricflow_service.draft_validation_models import DraftValidationRequest
-    from dbt_metricflow_service.runtime_execution import RuntimeExecutor
+    from dbt_metricflow_service.runtime.executor import RuntimeExecutor
+    from dbt_metricflow_service.validation.models import DraftValidationRequest
 
     project_path, profiles, _ = make_resource_project(tmp_path)
     if schema_from_environment:

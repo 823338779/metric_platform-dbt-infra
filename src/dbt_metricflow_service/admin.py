@@ -12,14 +12,14 @@ from uuid import UUID, uuid4
 
 from psycopg2.extras import Json
 
-from dbt_metricflow_service.job_artifacts import _is_link
-from dbt_metricflow_service.platform_bindings import _prefix
-from dbt_metricflow_service.platform_catalog import catalog_from_artifacts
-from dbt_metricflow_service.platform_models import PlatformQueryRequest, PlatformRunRequest
-from dbt_metricflow_service.platform_namespace import validate_schema_name
-from dbt_metricflow_service.platform_runs import validate_artifacts
+from dbt_metricflow_service.execution.artifacts import _is_link
+from dbt_metricflow_service.platform.bindings import _prefix
+from dbt_metricflow_service.platform.catalog import catalog_from_artifacts
+from dbt_metricflow_service.platform.models import PlatformQueryRequest, PlatformRunRequest
+from dbt_metricflow_service.platform.namespace import validate_schema_name
+from dbt_metricflow_service.platform.runs import validate_artifacts
 from dbt_metricflow_service.projects import PROJECT_NAME_PATTERN
-from dbt_metricflow_service.runtime import current_toolchain
+from dbt_metricflow_service.runtime.service import current_toolchain
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.jobs import JobStore
@@ -343,7 +343,7 @@ def main(argv: list[str] | None = None) -> None:
         else:
             db.check()
             if args.command == IMPORT_PUBLICATION:
-                from dbt_metricflow_service.publication_migration import import_publication
+                from dbt_metricflow_service.publications.migration import import_publication
 
                 result = import_publication(db, _artifacts(db, settings),
                                             _json(args.file, settings.max_artifact_file_bytes), dry_run=args.dry_run)
@@ -351,7 +351,7 @@ def main(argv: list[str] | None = None) -> None:
                 # 管理入口只受理服务绑定，不启动 worker、不读取平台数据库。
                 from types import SimpleNamespace
 
-                from dbt_metricflow_service.publication import PublicationService
+                from dbt_metricflow_service.publications.service import PublicationService
 
                 runtime = SimpleNamespace(db=db, jobs=JobStore(db), settings=settings,
                                           toolchain=settings.toolchain_version or current_toolchain())

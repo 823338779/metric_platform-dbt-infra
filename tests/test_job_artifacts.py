@@ -9,14 +9,14 @@ from uuid import uuid4
 import pytest
 from test_jobs import command_spec
 
-from dbt_metricflow_service.job_artifacts import (
+from dbt_metricflow_service.execution.artifacts import (
     FINISHED_MARKER,
     create_job_directory,
     recover_finished_directories,
     remove_job_directory,
 )
-from dbt_metricflow_service.jobs import JobRunner
-from dbt_metricflow_service.models import JobStatus
+from dbt_metricflow_service.execution.models import JobStatus
+from dbt_metricflow_service.execution.runner import JobRunner
 
 logger = logging.getLogger(__name__)
 

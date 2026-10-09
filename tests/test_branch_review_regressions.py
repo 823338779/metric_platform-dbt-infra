@@ -8,8 +8,8 @@ from uuid import uuid4
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from dbt_metricflow_service.branch_events import create_branch_event_router
-from dbt_metricflow_service.branch_models import RegisterBranchRequest
+from dbt_metricflow_service.branches.events import create_branch_event_router
+from dbt_metricflow_service.branches.models import RegisterBranchRequest
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from tests.test_branch_lifecycle import context as context
 from tests.test_platform_bindings import git
@@ -90,8 +90,8 @@ def test_source_without_matching_release_does_not_claim_current_main_catalog(con
 
 def test_old_scan_observation_cannot_supersede_explicit_build(context, repository, monkeypatch):
     # 扫描读完旧 head 后显式受理新 head，恢复扫描必须放弃旧输入。
-    from dbt_metricflow_service import branch_sync
-    from dbt_metricflow_service.publication import PublicationService
+    import dbt_metricflow_service.branches.sync as branch_sync
+    from dbt_metricflow_service.publications.service import PublicationService
     from tests.test_branch_sync import scanner
 
     sync, service, project, branch = scanner(context)
@@ -153,7 +153,7 @@ def test_owned_create_recovery_accepts_normal_descendant(context, repository, mo
 
 
 def test_v2_rejects_unsupported_manifest_policy(tmp_path):
-    from dbt_metricflow_service.draft_validation_worker import validate_project
+    from dbt_metricflow_service.validation.worker import validate_project
     from tests.resource_helpers import make_resource_project
 
     project, profiles, _ = make_resource_project(tmp_path)
@@ -167,7 +167,7 @@ def test_v2_rejects_unsupported_manifest_policy(tmp_path):
 def test_failed_release_exposes_safe_attempt_summary(store, tmp_path):
     from types import SimpleNamespace
 
-    from dbt_metricflow_service.publication import PublicationService
+    from dbt_metricflow_service.publications.service import PublicationService
     from tests.test_branch_publication import SelectedStore, branch_pair
     from tests.test_publication_transaction import prepared
 
@@ -192,7 +192,7 @@ def test_upgrade_fences_inflight_preview(store, tmp_path):
 
 
 def test_failed_check_summary_does_not_expose_sql_or_stderr(tmp_path):
-    from dbt_metricflow_service.branch_validation_summary import failure_summary
+    from dbt_metricflow_service.branches.validation_summary import failure_summary
 
     (tmp_path / "run_results.json").write_text(json.dumps({"results": [
         {"unique_id": "test.project.fail", "status": "fail", "message": "SECRET sql and connection"}]}),
@@ -204,7 +204,7 @@ def test_failed_check_summary_does_not_expose_sql_or_stderr(tmp_path):
 
 
 def test_branch_release_list_carries_fixed_context(store, tmp_path):
-    from dbt_metricflow_service.publication import PublicationService
+    from dbt_metricflow_service.publications.service import PublicationService
     from tests.test_branch_catalog import published_pair
 
     runtime, project, branch, _, release, _ = published_pair(store, tmp_path)

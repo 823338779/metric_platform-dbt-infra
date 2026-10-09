@@ -11,10 +11,10 @@ import psycopg2
 import pytest
 from psycopg2 import sql
 
-from dbt_metricflow_service.publication import PublicationService, ReleaseGone
-from dbt_metricflow_service.publication_models import PublishedQueryRequest, QueryOptionsRequest
-from dbt_metricflow_service.runtime import Runtime
-from dbt_metricflow_service.runtime_execution import ExecutionError, RuntimeExecutor
+from dbt_metricflow_service.publications.models import PublishedQueryRequest, QueryOptionsRequest
+from dbt_metricflow_service.publications.service import PublicationService, ReleaseGone
+from dbt_metricflow_service.runtime.executor import ExecutionError, RuntimeExecutor
+from dbt_metricflow_service.runtime.service import Runtime
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.postgres import Database
 from tests.integration.test_postgres_platform_flow import FIXTURE, PROFILES, git

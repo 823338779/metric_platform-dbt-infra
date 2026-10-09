@@ -8,9 +8,9 @@ from uuid import uuid4
 import psycopg2
 import pytest
 
+from dbt_metricflow_service.runtime.workspace import materialized_workspace
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.postgres import Database
-from dbt_metricflow_service.workspace import materialized_workspace
 
 # 所有集成测试使用独立项目，允许不同仓储测试并行执行。
 DATABASE_ENV = "SERVICE_TEST_DATABASE_URL"

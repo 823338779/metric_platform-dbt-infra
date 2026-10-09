@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from dbt_metricflow_service.platform_bindings import ProjectBinding, load_bindings, resolve_revision
-from dbt_metricflow_service.platform_models import PlatformRunRequest
+from dbt_metricflow_service.platform.bindings import ProjectBinding, load_bindings, resolve_revision
+from dbt_metricflow_service.platform.models import PlatformRunRequest
 
 
 def git(repo: Path, *args: str) -> str:
@@ -59,7 +59,7 @@ def test_resolve_fixed_sha_and_digest(repository: Path, tmp_path: Path) -> None:
 
 
 def test_draft_resolves_exact_old_main_commit_without_published_digest(repository, tmp_path):
-    from dbt_metricflow_service import platform_bindings
+    import dbt_metricflow_service.platform.bindings as platform_bindings
 
     assert hasattr(platform_bindings, "resolve_draft_revision"), "draft baseline resolver is not implemented"
     old = git(repository, "rev-parse", "HEAD")

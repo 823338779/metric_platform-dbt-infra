@@ -8,17 +8,17 @@ from uuid import uuid4
 import pytest
 from resource_helpers import make_resource_project
 
-from dbt_metricflow_service.draft_validation import DraftValidationService
-from dbt_metricflow_service.draft_validation_models import DraftChange
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.jobs import StoreConflict
+from dbt_metricflow_service.validation.models import DraftChange
+from dbt_metricflow_service.validation.service import DraftValidationService
 from tests.test_branch_lifecycle import context as context
 from tests.test_draft_validation_storage import runtime as runtime
 from tests.test_platform_bindings import git
 from tests.test_platform_bindings import repository as repository
 from tests.test_publication_storage import store as store
 
-MODELS = "dbt_metricflow_service.draft_validation_models"
+MODELS = "dbt_metricflow_service.validation.models"
 CHANGE = {"path": "models/new.sql", "operation": "CREATE", "content": "select 1 as amount\n"}
 FIXTURE = Path(__file__).parent / "fixtures/agent_contract/changes-v2.json"
 
@@ -82,7 +82,7 @@ def test_v2_digest_matches_cross_language_fixture():
 
 def test_v2_compile_rejects_model_ddl_without_executing_it(tmp_path):
     # dbt parse 不验证 SQL 语法，v2 必须在执行任何模型前拒绝写语句。
-    from dbt_metricflow_service.draft_validation_worker import validate_project
+    from dbt_metricflow_service.validation.worker import validate_project
 
     project, profiles, _ = make_resource_project(tmp_path)
     (project / "models/danger.sql").write_text("drop table forbidden_table", encoding="utf-8")
@@ -93,7 +93,7 @@ def test_v2_compile_rejects_model_ddl_without_executing_it(tmp_path):
 
 def test_v2_accepts_supported_sql_test_in_private_copy(tmp_path):
     # tests 下定义属于 v2 范围，只应用任务副本，不放宽 v1 model-paths。
-    from dbt_metricflow_service.draft_validation_execution import apply_changes
+    from dbt_metricflow_service.validation.execution import apply_changes
 
     project, _, _ = make_resource_project(tmp_path)
     draft = request("a" * 40, changes=[{**CHANGE, "path": "tests/check_amount.sql"}])
@@ -103,9 +103,9 @@ def test_v2_accepts_supported_sql_test_in_private_copy(tmp_path):
 
 async def test_sql_and_yaml_changes_are_validated_on_feature_baseline(runtime, tmp_path):
     # 真实 dbt 进程从 feature 独有 SHA 解析 SQL/YAML/测试，生产指针保持为空。
-    from dbt_metricflow_service.branch_models import CreateBranchRequest
-    from dbt_metricflow_service.branches import BranchService
-    from dbt_metricflow_service.runtime_execution import RuntimeExecutor
+    from dbt_metricflow_service.branches.models import CreateBranchRequest
+    from dbt_metricflow_service.branches.service import BranchService
+    from dbt_metricflow_service.runtime.executor import RuntimeExecutor
     from dbt_metricflow_service.storage.branches import BranchStore
 
     project_path, profiles, _ = make_resource_project(tmp_path)

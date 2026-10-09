@@ -9,8 +9,8 @@ from uuid import UUID
 import pytest
 from fastapi.testclient import TestClient
 
-from dbt_metricflow_service.api import create_app
-from dbt_metricflow_service.models import CommandSpec, JobRecord, JobStatus
+from dbt_metricflow_service.api.app import create_app
+from dbt_metricflow_service.execution.models import CommandSpec, JobRecord, JobStatus
 from dbt_metricflow_service.projects import ProjectRegistry
 from dbt_metricflow_service.settings import Settings
 

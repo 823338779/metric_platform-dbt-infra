@@ -7,7 +7,7 @@ from uuid import uuid4
 import pytest
 
 from dbt_metricflow_service.admin import import_legacy, import_project, reconcile_attempt, register_bindings
-from dbt_metricflow_service.platform_catalog import CATALOG_SCHEMA, MANIFEST_SCHEMA
+from dbt_metricflow_service.platform.catalog import CATALOG_SCHEMA, MANIFEST_SCHEMA
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.jobs import JobStore

@@ -4,7 +4,7 @@ from uuid import uuid4
 
 import pytest
 
-from dbt_metricflow_service.publication_compatibility import submit_legacy
+from dbt_metricflow_service.publications.compatibility import submit_legacy
 from tests.test_publication_queries import query_service
 from tests.test_publication_storage import store as store
 

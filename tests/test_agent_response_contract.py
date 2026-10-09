@@ -7,9 +7,9 @@ from types import SimpleNamespace
 
 from fastapi import FastAPI
 
-from dbt_metricflow_service.draft_validation_models import ValidationResult
-from dbt_metricflow_service.publication_api import create_publication_router
-from dbt_metricflow_service.publication_models import OptionsTask, QueryResultPage, QueryStatus
+from dbt_metricflow_service.publications.api import create_publication_router
+from dbt_metricflow_service.publications.models import OptionsTask, QueryResultPage, QueryStatus
+from dbt_metricflow_service.validation.models import ValidationResult
 
 
 def test_shared_fixture_matches_typed_contract_and_hash_manifest():

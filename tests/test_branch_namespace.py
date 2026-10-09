@@ -2,8 +2,8 @@
 
 from uuid import UUID, uuid4
 
-from dbt_metricflow_service.platform_namespace import run_prefix
-from dbt_metricflow_service.publication import PublicationService
+from dbt_metricflow_service.platform.namespace import run_prefix
+from dbt_metricflow_service.publications.service import PublicationService
 from tests.test_branch_lifecycle import context as context
 from tests.test_platform_bindings import repository as repository
 from tests.test_publication_storage import store as store

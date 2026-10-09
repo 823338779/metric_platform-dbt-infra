@@ -11,7 +11,7 @@ from tests.test_publication_storage import store as store
 
 
 def test_admit_and_poll_is_project_scoped(runtime):
-    spec = importlib.util.find_spec("dbt_metricflow_service.draft_validation_api")
+    spec = importlib.util.find_spec("dbt_metricflow_service.validation.api")
     assert spec is not None, "draft validation routes are not implemented"
     app = FastAPI()
     app.include_router(importlib.import_module(spec.name).create_draft_validation_router(runtime))

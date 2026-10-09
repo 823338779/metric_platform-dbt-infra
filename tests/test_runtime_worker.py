@@ -11,9 +11,9 @@ async def test_two_workers_execute_persisted_task_once(tmp_path, monkeypatch):
     dsn = os.getenv("SERVICE_TEST_DATABASE_URL")
     if not dsn:
         pytest.skip("需要独立 PostgreSQL 测试库")
-    from dbt_metricflow_service.runtime import Runtime
-    from dbt_metricflow_service.runtime_execution import ExecutionResult, RuntimeExecutor
-    from dbt_metricflow_service.worker import Worker
+    from dbt_metricflow_service.runtime.executor import ExecutionResult, RuntimeExecutor
+    from dbt_metricflow_service.runtime.service import Runtime
+    from dbt_metricflow_service.runtime.worker import Worker
     runtimes = [Runtime(Settings(
         projects_root=tmp_path, profiles_dir=tmp_path, command_timeout_seconds=30,
         max_output_bytes=1024, database_url=dsn, temp_root=tmp_path / str(i),

@@ -13,8 +13,8 @@ from psycopg2 import sql
 from psycopg2.extensions import parse_dsn
 from psycopg2.extras import Json
 
-from dbt_metricflow_service import runtime_execution
-from dbt_metricflow_service.runtime_execution import ExecutionError, RuntimeExecutor
+import dbt_metricflow_service.runtime.executor as runtime_execution
+from dbt_metricflow_service.runtime.executor import ExecutionError, RuntimeExecutor
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.jobs import JobStore

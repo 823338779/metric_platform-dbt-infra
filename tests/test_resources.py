@@ -5,7 +5,7 @@ import logging
 import pytest
 from pydantic import ValidationError
 
-from dbt_metricflow_service.models import DbtJobRequest, MetricFlowJobRequest
+from dbt_metricflow_service.execution.models import DbtJobRequest, MetricFlowJobRequest
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +63,7 @@ def test_debug_accepts_only_blank_resources() -> None:
 
 
 def test_worker_protocol_validates_kind_and_resources() -> None:
-    from dbt_metricflow_service.resource_protocol import WorkerRequest
+    from dbt_metricflow_service.resources.protocol import WorkerRequest
 
     payload = {"kind": "dbt", "request": {"project": "sales", "command": "parse", "resources": {"a.yml": "{}"}}}
     assert WorkerRequest.model_validate(payload).kind == "dbt"

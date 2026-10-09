@@ -3,8 +3,8 @@
 from types import MethodType
 from uuid import uuid4
 
-from dbt_metricflow_service.publication_models import QueryOptionsRequest
-from dbt_metricflow_service.runtime import Runtime
+from dbt_metricflow_service.publications.models import QueryOptionsRequest
+from dbt_metricflow_service.runtime.service import Runtime
 from tests.test_publication_queries import query_service
 from tests.test_publication_storage import store as store
 
@@ -27,7 +27,7 @@ def test_options_admission_deduplicates_and_reads_same_mapping(store, tmp_path):
     assert result["options"] == service.query_options(job["project_id"], request)["options"]
     import pytest
 
-    from dbt_metricflow_service.publication import ReleaseGone
+    from dbt_metricflow_service.publications.service import ReleaseGone
     from tests.test_publication_result_pages import queued
     from tests.test_publication_transaction import prepared
 

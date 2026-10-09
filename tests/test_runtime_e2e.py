@@ -61,7 +61,7 @@ def test_real_build_and_queries_survive_receiving_process_exit(tmp_path):
     # 工厂脚本在测试临时目录生成，不依赖本地项目挂载或持久产物目录。
     factory = tmp_path / "server.py"
     factory.write_text(
-        "from dbt_metricflow_service.runtime_api import create_runtime_app\n"
+        "from dbt_metricflow_service.api.runtime import create_runtime_app\n"
         "from dbt_metricflow_service.settings import Settings\n"
         "app=create_runtime_app(Settings.from_environment())\n", encoding="utf-8",
     )

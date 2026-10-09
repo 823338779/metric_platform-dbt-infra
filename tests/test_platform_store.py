@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from dbt_metricflow_service.platform_store import PlatformJobStore, RunState
+from dbt_metricflow_service.platform.store import PlatformJobStore, RunState
 
 
 def test_same_key_returns_same_run_across_reopen(tmp_path: Path) -> None:

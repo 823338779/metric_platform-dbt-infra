@@ -3,13 +3,13 @@
 from importlib import import_module
 from uuid import uuid4
 
-from dbt_metricflow_service.publication import PublicationService
+from dbt_metricflow_service.publications.service import PublicationService
 from tests.test_branch_lifecycle import context as context
 from tests.test_platform_bindings import git
 from tests.test_platform_bindings import repository as repository
 from tests.test_publication_storage import store as store
 
-MODULE = "dbt_metricflow_service.branch_sync"
+MODULE = "dbt_metricflow_service.branches.sync"
 SQL_DUE = "UPDATE runtime_branch SET scan_expires_at=now()-interval '1 second' WHERE project_id=%s"
 SQL_FAIL = "UPDATE runtime_release SET state='FAILED' WHERE release_id=%s"
 

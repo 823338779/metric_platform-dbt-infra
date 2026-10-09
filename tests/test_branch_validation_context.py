@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 
-from dbt_metricflow_service.publication import PublicationService
+from dbt_metricflow_service.publications.service import PublicationService
 
 
 def test_branch_publication_exposes_current_validation_context_without_changing_legacy(monkeypatch):

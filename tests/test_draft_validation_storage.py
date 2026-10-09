@@ -7,14 +7,14 @@ from uuid import uuid4
 
 import pytest
 
-from dbt_metricflow_service.draft_validation_models import DraftValidationRequest
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.jobs import JobStore, StoreConflict
+from dbt_metricflow_service.validation.models import DraftValidationRequest
 from tests.test_publication_storage import store as store
 
 
 def service(runtime):
-    spec = importlib.util.find_spec("dbt_metricflow_service.draft_validation")
+    spec = importlib.util.find_spec("dbt_metricflow_service.validation.service")
     assert spec is not None, "durable draft validation admission is not implemented"
     return importlib.import_module(spec.name).DraftValidationService(runtime)
 

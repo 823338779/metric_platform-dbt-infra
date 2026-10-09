@@ -8,8 +8,8 @@ from uuid import uuid4
 
 import pytest
 
-from dbt_metricflow_service.publication import PublicationService, ReleaseGone
-from dbt_metricflow_service.publication_models import PublishedQueryRequest, QueryOptionsRequest
+from dbt_metricflow_service.publications.models import PublishedQueryRequest, QueryOptionsRequest
+from dbt_metricflow_service.publications.service import PublicationService, ReleaseGone
 from dbt_metricflow_service.storage.jobs import StoreConflict
 from tests.test_publication_catalog import build
 from tests.test_publication_storage import store as store

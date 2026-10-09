@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from dbt_metricflow_service.publication_api import create_publication_router
+from dbt_metricflow_service.publications.api import create_publication_router
 from tests.test_publication_storage import store as store
 from tests.test_publication_transaction import prepared
 

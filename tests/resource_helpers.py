@@ -11,7 +11,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_FIXTURE = REPOSITORY_ROOT / "tests" / "fixtures" / "dbt_project"
-WORKER_MODULE = "dbt_metricflow_service.resource_worker"
+WORKER_MODULE = "dbt_metricflow_service.resources.worker"
 ResourceProject = tuple[Path, Path, Path]
 
 

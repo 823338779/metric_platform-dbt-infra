@@ -3,7 +3,7 @@
 from types import SimpleNamespace
 from uuid import uuid4
 
-from dbt_metricflow_service.publication import PublicationService
+from dbt_metricflow_service.publications.service import PublicationService
 from dbt_metricflow_service.storage.jobs import JobStore
 from tests.test_platform_bindings import digest, git
 from tests.test_platform_bindings import repository as repository

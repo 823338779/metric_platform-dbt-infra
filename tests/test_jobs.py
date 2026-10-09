@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from dbt_metricflow_service.jobs import JobRunner, ProjectBusyError
-from dbt_metricflow_service.models import CommandSpec, JobStatus
+from dbt_metricflow_service.execution.models import CommandSpec, JobStatus
+from dbt_metricflow_service.execution.runner import JobRunner, ProjectBusyError
 
 logger = logging.getLogger(__name__)
 

@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from dbt_metricflow_service.platform_catalog import CATALOG_SCHEMA, MANIFEST_SCHEMA
-from dbt_metricflow_service.platform_runs import build_platform_command, validate_artifacts
+from dbt_metricflow_service.platform.catalog import CATALOG_SCHEMA, MANIFEST_SCHEMA
+from dbt_metricflow_service.platform.runs import build_platform_command, validate_artifacts
 
 
 def empty_artifacts(target: Path) -> None:
@@ -48,10 +48,10 @@ def test_incomplete_manifest_cannot_be_published_as_empty(tmp_path: Path, missin
 def test_empty_build_reaches_ready_without_metricflow_probe(tmp_path: Path, monkeypatch) -> None:
     import asyncio
 
-    from dbt_metricflow_service.platform_bindings import ProjectBinding
-    from dbt_metricflow_service.platform_models import PlatformRunRequest
-    from dbt_metricflow_service.platform_runs import PlatformRunCoordinator
-    from dbt_metricflow_service.platform_store import PlatformJobStore, RunState
+    from dbt_metricflow_service.platform.bindings import ProjectBinding
+    from dbt_metricflow_service.platform.models import PlatformRunRequest
+    from dbt_metricflow_service.platform.runs import PlatformRunCoordinator
+    from dbt_metricflow_service.platform.store import PlatformJobStore, RunState
 
     project = tmp_path / "project"
     empty_artifacts(project / "target")
@@ -60,13 +60,13 @@ def test_empty_build_reaches_ready_without_metricflow_probe(tmp_path: Path, monk
     run_dir = tmp_path / "artifacts" / str(run_id)
     run_dir.mkdir(parents=True)
     coordinator = PlatformRunCoordinator(store, {}, tmp_path / "artifacts", tmp_path / "profiles")
-    monkeypatch.setattr("dbt_metricflow_service.platform_runs.resolve_revision", lambda *args: project)
+    monkeypatch.setattr("dbt_metricflow_service.platform.runs.resolve_revision", lambda *args: project)
     monkeypatch.setattr(coordinator, "_execute", lambda *args: None)
 
     def unexpected_probe(*args):
         raise AssertionError("Empty projects cannot execute a metric query")
 
-    monkeypatch.setattr("dbt_metricflow_service.platform_runs.invoke_programmatic", unexpected_probe)
+    monkeypatch.setattr("dbt_metricflow_service.platform.runs.invoke_programmatic", unexpected_probe)
     request = PlatformRunRequest(
         projectId="sample", commitSha="a" * 40, projectDigest="b" * 64,
         profileBindingId="postgres", configVersion="1", idempotencyKey="empty",
@@ -127,9 +127,9 @@ def test_ready_requires_sha_digests_tests_relations_and_query_probe(tmp_path: Pa
 
 
 def test_profile_binding_mismatch_is_rejected() -> None:
-    from dbt_metricflow_service.platform_bindings import ProjectBinding
-    from dbt_metricflow_service.platform_models import PlatformRunRequest
-    from dbt_metricflow_service.platform_runs import validate_request_binding
+    from dbt_metricflow_service.platform.bindings import ProjectBinding
+    from dbt_metricflow_service.platform.models import PlatformRunRequest
+    from dbt_metricflow_service.platform.runs import validate_request_binding
 
     request = PlatformRunRequest(
         projectId="sample", commitSha="a" * 40, projectDigest="b" * 64,

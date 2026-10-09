@@ -10,7 +10,7 @@ import pytest
 import yaml
 from resource_helpers import make_resource_project
 
-from dbt_metricflow_service.publication_build import (
+from dbt_metricflow_service.publications.build import (
     apply_relation_bindings,
     validate_bound_manifest,
     validate_readonly_sql,
@@ -27,7 +27,7 @@ from tests.test_publication_catalog import package
 ])
 def test_only_configured_freshness_thresholds_require_execution(freshness, expected):
     """原生 manifest 的空阈值对象不是 freshness 规则，零阈值则是有效规则。"""
-    from dbt_metricflow_service.publication_build import requires_source_freshness
+    from dbt_metricflow_service.publications.build import requires_source_freshness
 
     assert requires_source_freshness({"freshness": freshness}) is expected
 

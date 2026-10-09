@@ -12,7 +12,7 @@ import psycopg2
 import yaml
 from psycopg2.extras import Json
 
-from dbt_metricflow_service.job_artifacts import _is_link
+from dbt_metricflow_service.execution.artifacts import _is_link
 from dbt_metricflow_service.storage.postgres import Database
 
 # 快照边界限定数据库占用，以及还原时单文件解压的最大内存。
@@ -261,7 +261,7 @@ class ArtifactStore:
         if len(payload) > min(MAX_VALIDATION_INPUT_BYTES, self.max_file_bytes, self.max_set_bytes):
             raise ValueError("validation input exceeds byte limit")
         # artifact 即使被其他内部调用者提交，也必须符合公开草稿协议。
-        from dbt_metricflow_service.draft_validation_models import BranchDraftValidationRequest, DraftValidationRequest
+        from dbt_metricflow_service.validation.models import BranchDraftValidationRequest, DraftValidationRequest
 
         # 受理端显式选择协议版本；旧接口不因载荷包含新字段而自动升级。
         model = BranchDraftValidationRequest if version == 2 else DraftValidationRequest

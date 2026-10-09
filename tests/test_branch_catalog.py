@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from dbt_metricflow_service.publication import PublicationService, ReleaseGone
+from dbt_metricflow_service.publications.service import PublicationService, ReleaseGone
 from tests.test_branch_publication import SelectedStore, branch_pair
 from tests.test_publication_storage import store as store
 from tests.test_publication_transaction import prepared

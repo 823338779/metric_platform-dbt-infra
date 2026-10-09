@@ -12,7 +12,7 @@ from tests.test_request_limits import _invoke
 
 def contract():
     # 延迟加载使缺失实现显示为测试失败，后续断言仍测试实际公开契约。
-    spec = importlib.util.find_spec("dbt_metricflow_service.draft_validation_models")
+    spec = importlib.util.find_spec("dbt_metricflow_service.validation.models")
     assert spec is not None, "draft validation contract is not implemented"
     return importlib.import_module(spec.name)
 

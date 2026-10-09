@@ -4,8 +4,8 @@ import logging
 
 import uvicorn
 
-from dbt_metricflow_service.api import create_app
-from dbt_metricflow_service.jobs import JobRunner
+from dbt_metricflow_service.api.app import create_app
+from dbt_metricflow_service.execution.runner import JobRunner
 from dbt_metricflow_service.projects import ProjectRegistry
 from dbt_metricflow_service.settings import Settings
 

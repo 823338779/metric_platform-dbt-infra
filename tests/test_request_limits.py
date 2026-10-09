@@ -5,7 +5,7 @@ import logging
 import pytest
 from starlette.types import Message, Receive, Scope, Send
 
-from dbt_metricflow_service.request_limits import RequestBodyLimitMiddleware
+from dbt_metricflow_service.api.limits import RequestBodyLimitMiddleware
 
 logger = logging.getLogger(__name__)
 

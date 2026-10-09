@@ -6,14 +6,14 @@ from uuid import uuid4
 
 import pytest
 
-from dbt_metricflow_service.branch_models import CreateBranchRequest, RegisterBranchRequest
+from dbt_metricflow_service.branches.models import CreateBranchRequest, RegisterBranchRequest
 from dbt_metricflow_service.storage.branches import BranchStore
 from dbt_metricflow_service.storage.jobs import JobStore, StoreConflict
 from tests.test_platform_bindings import git
 from tests.test_platform_bindings import repository as repository
 from tests.test_publication_storage import store as store
 
-SERVICE_MODULE = "dbt_metricflow_service.branches"
+SERVICE_MODULE = "dbt_metricflow_service.branches.service"
 PROJECT_PREFIX = "lifecycle-"
 REV_PARSE = "rev-parse"
 HEAD = "HEAD"

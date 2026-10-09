@@ -8,9 +8,9 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from dbt_metricflow_service.api import create_app
-from dbt_metricflow_service.jobs import JobRunner
-from dbt_metricflow_service.platform_metricflow import execute_programmatic
+from dbt_metricflow_service.api.app import create_app
+from dbt_metricflow_service.execution.runner import JobRunner
+from dbt_metricflow_service.platform.metricflow import execute_programmatic
 from dbt_metricflow_service.projects import ProjectRegistry
 from dbt_metricflow_service.settings import Settings
 

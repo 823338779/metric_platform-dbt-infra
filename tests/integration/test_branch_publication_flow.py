@@ -12,12 +12,12 @@ import pytest
 import yaml
 from psycopg2 import sql
 
-from dbt_metricflow_service.branch_models import CreateBranchRequest
-from dbt_metricflow_service.branches import BranchService
-from dbt_metricflow_service.publication import PublicationService
-from dbt_metricflow_service.publication_models import PublishedQueryRequest
-from dbt_metricflow_service.runtime import Runtime
-from dbt_metricflow_service.runtime_execution import ExecutionError, RuntimeExecutor
+from dbt_metricflow_service.branches.models import CreateBranchRequest
+from dbt_metricflow_service.branches.service import BranchService
+from dbt_metricflow_service.publications.models import PublishedQueryRequest
+from dbt_metricflow_service.publications.service import PublicationService
+from dbt_metricflow_service.runtime.executor import ExecutionError, RuntimeExecutor
+from dbt_metricflow_service.runtime.service import Runtime
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.branches import BranchStore
 from tests.integration.test_postgres_platform_flow import FIXTURE, git

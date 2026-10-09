@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from dbt_metricflow_service import __version__
-from dbt_metricflow_service.api import create_app
+from dbt_metricflow_service.api.app import create_app
 from dbt_metricflow_service.projects import ProjectRegistry
 from dbt_metricflow_service.settings import Settings
 
@@ -60,7 +60,7 @@ def build_client(tmp_path: Path) -> TestClient:
 def test_live_does_not_depend_on_cli(tmp_path: Path, monkeypatch: object) -> None:
     """Liveness must only prove that the HTTP process can answer."""
     client = build_client(tmp_path)
-    monkeypatch.setattr("dbt_metricflow_service.api.shutil.which", lambda _: None)  # type: ignore[attr-defined]
+    monkeypatch.setattr("dbt_metricflow_service.api.app.shutil.which", lambda _: None)  # type: ignore[attr-defined]
 
     response = client.get("/health/live")
 
@@ -71,7 +71,7 @@ def test_live_does_not_depend_on_cli(tmp_path: Path, monkeypatch: object) -> Non
 def test_ready_returns_503_when_cli_is_missing(tmp_path: Path, monkeypatch: object) -> None:
     """Readiness must reject traffic when either packaged CLI is unavailable."""
     client = build_client(tmp_path)
-    monkeypatch.setattr("dbt_metricflow_service.api.shutil.which", lambda _: None)  # type: ignore[attr-defined]
+    monkeypatch.setattr("dbt_metricflow_service.api.app.shutil.which", lambda _: None)  # type: ignore[attr-defined]
 
     response = client.get("/health/ready")
 
@@ -84,7 +84,7 @@ def test_ready_accepts_installed_clis_and_readable_mounts(
 ) -> None:
     """Readiness must pass when runtime commands and mounted directories exist."""
     client = build_client(tmp_path)
-    monkeypatch.setattr("dbt_metricflow_service.api.shutil.which", lambda name: f"/bin/{name}")  # type: ignore[attr-defined]
+    monkeypatch.setattr("dbt_metricflow_service.api.app.shutil.which", lambda name: f"/bin/{name}")  # type: ignore[attr-defined]
 
     response = client.get("/health/ready")
 

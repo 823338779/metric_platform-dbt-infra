@@ -4,7 +4,7 @@ from uuid import uuid4
 
 import pytest
 
-from dbt_metricflow_service.publication_migration import import_publication
+from dbt_metricflow_service.publications.migration import import_publication
 from tests.test_publication_storage import store as store
 from tests.test_publication_transaction import prepared
 
