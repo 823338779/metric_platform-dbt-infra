@@ -1,7 +1,13 @@
 """分支登记与执行绑定存储；不执行 Git 网络操作。"""
 
+from __future__ import annotations
+
 from uuid import uuid4
 
+from sqlalchemy import Connection
+
+from dbt_metricflow_service.models.payloads import JsonObject
+from dbt_metricflow_service.storage.postgres import Database
 from dbt_metricflow_service.storage.rows import row_dict
 
 SQL_ENSURE_MAIN = """INSERT INTO runtime_branch
@@ -32,18 +38,18 @@ SQL_REFRESH_PREVIEWS = """UPDATE runtime_branch b SET
 class BranchStore:
     """调用方共用 Runtime 连接池，执行绑定始终来自服务配置。"""
 
-    def __init__(self, db):
+    def __init__(self, db: Database) -> None:
         # 连接池生命周期由 Runtime 统一管理。
         self.db = db
 
     @staticmethod
-    def ensure_production(connection, project_id, preview_profile=None):
+    def ensure_production(connection: Connection, project_id: str, preview_profile: str | None=None) -> None:
         # 项目注册事务内更新生产绑定，已存在分支的身份和指针不变。
         connection.exec_driver_sql(SQL_ENSURE_MAIN, (str(uuid4()), project_id))
         # 新任务沿用分支 schema 并取得最新受控配置，旧候选的配置检查将失败。
         connection.exec_driver_sql(SQL_REFRESH_PREVIEWS, (preview_profile, project_id, preview_profile))
 
-    def get(self, project_id: str, branch_id: str) -> dict:
+    def get(self, project_id: str, branch_id: str) -> JsonObject:
         # 项目和分支必须同时匹配，防止其他项目的 UUID 穿透。
         with self.db.transaction() as connection:
             sql_result = connection.exec_driver_sql(SQL_BRANCH, (project_id, branch_id))
@@ -52,7 +58,7 @@ class BranchStore:
                 raise KeyError(branch_id)
             return dict(row)
 
-    def production(self, project_id: str) -> dict:
+    def production(self, project_id: str) -> JsonObject:
         # 无分支旧接口总是定位固定生产分支。
         with self.db.transaction() as connection:
             sql_result = connection.exec_driver_sql(SQL_PRODUCTION, (project_id,))
@@ -61,13 +67,13 @@ class BranchStore:
                 raise KeyError(project_id)
             return dict(row)
 
-    def list(self, project_id: str) -> list[dict]:
+    def list(self, project_id: str) -> list[JsonObject]:
         # 保留已删除身份，供旧工作区诊断和历史结果读取。
         with self.db.transaction() as connection:
             sql_result = connection.exec_driver_sql(SQL_BRANCHES, (project_id,))
             return [dict(row) for row in sql_result.mappings()]
 
-    def execution_binding(self, project_id: str, branch_id: str) -> dict:
+    def execution_binding(self, project_id: str, branch_id: str) -> JsonObject:
         # 只供内部任务封存使用，公开 BranchView 永远不包含这些配置。
         row = self.get(project_id, branch_id)
         return {"binding_config": row["binding_config"], "config_version": row["config_version"],

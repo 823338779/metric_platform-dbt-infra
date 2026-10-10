@@ -2,6 +2,8 @@
 
 from zoneinfo import ZoneInfo
 
+from dbt_metricflow_service.models.payloads import JsonObject
+
 from ..models.queries import QueryRequest
 
 DEFAULT_TIMEZONE = "Asia/Shanghai"
@@ -19,13 +21,13 @@ def normalize_query_time(request: QueryRequest, timezone: str) -> QueryRequest:
     return request.model_copy(update=values)
 
 
-def canonical_query(request: QueryRequest, timezone: str) -> dict:
+def canonical_query(request: QueryRequest, timezone: str) -> JsonObject:
     value = normalize_query_time(request, timezone).model_dump(mode="json", by_alias=True)
     value["metricResourceIds"] = sorted(set(value["metricResourceIds"]))
     return value
 
 
-def query_time_metadata(request: QueryRequest, timezone: str) -> dict:
+def query_time_metadata(request: QueryRequest, timezone: str) -> JsonObject:
     normalized = canonical_query(request, timezone)
     return {
         "businessTimezone": timezone,

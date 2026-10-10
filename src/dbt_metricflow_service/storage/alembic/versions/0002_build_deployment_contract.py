@@ -1,5 +1,7 @@
 """增加引擎构建和部署事实；不改写历史产物和旧迁移。"""
 
+from __future__ import annotations
+
 from alembic import op
 
 revision = "0002_build_deployment_contract"
@@ -172,7 +174,7 @@ TABLES = (
 SQL_COLUMNS = "SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=%s"
 
 
-def upgrade():
+def upgrade() -> None:
     connection = op.get_bind()
     connection.exec_driver_sql(DDL, execution_options={"no_parameters": True})
     # 列名称来自本迁移创建的表；注释不拼入用户输入。
@@ -181,5 +183,5 @@ def upgrade():
             connection.exec_driver_sql(f"COMMENT ON COLUMN {table}.{column} IS '{COMMENTS[column]}'")
 
 
-def downgrade():
+def downgrade() -> None:
     raise RuntimeError("downgrade: " + "Restore a verified backup; build history must not be discarded")

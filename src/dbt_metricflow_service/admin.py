@@ -7,6 +7,7 @@ from pathlib import Path
 from uuid import UUID
 
 from dbt_metricflow_service.execution.artifacts import _is_link
+from dbt_metricflow_service.models.payloads import JsonObject
 from dbt_metricflow_service.platform.bindings import PROJECT_NAME_PATTERN
 from dbt_metricflow_service.runtime.service import current_toolchain
 from dbt_metricflow_service.settings import Settings
@@ -40,7 +41,7 @@ def _project_id(value: str) -> str:
     return value
 
 
-def _json(path: Path, maximum: int) -> dict | list:
+def _json(path: Path, maximum: int) -> JsonObject | list:
     # 控制文件不会作为产物保存，读取前仍校验链接与长度。
     if any(_is_link(item) for item in (path, *path.parents)):
         raise ValueError("legacy input cannot contain linked paths")

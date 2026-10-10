@@ -1,15 +1,26 @@
 """候选构建的受控物理映射。"""
 
+from __future__ import annotations
+
 import asyncio
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
 import sqlglot
 from sqlglot import exp
 
+from dbt_metricflow_service.execution.runner import JobRunner
+from dbt_metricflow_service.models.payloads import JsonObject
+from dbt_metricflow_service.storage.records import LeasedJob
+
 from ..platform.namespace import TABLE_NAME_PATTERN, prepare_versioned_project
 from .template import validate_templates
+
+if TYPE_CHECKING:
+    from dbt_metricflow_service.runtime.executor import ExecutionResult, RuntimeExecutor
+
 
 UTF8 = "utf-8"
 MANIFEST_FILE = "manifest.json"
@@ -102,7 +113,7 @@ def validate_bound_manifest(target: Path, schema: str, prefix: str) -> None:
         observed.add(actual)
 
 
-def validate_execution_policy(node: dict) -> None:
+def validate_execution_policy(node: JsonObject) -> None:
     # 草稿与发布共用定义边界；此检查不连接数据库、不执行 hook。
     config = node.get("config") or {}
     if node.get("resource_type") == OPERATION or any(config.get(key) for key in HOOK_KEYS):
@@ -133,7 +144,7 @@ def validate_readonly_sql(sql: str, dialect: str) -> None:
         raise ValueError("发布 SQL 必须为单条只读查询")
 
 
-def requires_source_freshness(node: dict) -> bool:
+def requires_source_freshness(node: JsonObject) -> bool:
     """只对有效阈值要求 freshness 证明，兼容 dbt 为未配置阈值生成的空对象。"""
     freshness = node.get(FRESHNESS) or {}
     # count=0 是合法阈值，因此不能使用布尔判断；count/period 都存在才构成可执行规则。
@@ -144,7 +155,9 @@ def requires_source_freshness(node: dict) -> bool:
     )
 
 
-async def execute_publication(executor, job, runner, attempt: Path, project: Path):
+async def execute_publication(
+    executor: RuntimeExecutor, job: LeasedJob, runner: JobRunner, attempt: Path, project: Path
+) -> ExecutionResult:
     """逻辑解析、选择性构建和完整验证使用同一个受租约控制的命令执行器。"""
     from ..execution.models import CommandSpec
     from ..platform.catalog import catalog_from_artifacts
@@ -158,8 +171,8 @@ async def execute_publication(executor, job, runner, attempt: Path, project: Pat
     base = build_programmatic_command(
         project,
         settings.profiles_dir,
-        job["schema_name"],
-        job["profile_binding_id"],
+        cast(str, job["schema_name"]),
+        cast(str, job["profile_binding_id"]),
         attempt / "input.json",
         attempt / "output.json",
     )
@@ -169,12 +182,12 @@ async def execute_publication(executor, job, runner, attempt: Path, project: Pat
         "--profiles-dir",
         str(settings.profiles_dir),
         "--target",
-        job["profile_binding_id"],
+        cast(str, job["profile_binding_id"]),
         "--target-path",
         str(target),
     )
 
-    async def command(*args):
+    async def command(*args: str) -> None:
         # deps 不支持 target-path，沿用既有执行器的命令参数边界。
         options = common[:-2] if args[0] == DEPS else common
         spec = CommandSpec((DBT, *args, *options), project, base.environment, args[0] == BUILD)
@@ -196,9 +209,11 @@ async def execute_publication(executor, job, runner, attempt: Path, project: Pat
     await command(PARSE, NO_PARTIAL_PARSE)
     logical = json.loads((target / MANIFEST_FILE).read_text(encoding=UTF8))
     plan = full_build_plan(logical)
-    prefix = await asyncio.to_thread(prepare_publication_project, project, UUID(job["job_id"]), job["schema_name"])
+    prefix = await asyncio.to_thread(
+        prepare_publication_project, project, UUID(job["job_id"]), cast(str, job["schema_name"])
+    )
     await command(PARSE, NO_PARTIAL_PARSE)
-    await asyncio.to_thread(validate_bound_manifest, target, job["schema_name"], prefix)
+    await asyncio.to_thread(validate_bound_manifest, target, cast(str, job["schema_name"]), prefix)
 
     await command(COMPILE)
     compiled = json.loads((target / MANIFEST_FILE).read_text(encoding=UTF8))
@@ -238,7 +253,7 @@ async def execute_publication(executor, job, runner, attempt: Path, project: Pat
     tests = {key for key, node in manifest["nodes"].items() if node.get("resource_type") == TEST}
     if not (tests | set(plan.selected_native_ids)) <= completed:
         raise ValueError("模型或必需测试执行不完整")
-    await asyncio.to_thread(validate_bound_manifest, target, job["schema_name"], prefix)
+    await asyncio.to_thread(validate_bound_manifest, target, cast(str, job["schema_name"]), prefix)
     physical_ids = set(plan.selected_native_ids + plan.reuse_native_ids)
     if not physical_ids <= physical_catalog.get("nodes", {}).keys():
         raise ValueError("物理对象缺失，不能复用发布")
@@ -278,7 +293,7 @@ async def execute_publication(executor, job, runner, attempt: Path, project: Pat
         "queryCapability": not empty,
         "publicationValidated": True,
         "buildMode": plan.build_mode,
-        "schemaName": job["schema_name"],
+        "schemaName": cast(str, job["schema_name"]),
         "toolchainVersion": job["toolchain_version"],
         "evidence": evidence,
         "plan": plan.model_dump(mode="json", by_alias=True),

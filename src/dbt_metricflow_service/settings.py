@@ -6,8 +6,11 @@ import os
 import tempfile
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import overload
 
 import yaml
+
+from dbt_metricflow_service.models.payloads import JsonObject
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +56,7 @@ def _validate_profiles(profiles: object) -> None:
                 raise ValueError("DBT_PROFILES 的每个 output 必须提供适配器 type")
 
 
-def _materialize_profiles(profiles: dict, temp_root: Path) -> Path:
+def _materialize_profiles(profiles: JsonObject, temp_root: Path) -> Path:
     # 保留 Jinja 模板，密码和任务 schema 仍由 dbt 进程从环境读取。
     content = yaml.safe_dump(profiles, allow_unicode=True, sort_keys=True).encode(UTF8)
     # 内容变化使用新目录，避免管理命令或另一实例改写正在执行任务的连接配置。
@@ -154,6 +157,12 @@ class Settings:
                 raise ValueError("配置文件不能同时指定 DBT_PROFILES 和 DBT_PROFILES_DIR")
 
         # 环境变量具有最高优先级；文件中的 null 使用该配置项的默认值。
+        @overload
+        def value(name: str, default: str) -> str: ...
+
+        @overload
+        def value(name: str, default: None = None) -> str | None: ...
+
         def value(name: str, default: str | None = None) -> str | None:
             configured = config.get(name)
             return os.getenv(name, str(configured) if configured is not None else default)

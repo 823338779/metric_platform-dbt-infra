@@ -4,6 +4,7 @@ import hashlib
 import json
 
 from ..models.artifacts import ResourceKind
+from ..models.payloads import JsonObject, QueryOption, QueryOptions
 
 UTF8 = "utf-8"
 PATH_SEPARATOR = "__"
@@ -20,10 +21,13 @@ GRAIN_LABELS = {
 }
 
 
-def map_options(build_id: str, metric_ids: list[str], catalog: dict, native: dict) -> tuple[dict, dict]:
+def map_options(
+    build_id: str, metric_ids: list[str], catalog: JsonObject, native: JsonObject
+) -> tuple[QueryOptions, dict[str, str]]:
     indexed = {item["resourceId"]: item for item in catalog["resources"]}
     selected = sorted(set(metric_ids))
-    output, mapping = [], {}
+    output: list[QueryOption] = []
+    mapping: dict[str, str] = {}
     # 原生路径只保存在服务映射内；每个 join 路径保持独立选项身份。
     for entry in [*native["dimensions"], *native["timeDimensions"]]:
         token = entry["token"]
@@ -56,5 +60,5 @@ def map_options(build_id: str, metric_ids: list[str], catalog: dict, native: dic
             }
         )
         mapping[option_id] = token
-    response = {"buildId": str(build_id), "metricResourceIds": selected, "options": output}
+    response: QueryOptions = {"buildId": str(build_id), "metricResourceIds": selected, "options": output}
     return response, mapping

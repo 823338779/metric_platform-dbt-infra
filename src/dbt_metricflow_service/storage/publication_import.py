@@ -1,7 +1,12 @@
 """旧平台公开身份的受控接管。"""
 
+from __future__ import annotations
+
 from uuid import UUID
 
+from dbt_metricflow_service.models.payloads import JsonObject
+from dbt_metricflow_service.storage.artifacts import ArtifactStore
+from dbt_metricflow_service.storage.postgres import Database
 from dbt_metricflow_service.storage.rows import row_dict
 
 from ..storage.publications import CATALOG_PATH
@@ -19,7 +24,9 @@ QUERY = "QUERY"
 DOCUMENT_KEYS = frozenset({"projectId", "legacyReleaseId", "runId", "queries"})
 
 
-def import_publication(db, artifacts, document: dict, *, dry_run: bool = True) -> dict:
+def import_publication(
+    db: Database, artifacts: ArtifactStore, document: JsonObject, *, dry_run: bool = True
+) -> JsonObject:
     """仅接管已经通过服务发布验证的 run；未验证旧产物必须先执行服务新发布。"""
     if set(document) != DOCUMENT_KEYS or not isinstance(document["queries"], list):
         raise ValueError("迁移文件格式无效")

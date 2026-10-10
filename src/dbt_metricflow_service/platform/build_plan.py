@@ -1,5 +1,7 @@
 """构建模式与完整覆盖证明。"""
 
+from dbt_metricflow_service.models.payloads import JsonObject
+
 from ..models.artifacts import BuildMode, BuildPlan
 
 MODEL = "model"
@@ -8,7 +10,7 @@ PASSED = "PASSED"
 VALIDATION_STEPS = ("tests", "semanticValidation", "relationVerification", "queryProbe")
 
 
-def full_build_plan(manifest: dict) -> BuildPlan:
+def full_build_plan(manifest: JsonObject) -> BuildPlan:
     physical = [
         key
         for key, node in manifest["nodes"].items()
@@ -22,7 +24,7 @@ def full_build_plan(manifest: dict) -> BuildPlan:
     )
 
 
-def validate_publication_evidence(plan: BuildPlan, evidence: dict) -> dict:
+def validate_publication_evidence(plan: BuildPlan, evidence: JsonObject) -> JsonObject:
     # 无构建步骤必须显式证明 NOT_REQUIRED，测试/语义/关系/查询证明不能省略。
     expected = PASSED
     if evidence.get("build") != expected or any(evidence.get(key) != PASSED for key in VALIDATION_STEPS):

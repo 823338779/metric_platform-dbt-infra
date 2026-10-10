@@ -8,6 +8,11 @@ from dbt_metricflow_service import __version__
 from dbt_metricflow_service.api.app import VERSION_DISTRIBUTIONS, create_app
 from dbt_metricflow_service.settings import Settings
 
+# 基础接口保留原有开放响应契约，避免函数注解触发 FastAPI 响应推断。
+INFRASTRUCTURE_ROUTES = ("/health/live", "/health/ready", "/v1/versions")
+OPENAPI_RESPONSE_SCHEMA_PATH = ("get", "responses", "200", "content", "application/json", "schema")
+OPENAPI_PATHS_KEY = "paths"
+
 
 @pytest.fixture
 def application(monkeypatch, tmp_path):
@@ -60,3 +65,13 @@ def test_versions_and_runtime_lifecycle(application):
             **{name: version(name) for name in VERSION_DISTRIBUTIONS},
         }
     assert runtime.closed
+
+
+@pytest.mark.parametrize("path", INFRASTRUCTURE_ROUTES)
+def test_infrastructure_response_schema_is_not_inferred(application, path):
+    # 类型注解仅服务于开发检查，不额外收紧这些现有 HTTP 响应。
+    app, _ = application
+    schema = app.openapi()[OPENAPI_PATHS_KEY][path]
+    for key in OPENAPI_RESPONSE_SCHEMA_PATH:
+        schema = schema[key]
+    assert schema == {}

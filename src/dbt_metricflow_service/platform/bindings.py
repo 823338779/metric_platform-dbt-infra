@@ -12,6 +12,8 @@ from pathlib import Path
 
 import yaml
 
+from dbt_metricflow_service.models.payloads import JsonObject
+
 PROJECT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
 DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
@@ -40,7 +42,7 @@ class ProjectBinding:
     schema_name: str | None = None
 
 
-def binding_digest(binding: dict) -> str:
+def binding_digest(binding: JsonObject) -> str:
     return hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -84,7 +86,9 @@ def resolve_commit(binding: ProjectBinding, commit_sha: str, work_root: Path) ->
     return _resolve_revision(binding, commit_sha, None, work_root)
 
 
-def _resolve_revision(binding, commit_sha, expected_digest, work_root):
+def _resolve_revision(
+    binding: ProjectBinding, commit_sha: str, expected_digest: str | None, work_root: Path
+) -> tuple[Path, str]:
     prefix = _prefix(binding.project_subdir)
     if not binding.remote or not binding.project_id or not binding.profile_binding_id:
         raise ValueError("平台项目绑定无效")

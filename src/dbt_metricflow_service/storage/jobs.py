@@ -1,12 +1,18 @@
 """数据库队列、执行租约与发布事务；外部 SQL 的停止必须单独确认。"""
 
+from __future__ import annotations
+
 import hashlib
 import json
-from uuid import uuid4
+from collections.abc import Callable
+from typing import cast, overload
+from uuid import UUID, uuid4
 
 from psycopg2.extras import Json
 from sqlalchemy import Connection
 
+from dbt_metricflow_service.models.payloads import JsonObject, JsonValue
+from dbt_metricflow_service.storage.records import DatabaseRow, LeasedJob, StoredJob
 from dbt_metricflow_service.storage.rows import row_dict
 
 from .branches import BranchStore
@@ -238,7 +244,15 @@ class CleanupBlocked(ValueError):
     """run 仍被活动任务或未知外部执行引用。"""
 
 
-def _safe_request(value):
+@overload
+def _safe_request(value: JsonObject) -> JsonObject: ...
+
+
+@overload
+def _safe_request(value: JsonValue) -> JsonValue: ...
+
+
+def _safe_request(value: JsonValue) -> JsonValue:
     # resources 和凭据不进入持久请求；调用者必须另外在内存保留 VOLATILE 输入。
     if isinstance(value, dict):
         return {key: _safe_request(item) for key, item in value.items() if key.lower() not in FORBIDDEN_REQUEST_KEYS}
@@ -263,7 +277,7 @@ class JobStore:
         *,
         max_result_bytes: int = MAX_RESULT,
         max_diagnostic_bytes: int = MAX_DIAGNOSTIC,
-    ):
+    ) -> None:
         # 数据库共享控制状态；租约长度只决定后续新租约的有效期。
         self.db = db
         self.lease_seconds = lease_seconds
@@ -271,8 +285,14 @@ class JobStore:
         self.max_result_bytes = max_result_bytes
         self.max_diagnostic_bytes = max_diagnostic_bytes
 
-    def register_project(self, project_id, binding_config=None, config_version="1", source_set_id=None,
-                         preview_profile=None):
+    def register_project(
+        self,
+        project_id: str,
+        binding_config: JsonObject | None = None,
+        config_version: str = "1",
+        source_set_id: str | None = None,
+        preview_profile: str | None = None,
+    ) -> DatabaseRow:
         # 项目导入与普通任务受理锁同一项目行，换源时立即移除旧输出指针。
         with self.db.transaction() as connection:
             sql_result = connection.exec_driver_sql(
@@ -280,7 +300,7 @@ class JobStore:
                 (project_id, Json(binding_config or {}), config_version),
             )
             sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_PROJECT, (project_id,))
-            current = row_dict(sql_result)
+            current = cast(DatabaseRow, row_dict(sql_result))
             if source_set_id is not None:
                 sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_ARTIFACT_SET, (source_set_id,))
                 source = row_dict(sql_result)
@@ -302,73 +322,76 @@ class JobStore:
                     project_id,
                 ),
             )
-            result = dict(row_dict(sql_result))
+            result = dict(cast(DatabaseRow, row_dict(sql_result)))
             BranchStore.ensure_production(connection, project_id, preview_profile)
             return result
 
-    def project(self, project_id):
+    def project(self, project_id: str) -> DatabaseRow | None:
         with self.db.transaction() as connection:
             sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_PROJECT_2, (project_id,))
             return row_dict(sql_result)
 
-    def get(self, job_id):
+    def get(self, job_id: UUID | str) -> StoredJob | None:
         with self.db.transaction() as connection:
             sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB, (str(job_id),))
-            return row_dict(sql_result)
+            return cast(StoredJob | None, row_dict(sql_result))
 
-    def by_key(self, scope, key):
+    def by_key(self, scope: str, key: str) -> StoredJob | None:
         with self.db.transaction() as connection:
             sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB_2, (scope, key))
-            return row_dict(sql_result)
+            return cast(StoredJob | None, row_dict(sql_result))
 
-    def result_exists(self, job_id):
+    def result_exists(self, job_id: UUID | str) -> bool:
         # 状态读取仅检查结果引用，不加载结果正文。
         with self.db.transaction() as connection:
             return connection.exec_driver_sql(SQL_RESULT_EXISTS, (str(job_id),)).scalar_one()
 
-    def options_for(self, run_id):
+    def options_for(self, run_id: UUID | str) -> list[StoredJob]:
         # 查询只消费同一固定构建的已完成选项任务。
         with self.db.transaction() as connection:
-            return [dict(row) for row in connection.exec_driver_sql(SQL_OPTIONS_FOR_BUILD, (run_id,)).mappings()]
+            return cast(
+                list[StoredJob],
+                [dict(row) for row in connection.exec_driver_sql(SQL_OPTIONS_FOR_BUILD, (run_id,)).mappings()],
+            )
 
-    def external_started(self, attempt_id):
+    def external_started(self, attempt_id: UUID | str) -> bool:
         # 取消时以持久 attempt 为准；无记录时不能证明外部执行已经停止。
         with self.db.transaction() as connection:
             return connection.exec_driver_sql(SQL_ATTEMPT_EXTERNAL, (attempt_id,)).scalar_one_or_none() != "PREPARING"
 
-    def result(self, job_id):
+    def result(self, job_id: UUID | str) -> DatabaseRow | None:
         with self.db.transaction() as connection:
             sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB_RESULT, (str(job_id),))
             return row_dict(sql_result)
 
     def reserve(
         self,
-        kind,
-        project_id,
-        request_json,
+        kind: str,
+        project_id: str,
+        request_json: JsonObject,
         *,
-        job_id=None,
-        fingerprint=None,
-        idempotency_scope=None,
-        idempotency_key=None,
-        parent_run_id=None,
-        input_set_id=None,
-        input_mode=DURABLE,
-        pinned_instance_id=None,
-        config_version="1",
-        toolchain_version="default",
-        schema_name=None,
-        profile_binding_id=None,
-        retry_policy="PREPARATION_ONLY",
-        max_attempts=3,
-        timeout_seconds=600,
-        write=False,
-        expected_revision=None,
-        branch_id=None,
-    ):
+        job_id: UUID | str | None=None,
+        fingerprint: str | None=None,
+        idempotency_scope: str | None=None,
+        idempotency_key: str | None=None,
+        parent_run_id: UUID | str | None=None,
+        input_set_id: str | None=None,
+        input_mode: str=DURABLE,
+        pinned_instance_id: str | None=None,
+        config_version: str="1",
+        toolchain_version: str="default",
+        schema_name: str | None=None,
+        profile_binding_id: str | None=None,
+        retry_policy: str="PREPARATION_ONLY",
+        max_attempts: int=3,
+        timeout_seconds: int=600,
+        write: bool=False,
+        expected_revision: int | None=None,
+        branch_id: str | None=None,
+    ) -> StoredJob:
         # 幂等作用域先串行化；parent 锁统一先于项目行和子任务，避免清理受理穿透。
         with self.db.fact_transaction() as connection:
-            return self.reserve_in_transaction(
+            return cast(StoredJob, self.reserve_in_transaction(
                 connection, kind, project_id, request_json,
                 job_id=job_id,
                 fingerprint=fingerprint,
@@ -388,34 +411,34 @@ class JobStore:
                 write=write,
                 expected_revision=expected_revision,
                 branch_id=branch_id,
-            )
+            ))
 
     def reserve_in_transaction(
         self,
         connection: Connection,
-        kind,
-        project_id,
-        request_json,
+        kind: str,
+        project_id: str,
+        request_json: JsonObject,
         *,
-        job_id=None,
-        fingerprint=None,
-        idempotency_scope=None,
-        idempotency_key=None,
-        parent_run_id=None,
-        input_set_id=None,
-        input_mode=DURABLE,
-        pinned_instance_id=None,
-        config_version="1",
-        toolchain_version="default",
-        schema_name=None,
-        profile_binding_id=None,
-        retry_policy="PREPARATION_ONLY",
-        max_attempts=3,
-        timeout_seconds=600,
-        write=False,
-        expected_revision=None,
-        branch_id=None,
-    ):
+        job_id: UUID | str | None=None,
+        fingerprint: str | None=None,
+        idempotency_scope: str | None=None,
+        idempotency_key: str | None=None,
+        parent_run_id: UUID | str | None=None,
+        input_set_id: str | None=None,
+        input_mode: str=DURABLE,
+        pinned_instance_id: str | None=None,
+        config_version: str="1",
+        toolchain_version: str="default",
+        schema_name: str | None=None,
+        profile_binding_id: str | None=None,
+        retry_policy: str="PREPARATION_ONLY",
+        max_attempts: int=3,
+        timeout_seconds: int=600,
+        write: bool=False,
+        expected_revision: int | None=None,
+        branch_id: str | None=None,
+    ) -> StoredJob:
         # 幂等作用域先串行化；parent 锁统一先于项目行和子任务，避免清理受理穿透。
         if idempotency_key is not None:
             idempotency_scope = idempotency_scope or kind
@@ -473,10 +496,10 @@ class JobStore:
                     comparable = {key: value for key, value in safe_request.items() if key != BINDING_FIELD}
                     if (prior["kind"] == kind and prior["project_id"] == project_id
                             and prior["request_json"] == comparable):
-                        return prior
+                        return cast(StoredJob, prior)
                 if prior["request_fingerprint"] != fingerprint:
                     raise StoreConflict("Idempotency key belongs to another request")
-                return prior
+                return cast(StoredJob, prior)
         if parent and (parent["status"] != SUCCEEDED or parent["run_lifecycle"] != ACTIVE):
             raise CleanupBlocked("Run is not ready and active")
         if input_set_id is not None:
@@ -531,9 +554,9 @@ class JobStore:
             result = row_dict(sql_result)
         if write:
             sql_result = connection.exec_driver_sql(SQL_UPDATE_RUNTIME_PROJECT_SET_3, (identifier, project_id))
-        return result
+        return cast(StoredJob, result)
 
-    def requeue_options(self, job_id):
+    def requeue_options(self, job_id: UUID | str) -> bool:
         # 同步选项的明确终止失败可重试，沿用原截止时间和总尝试上限。
         with self.db.fact_transaction() as connection:
             sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB, (str(job_id),))
@@ -546,7 +569,15 @@ class JobStore:
             sql_result = connection.exec_driver_sql(SQL_OPTIONS_RETRY, (str(job_id),))
             return sql_result.rowcount == 1
 
-    def claim(self, worker_id, *, config_version="1", config_versions=None, toolchain_version="default", kinds=None):
+    def claim(
+        self,
+        worker_id: UUID | str,
+        *,
+        config_version: str = "1",
+        config_versions: list[str] | None = None,
+        toolchain_version: str = "default",
+        kinds: list[str] | None = None,
+    ) -> LeasedJob | None:
         # 短事务领取一个任务，跳过其他 worker 已锁住的任务；VOLATILE 输入必须仍有效。
         with self.db.fact_transaction() as connection:
             versions = config_versions if config_versions is not None else [config_version]
@@ -556,7 +587,7 @@ class JobStore:
             )
             job = row_dict(sql_result)
             if not job:
-                return None
+                return cast(LeasedJob | None, None)
             attempt_id, token = str(uuid4()), str(uuid4())
             sql_result = connection.exec_driver_sql(
                 SQL_INSERT_INTO_RUNTIME_ATTEMPT,
@@ -566,11 +597,11 @@ class JobStore:
                 SQL_UPDATE_RUNTIME_JOB_SET,
                 (attempt_id, job["job_id"]),
             )
-            result = dict(row_dict(sql_result))
+            result = dict(cast(DatabaseRow, row_dict(sql_result)))
             result.update(attempt_id=attempt_id, lease_token=token)
-            return result
+            return cast(LeasedJob | None, result)
 
-    def _authorized(self, connection, job_id, token):
+    def _authorized(self, connection: Connection, job_id: UUID | str, token: UUID | str) -> LeasedJob | None:
         # 清理和子任务更新都先锁 parent；每次修改同时核对 current attempt、token 和数据库时间。
         sql_result = connection.exec_driver_sql(SQL_SELECT_PARENT_RUN_ID_FROM, (str(job_id),))
         reference = row_dict(sql_result)
@@ -580,9 +611,9 @@ class JobStore:
             SQL_SELECT_J_A,
             (str(job_id), str(token)),
         )
-        return row_dict(sql_result)
+        return cast(LeasedJob | None, row_dict(sql_result))
 
-    def heartbeat(self, job_id, token):
+    def heartbeat(self, job_id: UUID | str, token: UUID | str) -> bool:
         with self.db.transaction() as connection:
             job = self._authorized(connection, job_id, token)
             if not job:
@@ -593,7 +624,7 @@ class JobStore:
             )
             return True
 
-    def heartbeat_inputs(self, worker_id, job_ids=None):
+    def heartbeat_inputs(self, worker_id: UUID | str, job_ids: list[str] | None=None) -> int:
         # 排队等待期也需要输入续租；已经过期的输入租约不能通过迟到心跳复活。
         with self.db.transaction() as connection:
             sql_result = connection.exec_driver_sql(
@@ -602,7 +633,15 @@ class JobStore:
             )
             return sql_result.rowcount
 
-    def phase(self, job_id, token, phase, *, external=False, external_execution_refs=None):
+    def phase(
+        self,
+        job_id: UUID | str,
+        token: UUID | str,
+        phase: str,
+        *,
+        external: bool = False,
+        external_execution_refs: JsonObject | None = None,
+    ) -> bool:
         with self.db.fact_transaction() as connection:
             job = self._authorized(connection, job_id, token)
             if not job:
@@ -619,7 +658,9 @@ class JobStore:
                 )
             return True
 
-    def attach_input(self, job_id, token, set_id, *, project_digest=None):
+    def attach_input(
+        self, job_id: UUID | str, token: UUID | str, set_id: str, *, project_digest: str | None = None
+    ) -> bool:
         # 首次构建的源码在外部写入前固定，后续准备阶段重试可复用该集合。
         with self.db.fact_transaction() as connection:
             job = self._authorized(connection, job_id, token)
@@ -636,7 +677,7 @@ class JobStore:
                 connection.exec_driver_sql(SQL_ATTACH_DIGEST, (Json({"projectDigest": project_digest}), str(job_id)))
             return True
 
-    def _release_project(self, connection, job_id):
+    def _release_project(self, connection: Connection, job_id: UUID | str) -> None:
         # 只有所有外部执行都确认结束，才释放通用写锁。
         connection.exec_driver_sql(
             SQL_UPDATE_RUNTIME_PROJECT_SET,
@@ -645,18 +686,18 @@ class JobStore:
 
     def finish(
         self,
-        job_id,
-        token,
-        payload=None,
+        job_id: UUID | str,
+        token: UUID | str,
+        payload: JsonObject | None=None,
         *,
-        output_set_id=None,
-        stdout_tail="",
-        stderr_tail="",
-        exit_code=0,
-        output_truncated=False,
-        seal=None,
-        publish=None,
-    ):
+        output_set_id: str | None=None,
+        stdout_tail: str="",
+        stderr_tail: str="",
+        exit_code: int=0,
+        output_truncated: bool=False,
+        seal: Callable[[str, Connection], None] | None=None,
+        publish: Callable[[Connection, StoredJob, str], None] | None=None,
+    ) -> bool:
         # 发布产物、结果和终态共用一个事务；过期 worker 无权发布任何内容。
         encoded = json.dumps(payload or {}, ensure_ascii=False, separators=(",", ":"))
         if len(encoded.encode()) > self.max_result_bytes:
@@ -723,7 +764,7 @@ class JobStore:
                 if job["kind"] == BUILD_RUN and job["request_json"].get("releaseId"):
                     if publish is None:
                         raise ValueError("Publication completion requires its transaction coordinator")
-                    publish(connection, job, output_set_id)
+                    publish(connection, job, cast(str, output_set_id))
                 # 封存校验可能耗时；提交前重新 fencing，失效时连同已封存文件状态一起回滚。
                 if not self._authorized(connection, job_id, token):
                     raise _FinishLeaseLost
@@ -757,7 +798,15 @@ class JobStore:
         except _FinishLeaseLost:
             return False
 
-    def fail(self, job_id, token, error_code, detail=None, *, stopped=True):
+    def fail(
+        self,
+        job_id: UUID | str,
+        token: UUID | str,
+        error_code: str,
+        detail: JsonObject | None = None,
+        *,
+        stopped: bool = True,
+    ) -> bool:
         # 错误详情也有字节预算，禁止在失败路径写入无限增长的异常堆栈。
         if len(json.dumps(detail or {}, ensure_ascii=False).encode()) > self.max_diagnostic_bytes:
             detail = {"message": "Diagnostic exceeded configured size limit"}
@@ -779,7 +828,7 @@ class JobStore:
             self._release_project(connection, job_id)
             return True
 
-    def recover(self):
+    def recover(self) -> int:
         # 恢复只处理过期租约/截止时间，健康实例的 RUNNING 任务不会被启动流程打断。
         with self.db.fact_transaction() as connection:
             sql_result = connection.exec_driver_sql(SQL_SELECT_J_FROM)
@@ -829,7 +878,7 @@ class JobStore:
                     self._release_project(connection, job["job_id"])
             return len(jobs)
 
-    def confirm_stopped(self, attempt_id, token):
+    def confirm_stopped(self, attempt_id: UUID | str, token: UUID | str) -> bool:
         # 失效执行者仅可凭自己的 token 确认停止，不能改写公开结果。
         with self.db.fact_transaction() as connection:
             sql_result = connection.exec_driver_sql(
@@ -849,7 +898,7 @@ class JobStore:
                 self._release_project(connection, job["job_id"])
             return True
 
-    def reserve_cleanup(self, parent_run_id, toolchain_version="default"):
+    def reserve_cleanup(self, parent_run_id: UUID | str, toolchain_version: str="default") -> StoredJob:
         # 与查询受理锁同一 parent；阻止所有排队/执行任务和任何未确认停止的历史 attempt。
         with self.db.fact_transaction() as connection:
             sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB_4, (str(parent_run_id),))
@@ -879,8 +928,8 @@ class JobStore:
                         SQL_UPDATE_RUNTIME_JOB_SET_10,
                         (existing["job_id"],),
                     )
-                    return row_dict(sql_result)
-                return existing
+                    return cast(StoredJob, row_dict(sql_result))
+                return cast(StoredJob, existing)
             sql_result = connection.exec_driver_sql(
                 SQL_SELECT_FROM_RUNTIME_JOB_6,
                 (str(parent_run_id), str(parent_run_id)),
@@ -914,4 +963,4 @@ class JobStore:
                     parent["output_set_id"] or parent["input_set_id"],
                 ),
             )
-            return row_dict(sql_result)
+            return cast(StoredJob, row_dict(sql_result))

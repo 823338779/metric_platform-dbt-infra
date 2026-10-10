@@ -1,9 +1,13 @@
 """One-time adoption of the five immutable runtime SQL migrations."""
 
+from __future__ import annotations
+
 import json
 from pathlib import Path
 
 from sqlalchemy import Connection
+
+from dbt_metricflow_service.models.payloads import JsonObject
 
 from .postgres import MIGRATIONS
 
@@ -18,7 +22,7 @@ CYCLIC_FOREIGN_KEYS = (
 )
 
 
-def schema_shape(connection: Connection) -> dict:
+def schema_shape(connection: Connection) -> JsonObject:
     """Read the fixed historical contract, scoped to the current schema's OIDs."""
     quoting = connection.exec_driver_sql("SHOW quote_all_identifiers").scalar_one()
     connection.exec_driver_sql("SET LOCAL quote_all_identifiers=off")
@@ -29,7 +33,7 @@ def schema_shape(connection: Connection) -> dict:
     return shape
 
 
-def _schema_shape(connection: Connection) -> dict:
+def _schema_shape(connection: Connection) -> JsonObject:
     tables = connection.exec_driver_sql(
         "SELECT c.oid,c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
         "WHERE n.nspname=current_schema() AND c.relkind IN ('r','p') AND left(c.relname,8)='runtime_'",
@@ -38,7 +42,7 @@ def _schema_shape(connection: Connection) -> dict:
     schema = connection.exec_driver_sql("SELECT current_schema()").scalar_one()
     prefix = connection.dialect.identifier_preparer.quote(schema) + "."
 
-    def normalized(value):
+    def normalized(value: str) -> str:
         return " ".join(value.replace(prefix, "").split())
 
     for oid, name in tables:

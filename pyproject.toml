@@ -54,3 +54,9 @@ line-length = 120
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "C4"]
+# 自有服务代码必须明确参数和返回类型；开放引擎载荷仍允许显式 Any。
+extend-select = ["ANN001", "ANN002", "ANN003", "ANN201", "ANN202", "ANN204", "ANN205", "ANN206"]
+
+[tool.ruff.lint.per-file-ignores]
+# pytest fixture 和测试替身沿用现有签名，不扩展本次改动到测试体系。
+"tests/**" = ["ANN"]

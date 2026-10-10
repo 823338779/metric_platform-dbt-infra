@@ -1,10 +1,14 @@
 """发布前生成展示目录；未知关键语义必须失败，不能留给平台解释。"""
 
+from __future__ import annotations
+
 import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
+
+from dbt_metricflow_service.models.payloads import JsonObject, JsonValue
 
 from ..models.artifacts import PUBLISHED_CATALOG_FILE, BindingMode, PublishedCatalog, RelationBinding, ResourceKind
 
@@ -30,7 +34,7 @@ JSON_MODE = "json"
 SOURCE_TYPE = "source"
 
 
-def _canonical(value):
+def _canonical(value: JsonValue) -> JsonValue:
     # 两种原生产物中的空默认值不影响语义比较；数组保持定义顺序。
     if isinstance(value, dict):
         return {key: _canonical(item) for key, item in value.items() if item not in (None, [], {})}
@@ -39,7 +43,7 @@ def _canonical(value):
     return value
 
 
-def _validate_semantics(resources: list[dict], semantic: dict) -> None:
+def _validate_semantics(resources: list[JsonObject], semantic: JsonObject) -> None:
     # 名称必须唯一且集合一致；不能把缺少语义产物误判为无指标。
     for kind, section, fields in (
         (ResourceKind.SEMANTIC_MODEL, "semantic_models", SEMANTIC_FIELDS),
@@ -62,8 +66,8 @@ def build_published_catalog(
     *,
     project_id: str,
     release_id: UUID,
-    native_catalog: dict,
-    semantic_manifest: dict,
+    native_catalog: JsonObject,
+    semantic_manifest: JsonObject,
     relation_bindings: list[RelationBinding],
 ) -> PublishedCatalog:
     # 输入必须包含完整目录结构，并确保逻辑 ID 与原生身份一致。
@@ -83,7 +87,7 @@ def build_published_catalog(
     relations = set()
     ephemeral = native_catalog.get("ephemeralDependencies", {})
 
-    def edge(upstream, downstream, kind, visited=frozenset()):
+    def edge(upstream: str, downstream: str, kind: str, visited: frozenset[str]=frozenset()) -> None:
         # ephemeral 没有独立物理关系，展示血缘连接到其真实上游，仍检测循环与悬空引用。
         if upstream in ephemeral:
             if upstream in visited:
@@ -104,7 +108,7 @@ def build_published_catalog(
 
     computed, visiting = {}, set()
 
-    def metric_attributes(key):
+    def metric_attributes(key: str) -> JsonObject:
         if key in visiting:
             raise ValueError("指标引用存在环")
         if key in computed:
@@ -263,8 +267,8 @@ def build_published_catalog(
 
 
 def write_publication_catalog(
-    target: Path, *, project_id: str, release_id: UUID, run_id: UUID, native_catalog: dict
-) -> dict:
+    target: Path, *, project_id: str, release_id: UUID, run_id: UUID, native_catalog: JsonObject
+) -> JsonObject:
     """全构建的实际关系形成直接绑定，完整目录文件必须在 capture 之前写入。"""
     bindings = []
     for item in native_catalog["resources"]:

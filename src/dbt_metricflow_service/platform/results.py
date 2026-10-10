@@ -2,11 +2,13 @@
 
 import json
 
+from dbt_metricflow_service.models.payloads import JsonObject
+
 MAX_PAGE_BYTES = 8 * 1024 * 1024
 MAX_PAGE_ROWS = 200
 
 
-def result_page(payload: dict, metadata: dict, offset: int, limit: int) -> dict:
+def result_page(payload: JsonObject, metadata: JsonObject, offset: int, limit: int) -> JsonObject:
     if offset < 0 or not 1 <= limit <= MAX_PAGE_ROWS:
         raise ValueError("INVALID_PAGE")
     available = len(payload.get("rows", []))

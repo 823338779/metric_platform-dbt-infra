@@ -1,10 +1,15 @@
 """短事务连接池；迁移仅由管理命令显式执行。"""
 
+from __future__ import annotations
+
+from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
 
+from psycopg2.extensions import connection as PsycopgConnection
 from psycopg2.extensions import new_array_type, new_type, parse_dsn, register_type
 from sqlalchemy import Connection, create_engine, event
+from sqlalchemy.pool import ConnectionPoolEntry
 
 MIGRATION_PATH = Path(__file__).parent / "migrations" / "001_runtime.sql"
 MIGRATIONS = (MIGRATION_PATH, MIGRATION_PATH.with_name("002_publication.sql"),
@@ -18,7 +23,7 @@ SQL_LOCK_FACTS = "SELECT value FROM engine_change_counter WHERE singleton FOR UP
 class Database:
     """每次事务独占连接，连接数和等待线程均受调用方执行器约束。"""
 
-    def __init__(self, dsn: str, max_connections: int = 8):
+    def __init__(self, dsn: str, max_connections: int = 8) -> None:
         parameters = parse_dsn(dsn)
         parameters["options"] = (parameters.get("options", "") + " " + CONNECTION_OPTIONS).strip()
         parameters["connect_timeout"] = 5
@@ -32,30 +37,30 @@ class Database:
         return self.engine.begin()
 
     @contextmanager
-    def fact_transaction(self):
+    def fact_transaction(self) -> Iterator[Connection]:
         # 事实事务先锁变化序号，再锁业务行，避免触发器与目标/任务锁顺序反转。
         # 只包含短数据库操作；Git、引擎执行和产物传输均在事务之外。
         with self.transaction() as connection:
             connection.exec_driver_sql(SQL_LOCK_FACTS)
             yield connection
 
-    def migrate(self):
+    def migrate(self) -> None:
         from .schema import migrate
 
         with self.transaction() as connection:
             migrate(connection)
 
-    def check(self):
+    def check(self) -> None:
         from .schema import check
 
         with self.transaction() as connection:
             check(connection)
 
-    def close(self):
+    def close(self) -> None:
         self.engine.dispose()
 
 
-def _string_uuids(connection, _record):
+def _string_uuids(connection: PsycopgConnection, _record: ConnectionPoolEntry) -> None:
     # 只配置本 Engine 的连接，保留 Store 既有的字符串 UUID 契约。
     uuid_type = new_type((2950,), "RUNTIME_UUID", lambda value, _cursor: value)
     register_type(uuid_type, connection)

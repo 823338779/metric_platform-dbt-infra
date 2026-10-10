@@ -1,14 +1,30 @@
 """筛选条件固定的有界游标；仅用于浏览，不充当变化消费水位。"""
 
+from __future__ import annotations
+
 import base64
 import json
+from collections.abc import Callable, Iterable
+from typing import TypeVar
 
 from .builds import digest
+
+# 泛型保留调用方的元素或执行结果类型。
+T = TypeVar("T")
+
 
 CURSOR_VERSION = 1
 
 
-def page(items, *, scope, cursor=None, limit=50, identity, reverse=False):
+def page(
+    items: Iterable[T],
+    *,
+    scope: object,
+    cursor: str | None = None,
+    limit: int = 50,
+    identity: Callable[[T], str],
+    reverse: bool = False,
+) -> tuple[list[T], str | None]:
     if not 1 <= limit <= 200:
         raise ValueError("limit must be between 1 and 200")
     condition = digest(scope)

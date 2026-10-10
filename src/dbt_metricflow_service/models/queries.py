@@ -1,8 +1,10 @@
 """版本固定的查询与异步选项协议；原生语义由引擎执行。"""
 
+from __future__ import annotations
+
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, Self
 from uuid import UUID
 
 from pydantic import Field, model_validator
@@ -52,7 +54,7 @@ class QueryRequest(Contract):
     dimension_option_id: str | None = Field(default=None, description="DIMENSION_VALUES 的维度选项")
 
     @model_validator(mode="after")
-    def mode_fields(self):
+    def mode_fields(self) -> Self:
         # 先拒绝引擎会忽略的模式字段，选项归属在应用层查固定目录确认。
         if self.mode == QueryMode.PREVIEW:
             if (

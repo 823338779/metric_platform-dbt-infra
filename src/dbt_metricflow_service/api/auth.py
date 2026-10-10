@@ -1,12 +1,17 @@
 """固定提交写入口的部署凭据。"""
 
+from __future__ import annotations
+
 import hmac
+from collections.abc import Awaitable, Callable
 
 from fastapi import Header, HTTPException
 
+from dbt_metricflow_service.settings import Settings
 
-def mutation_guard(settings):
-    async def require_service(authorization: str | None = Header(default=None)):
+
+def mutation_guard(settings: Settings) -> Callable[..., Awaitable[str]]:
+    async def require_service(authorization: str | None = Header(default=None)) -> str:
         token = getattr(settings, "service_token", None)
         if not token:
             raise HTTPException(503, detail={"code": "mutations_disabled"})

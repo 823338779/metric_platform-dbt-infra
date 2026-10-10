@@ -1,12 +1,18 @@
 """唯一装配入口；应用用例不持有 HTTP 或 Runtime。"""
+
+from __future__ import annotations
+
 import asyncio
 import os
 import shutil
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from functools import partial
 from importlib.metadata import version
 
 from fastapi import FastAPI
+
+from dbt_metricflow_service.settings import Settings
 
 from .. import __version__
 from ..application.builds import BuildService
@@ -27,7 +33,7 @@ VERSION_DISTRIBUTIONS = ("dbt-core", "dbt-starrocks", "dbt-duckdb", "dbt-metricf
 COMMANDS = ("dbt", "mf")
 
 
-def create_app(settings) -> FastAPI:
+def create_app(settings: Settings) -> FastAPI:
     if not settings.database_url:
         raise ValueError("SERVICE_DATABASE_URL is required; only PostgreSQL is supported")
     runtime = Runtime(settings)
@@ -35,13 +41,14 @@ def create_app(settings) -> FastAPI:
                                  getattr(settings, "config_version", None))
     catalog_service = CatalogService(build_service.store, runtime.artifacts)
     deployment_service = DeploymentService(DeploymentStore(runtime.db),
-        partial(remote_head, temp_root=settings.temp_root), partial(is_ancestor, temp_root=settings.temp_root),
-        builds=build_service, catalogs=catalog_service)
+                                           partial(remote_head, temp_root=settings.temp_root),
+                                           partial(is_ancestor, temp_root=settings.temp_root),
+                                           builds=build_service, catalogs=catalog_service)
     query_service = QueryService(build_service, catalog_service, runtime.jobs)
     runtime.deployments = deployment_service
 
     @asynccontextmanager
-    async def lifespan(app):
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await runtime.start()
         try:
             yield
@@ -58,12 +65,13 @@ def create_app(settings) -> FastAPI:
                    catalog.router(catalog_service), queries.router(query_service, guard)):
         app.include_router(routes)
 
-    @app.get("/health/live")
-    async def live():
+    # 显式保留开放响应契约，避免返回类型注解额外启用响应模型校验。
+    @app.get("/health/live", response_model=None)
+    async def live() -> dict[str, str]:
         return {"status": "ok"}
 
-    @app.get("/health/ready")
-    async def ready():
+    @app.get("/health/ready", response_model=None)
+    async def ready() -> dict[str, str]:
         await asyncio.to_thread(runtime.db.check)
         if (not all(shutil.which(command) for command in COMMANDS)
                 or not (settings.profiles_dir / "profiles.yml").is_file()
@@ -71,8 +79,8 @@ def create_app(settings) -> FastAPI:
             raise ServiceError("EXECUTION_ENVIRONMENT_UNAVAILABLE", "engine prerequisites are unavailable", 503)
         return {"status": "ready"}
 
-    @app.get("/v1/versions")
-    async def versions():
+    @app.get("/v1/versions", response_model=None)
+    async def versions() -> dict[str, str]:
         return {"service": __version__, **{package: version(package) for package in VERSION_DISTRIBUTIONS}}
 
     return app

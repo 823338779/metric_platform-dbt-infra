@@ -1,7 +1,12 @@
 """失败构建的有界脱敏摘要；不公开 CLI 日志、SQL 和数据库连接信息。"""
 
+from __future__ import annotations
+
 import json
 import re
+from pathlib import Path
+
+from dbt_metricflow_service.models.payloads import ValidationCheck, ValidationSummary
 
 RESULTS = "run_results.json"
 UTF8 = "utf-8"
@@ -16,9 +21,10 @@ MESSAGE = "检查未通过，请检查定义与输入数据。"
 PHASES_WITH_RESULTS = frozenset({"build", "test"})
 
 
-def failure_summary(target, phase, max_bytes):
+def failure_summary(target: Path, phase: str, max_bytes: int) -> ValidationSummary:
     # 只读取本 attempt 的当前构建结果；其他命令不能复用旧 run_results 冒充证明。
-    checks, truncated = [], False
+    checks: list[ValidationCheck] = []
+    truncated = False
     path = target / RESULTS
     if phase in PHASES_WITH_RESULTS and path.is_file():
         with path.open("rb") as stream:

@@ -5,12 +5,17 @@ import asyncio
 import hashlib
 from importlib.metadata import version
 from pathlib import Path
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.jobs import JobStore
 from dbt_metricflow_service.storage.postgres import Database
+
+if TYPE_CHECKING:
+    from dbt_metricflow_service.application.deployments import DeploymentService
+
 
 BUILD = "BUILD_RUN"
 QUERY = "METRIC_QUERY"
@@ -38,7 +43,10 @@ def current_toolchain() -> str:
 
 
 class Runtime:
-    def __init__(self, settings: Settings):
+    # HTTP 装配入口注入的部署协调器，纯 Runtime 使用时可能尚未绑定。
+    deployments: DeploymentService
+
+    def __init__(self, settings: Settings) -> None:
         # 数据库 schema 必须预先通过管理命令安装，启动不得修改其他实例任务。
         self.settings = settings
         self.instance_id = uuid4()
@@ -53,7 +61,7 @@ class Runtime:
         self.worker = None
 
 
-    async def start(self):
+    async def start(self) -> None:
         # 本地目录只保存当前执行，可由空目录启动。
         from dbt_metricflow_service.runtime.worker import Worker
         self.settings.temp_root.mkdir(parents=True, exist_ok=True)
@@ -61,7 +69,7 @@ class Runtime:
         self.worker.start()
 
 
-    async def close(self):
+    async def close(self) -> None:
         if self.worker is not None:
             await self.worker.close()
         await asyncio.to_thread(self.db.close)

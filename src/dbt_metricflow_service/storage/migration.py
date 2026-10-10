@@ -1,10 +1,15 @@
 """旧封存记录映射为引擎历史；不修改原始产物、审计和物理引用。"""
 
+from __future__ import annotations
+
 from uuid import NAMESPACE_URL, uuid5
 
-from psycopg2.extras import Json
+from sqlalchemy import Connection, insert
 
-from .builds import SQL_INSERT, digest
+from dbt_metricflow_service.models.payloads import HistoryMigrationReport
+
+from .build_tables import BUILD
+from .builds import digest
 from .postgres import SQL_LOCK_FACTS
 from .rows import row_dict
 
@@ -26,12 +31,12 @@ SOURCE_INCOMPLETE = "SOURCE_INCOMPLETE"
 UNRESOLVED_PREFIX = "urn:unresolved:"
 
 
-def migrate_history(connection, bindings, dry_run=False):
+def migrate_history(connection: Connection, bindings: dict[str, str], dry_run: bool=False) -> HistoryMigrationReport:
     """调用方拥有事务；同源冲突阻止提交，不静默覆盖已映射来源。"""
     if not dry_run:
         connection.exec_driver_sql(SQL_LOCK_FACTS)
     rows = [dict(row) for row in connection.exec_driver_sql(SQL_HISTORY).mappings()]
-    report = {"mapping": {}, "sourceIncomplete": [], "conflicts": [], "dryRun": dry_run}
+    report: HistoryMigrationReport = {"mapping": {}, "sourceIncomplete": [], "conflicts": [], "dryRun": dry_run}
     prepared = []
     for row in rows:
         old = row["release_id"]
@@ -71,25 +76,25 @@ def migrate_history(connection, bindings, dry_run=False):
         version = row["config_version"] or "unknown"
         toolchain = row["toolchain_version"] or "unknown"
         payload = {"repository": repository, "branchName": branch, "commitSha": sha}
-        connection.exec_driver_sql(
-            SQL_INSERT,
-            (
-                identifier,
-                row["run_id"],
-                repository,
-                branch,
-                row["mode"],
-                row["profile_binding_id"] or "unknown",
-                version,
-                toolchain,
-                MIGRATION,
-                row["release_id"],
-                digest(payload),
-                Json(payload),
-                Json(snapshot),
-                sha,
-                sha,
-            ),
+        # 与新构建共享列类型和具名插入，保留历史身份及来源快照。
+        connection.execute(
+            insert(BUILD).values(
+                build_id=identifier,
+                run_id=row["run_id"],
+                repository=repository,
+                branch_name=branch,
+                environment=row["mode"],
+                execution_binding=row["profile_binding_id"] or "unknown",
+                config_version=version,
+                toolchain_version=toolchain,
+                caller=MIGRATION,
+                idempotency_key=row["release_id"],
+                request_digest=digest(payload),
+                request_json=payload,
+                config_snapshot=snapshot,
+                requested_commit_sha=sha,
+                commit_sha=sha,
+            ).returning(BUILD)
         )
         status = "SUCCEEDED" if row["state"] in {"PUBLISHED", "SUPERSEDED"} else row["job_status"] or "FAILED"
         connection.exec_driver_sql(

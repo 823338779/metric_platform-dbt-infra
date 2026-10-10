@@ -1,5 +1,16 @@
 """部署自然键与接收顺序；活动指针不属于构建终态。"""
 
+from __future__ import annotations
+
+from typing import cast
+from uuid import UUID
+
+from sqlalchemy import Connection, func, select
+
+from dbt_metricflow_service.models.deployments import DeploymentAttemptView, DeploymentKey, DeploymentRequest
+from dbt_metricflow_service.storage.postgres import Database
+from dbt_metricflow_service.storage.records import StoredBuild, StoredDeploymentAttempt, StoredDeploymentTarget
+
 from .jobs import StoreConflict
 from .rows import row_dict
 
@@ -43,18 +54,27 @@ TERMINAL = frozenset({"DEPLOYED", "STALE", "FAILED", "CANCELLED"})
 
 
 class DeploymentStore:
-    def __init__(self, db):
+    def __init__(self, db: Database) -> None:
         # 与构建队列共用连接池；不独立执行外部 Git 操作。
         self.db = db
 
-    def accept_in_transaction(self, connection, build, caller, key, fingerprint, branch, operation="DEPLOYMENT"):
+    def accept_in_transaction(
+        self,
+        connection: Connection,
+        build: StoredBuild,
+        caller: str,
+        key: str,
+        fingerprint: str,
+        branch: str,
+        operation: str = "DEPLOYMENT",
+    ) -> StoredDeploymentAttempt:
         natural_key = (build["repository"], build["environment"], branch)
         connection.exec_driver_sql(SQL_ENSURE, natural_key)
         connection.exec_driver_sql(SQL_LOCK_TARGET, natural_key)
         connection.exec_driver_sql(SQL_STALE, natural_key)
-        target = row_dict(connection.exec_driver_sql(SQL_ADVANCE, natural_key))
+        target = cast(StoredDeploymentTarget, row_dict(connection.exec_driver_sql(SQL_ADVANCE, natural_key)))
         status = "PENDING" if build["build_status"] == "SUCCEEDED" else "WAITING_FOR_BUILD"
-        return row_dict(
+        return cast(StoredDeploymentAttempt, row_dict(
             connection.exec_driver_sql(
                 SQL_INSERT,
                 (
@@ -68,46 +88,68 @@ class DeploymentStore:
                     operation,
                 ),
             )
-        )
+        ))
 
-    def initial(self, build_id):
+    def initial(self, build_id: UUID | str) -> StoredDeploymentAttempt | None:
         with self.db.transaction() as connection:
-            return row_dict(connection.exec_driver_sql(SQL_INITIAL, (str(build_id), "build:" + str(build_id))))
+            return cast(
+                StoredDeploymentAttempt | None,
+                row_dict(connection.exec_driver_sql(SQL_INITIAL, (str(build_id), "build:" + str(build_id)))),
+            )
 
-    def current(self, key):
+    def current(self, key: DeploymentKey) -> StoredDeploymentTarget | None:
         with self.db.transaction() as connection:
-            return row_dict(connection.exec_driver_sql(SQL_TARGET, (key.repository, key.environment, key.branch_name)))
+            return cast(
+                StoredDeploymentTarget | None,
+                row_dict(connection.exec_driver_sql(SQL_TARGET, (key.repository, key.environment, key.branch_name))),
+            )
 
-    def attempt(self, key, generation):
+    def attempt(self, key: DeploymentKey, generation: int) -> StoredDeploymentAttempt | None:
         with self.db.transaction() as connection:
-            return row_dict(connection.exec_driver_sql(SQL_ATTEMPT, (*natural(key), generation)))
+            return cast(
+                StoredDeploymentAttempt | None,
+                row_dict(connection.exec_driver_sql(SQL_ATTEMPT, (*natural(key), generation))),
+            )
 
-    def by_key(self, repository, caller, key):
+    def by_key(self, repository: str, caller: str, key: str) -> StoredDeploymentAttempt | None:
         with self.db.transaction() as connection:
-            return row_dict(connection.exec_driver_sql(SQL_ATTEMPT_KEY, (repository, caller, key)))
+            return cast(
+                StoredDeploymentAttempt | None,
+                row_dict(connection.exec_driver_sql(SQL_ATTEMPT_KEY, (repository, caller, key))),
+            )
 
-    def submit(self, build, caller, request, fingerprint):
-        from .builds import SQL_LOCK
-
+    def submit(
+        self, build: StoredBuild, caller: str, request: DeploymentRequest, fingerprint: str
+    ) -> StoredDeploymentAttempt:
         with self.db.fact_transaction() as connection:
-            connection.exec_driver_sql(SQL_LOCK, (build["repository"] + caller + request.idempotency_key,))
+            # 使用同一 advisory lock 键序列化部署幂等受理，不依赖构建层的 SQL 常量。
+            scope = build["repository"] + caller + request.idempotency_key
+            connection.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(scope, 0))))
             prior = row_dict(
                 connection.exec_driver_sql(SQL_ATTEMPT_KEY, (build["repository"], caller, request.idempotency_key))
             )
             if prior:
                 if prior["request_digest"] != fingerprint:
                     raise StoreConflict("deployment key already binds another input")
-                return prior
+                return cast(StoredDeploymentAttempt, prior)
             key = (build["repository"], build["environment"], request.branch_name)
             connection.exec_driver_sql(SQL_ENSURE, key)
-            current = row_dict(connection.exec_driver_sql(SQL_LOCK_TARGET, key))
+            current = cast(StoredDeploymentTarget, row_dict(connection.exec_driver_sql(SQL_LOCK_TARGET, key)))
             if current["version"] != request.expected_target_version:
                 raise StoreConflict("deployment target version changed")
-            return self.accept_in_transaction(
+            return cast(StoredDeploymentAttempt, self.accept_in_transaction(
                 connection, build, caller, request.idempotency_key, fingerprint, request.branch_name
-            )
+            ))
 
-    def observe(self, key, head, state, *, expected_version, expected_active_build_id):
+    def observe(
+        self,
+        key: DeploymentKey,
+        head: str | None,
+        state: str,
+        *,
+        expected_version: int,
+        expected_active_build_id: str | None,
+    ) -> StoredDeploymentTarget | None:
         with self.db.fact_transaction() as connection:
             target = row_dict(connection.exec_driver_sql(SQL_LOCK_TARGET, natural(key)))
             if (
@@ -115,28 +157,37 @@ class DeploymentStore:
                 or target["version"] != expected_version
                 or target["active_build_id"] != expected_active_build_id
             ):
-                return None
+                return cast(StoredDeploymentTarget | None, None)
             missing = state == "MISSING"
             target = row_dict(connection.exec_driver_sql(SQL_OBSERVE, (head, state, missing, missing, *natural(key))))
             if missing:
                 connection.exec_driver_sql(SQL_STALE, natural(key))
-            return target
+            return cast(StoredDeploymentTarget | None, target)
 
-    def settle(self, key, generation, status, reason=None, *, expected_version=None, head=None):
+    def settle(
+        self,
+        key: DeploymentKey,
+        generation: int,
+        status: str,
+        reason: str | None = None,
+        *,
+        expected_version: int | None = None,
+        head: str | None = None,
+    ) -> StoredDeploymentAttempt | None:
         with self.db.fact_transaction() as connection:
             target = row_dict(connection.exec_driver_sql(SQL_LOCK_TARGET, natural(key)))
             attempt = row_dict(connection.exec_driver_sql(SQL_ATTEMPT, (*natural(key), generation)))
             if not attempt or attempt["deployment_status"] in TERMINAL:
-                return attempt
-            if target["desired_generation"] != generation:
+                return cast(StoredDeploymentAttempt | None, attempt)
+            if cast(StoredDeploymentTarget, target)["desired_generation"] != generation:
                 status, reason = "STALE", "NEWER_INTENT"
             if status == "DEPLOYED":
-                build = row_dict(connection.exec_driver_sql(SQL_BUILD_LOCK, (attempt["build_id"],)))
+                build = cast(StoredBuild, row_dict(connection.exec_driver_sql(SQL_BUILD_LOCK, (attempt["build_id"],))))
                 # 与人工清理锁同一执行记录；head 只比较事务前已完成的观察值。
                 if (
-                    target["version"] != expected_version
+                    cast(StoredDeploymentTarget, target)["version"] != expected_version
                     or build["build_status"] != "SUCCEEDED"
-                    or build["run_lifecycle"] != "ACTIVE"
+                    or build.get("run_lifecycle") != "ACTIVE"
                     or build["source_incomplete"]
                     or not build["output_set_id"]
                     or build["commit_sha"] != head
@@ -144,22 +195,30 @@ class DeploymentStore:
                     status, reason = "STALE", "TARGET_OR_BUILD_CHANGED"
                 else:
                     connection.exec_driver_sql(SQL_SWITCH, (build["build_id"], *natural(key)))
-            return row_dict(connection.exec_driver_sql(SQL_FINISH, (status, reason, status, *natural(key), generation)))
+            return cast(
+                StoredDeploymentAttempt | None,
+                row_dict(connection.exec_driver_sql(SQL_FINISH, (status, reason, status, *natural(key), generation))),
+            )
 
-    def pending(self):
+    def pending(self) -> list[StoredDeploymentAttempt]:
         with self.db.transaction() as connection:
-            return [dict(row) for row in connection.exec_driver_sql(SQL_PENDING).mappings()]
+            return cast(
+                list[StoredDeploymentAttempt], [dict(row) for row in connection.exec_driver_sql(SQL_PENDING).mappings()]
+            )
 
-    def list(self, repository):
+    def list(self, repository: str) -> list[StoredDeploymentAttempt]:
         with self.db.transaction() as connection:
-            return [dict(row) for row in connection.exec_driver_sql(SQL_LIST, (repository,)).mappings()]
+            return cast(
+                list[StoredDeploymentAttempt],
+                [dict(row) for row in connection.exec_driver_sql(SQL_LIST, (repository,)).mappings()],
+            )
 
 
-def natural(key):
+def natural(key: DeploymentKey) -> tuple[str, str, str]:
     return key.repository, key.environment, key.branch_name
 
 
-def attempt_view(row):
+def attempt_view(row: StoredDeploymentAttempt) -> DeploymentAttemptView:
     # 显式白名单防止内部幂等来源和请求摘要泄漏到 API。
     from ..models.deployments import DeploymentAttemptView
 

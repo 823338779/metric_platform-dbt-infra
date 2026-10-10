@@ -4,9 +4,10 @@ import asyncio
 import json
 import os
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, ParamSpec, TypeVar, cast
 from uuid import UUID
 
 from dbt_metricflow_service.execution.models import (
@@ -15,6 +16,7 @@ from dbt_metricflow_service.execution.models import (
     JobStatus,
 )
 from dbt_metricflow_service.execution.runner import JobRunner
+from dbt_metricflow_service.models.payloads import JsonObject
 from dbt_metricflow_service.platform.namespace import (
     run_prefix,
 )
@@ -22,6 +24,14 @@ from dbt_metricflow_service.runtime.workspace import attempt_workspace
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.jobs import JobStore
+from dbt_metricflow_service.storage.records import LeasedJob, StoredJob
+
+# 保留后台线程函数的位置和关键字参数签名。
+P = ParamSpec("P")
+
+# 泛型保留调用方的元素或执行结果类型。
+T = TypeVar("T")
+
 
 # 任务类型与持久阶段使用固定协议值，避免执行器扩展公开队列状态。
 BUILD_RUN = "BUILD_RUN"
@@ -80,7 +90,7 @@ class ExecutionResult:
 class ExecutionError(RuntimeError):
     """向 worker 提供稳定错误码和可以安全保存的子进程诊断。"""
 
-    def __init__(self, code: str, payload: dict | None = None, *, stopped: bool = True) -> None:
+    def __init__(self, code: str, payload: JsonObject | None = None, *, stopped: bool = True) -> None:
         super().__init__(code)
         # 错误码不包含环境、输入 YAML 或子进程绝对路径。
         self.code = code
@@ -90,7 +100,7 @@ class ExecutionError(RuntimeError):
         self.stopped = stopped
 
 
-async def _finish_task(task):
+async def _finish_task(task: asyncio.Task[T]) -> T:
     """重复取消只延迟调用者返回，不中断已经开始的清理或文件读写。"""
 
     cancelled = False
@@ -111,7 +121,7 @@ async def _finish_task(task):
     return result
 
 
-async def _thread(function, *args, **kwargs):
+async def _thread(function: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
     """取消时等待读写线程退出，防止清理后仍向已删除目录写入。"""
 
     return await _finish_task(asyncio.create_task(asyncio.to_thread(function, *args, **kwargs)))
@@ -126,7 +136,7 @@ class RuntimeExecutor:
         self.jobs = jobs
         self.artifacts = artifacts
 
-    async def execute(self, job: dict) -> ExecutionResult:
+    async def execute(self, job: LeasedJob) -> ExecutionResult:
         """还原固定输入，等待子进程退出，再删除可重建的本地目录。"""
 
         # 复用路径、链接与 UUID 检查，在进程停止后退出工作目录上下文。
@@ -148,9 +158,9 @@ class RuntimeExecutor:
                     if job["kind"] == METRIC_QUERY:
                         body = {"mode": QUERY_MODE, "request": body.get("engineRequest", body)}
                     elif job["kind"] == RUN_CLEANUP:
-                        body = {"mode": CLEANUP_MODE, "schema": job["schema_name"]}
+                        body = {"mode": CLEANUP_MODE, "schema": cast(str, job["schema_name"])}
                         parent_id = UUID(job["parent_run_id"])
-                        if job["schema_name"] != "run_" + parent_id.hex:
+                        if cast(str, job["schema_name"]) != "run_" + parent_id.hex:
                             body.update({"runId": str(parent_id), "tablePrefix": run_prefix(parent_id)})
                     payload = await self._programmatic(job, runner, project, attempt, body)
                     return ExecutionResult(payload)
@@ -159,7 +169,7 @@ class RuntimeExecutor:
                 # JobRunner.close 等待其进程树清理，之后才能移除工作目录。
                 await _finish_task(asyncio.create_task(runner.close()))
 
-    async def _build(self, job: dict, runner: JobRunner, attempt: Path) -> ExecutionResult:
+    async def _build(self, job: LeasedJob, runner: JobRunner, attempt: Path) -> ExecutionResult:
         from ..platform.build import execute_publication
 
         if job["request_json"].get("buildId"):
@@ -167,10 +177,10 @@ class RuntimeExecutor:
         elif not job["input_set_id"] or not job["request_json"].get("releaseId"):
             raise ExecutionError("FIXED_COMMIT_INPUT_REQUIRED")
         project = attempt / PROJECT_DIRECTORY
-        await _thread(self.artifacts.materialize, job["input_set_id"], project)
+        await _thread(self.artifacts.materialize, cast(str, job["input_set_id"]), project)
         return await execute_publication(self, job, runner, attempt, project)
 
-    async def _prepare_build_source(self, job: dict) -> dict:
+    async def _prepare_build_source(self, job: LeasedJob) -> LeasedJob:
         """受理之后获取固定源码；所有慢 I/O 均在短事务之外。"""
         import shutil
 
@@ -192,7 +202,7 @@ class RuntimeExecutor:
                     raise ValueError("source branch does not exist")
             await _thread(service.pin_source, body["buildId"], sha, job["lease_token"])
             await _thread(self.jobs.phase, job["job_id"], job["lease_token"], "FETCHING_SOURCE")
-            binding = ProjectBinding(job["project_id"], body["repository"], ".", job["profile_binding_id"])
+            binding = ProjectBinding(job["project_id"], body["repository"], ".", cast(str, job["profile_binding_id"]))
             directory, digest = await _thread(resolve_commit, binding, sha, self.settings.temp_root)
             try:
                 source = await _thread(self.artifacts.capture, job["project_id"], directory, metadata={
@@ -203,12 +213,12 @@ class RuntimeExecutor:
             if not await _thread(self.jobs.attach_input, job["job_id"], job["lease_token"], source,
                                      project_digest=digest):
                 raise ExecutionError(ERROR_LEASE_LOST, stopped=True)
-            return await _thread(self.jobs.get, job["job_id"]) | {
-                "attempt_id": job["attempt_id"], "lease_token": job["lease_token"]}
+            return cast(LeasedJob, cast(StoredJob, await _thread(self.jobs.get, job["job_id"])) | {
+                "attempt_id": job["attempt_id"], "lease_token": job["lease_token"]})
         except (ValueError, OSError) as error:
             raise ExecutionError("SOURCE_UNAVAILABLE", stopped=True) from error
 
-    async def _command(self, job: dict, runner: JobRunner, spec: CommandSpec, phase: str) -> JobRecord:
+    async def _command(self, job: LeasedJob, runner: JobRunner, spec: CommandSpec, phase: str) -> JobRecord:
         # 提前记录外部执行；失去租约的节点绝不再启动子进程。
         external = spec.write_operation or job["kind"] in {METRIC_QUERY, QUERY_OPTIONS, RUN_CLEANUP}
         valid = await _thread(self.jobs.phase, job["job_id"], job["lease_token"], phase, external=external)
@@ -230,13 +240,13 @@ class RuntimeExecutor:
         return record
 
     async def _programmatic(
-        self, job: dict, runner: JobRunner, project: Path, attempt: Path, body: dict,
-    ) -> dict:
+        self, job: LeasedJob, runner: JobRunner, project: Path, attempt: Path, body: JsonObject,
+    ) -> JsonObject:
         # 控制文件位于项目之外，产物采集不会收集查询参数和结果。
         input_path, output_path = attempt / INPUT_FILE, attempt / OUTPUT_FILE
         input_path.write_text(json.dumps(body), encoding=UTF8)
         spec = build_programmatic_command(
-            project, self.settings.profiles_dir, job["schema_name"], job["profile_binding_id"],
+            project, self.settings.profiles_dir, cast(str, job["schema_name"]), cast(str, job["profile_binding_id"]),
             input_path, output_path,
         )
         try:
@@ -264,7 +274,7 @@ class RuntimeExecutor:
         return value
 
     @staticmethod
-    def _metadata(job: dict) -> dict:
+    def _metadata(job: LeasedJob) -> JsonObject:
         """发布元数据只引用持久集合与配置，不保存绝对路径。"""
 
         return {

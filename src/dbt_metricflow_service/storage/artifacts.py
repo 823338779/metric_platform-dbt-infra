@@ -15,6 +15,7 @@ from sqlalchemy import Connection
 from sqlalchemy.exc import IntegrityError
 
 from dbt_metricflow_service.execution.artifacts import _is_link
+from dbt_metricflow_service.models.payloads import JsonObject
 from dbt_metricflow_service.storage.postgres import Database
 from dbt_metricflow_service.storage.rows import row_dict
 
@@ -115,7 +116,7 @@ def _check_paths(paths: list[str]) -> None:
             raise ValueError("artifact file conflicts with a parent directory")
 
 
-def _digest(files: list[dict]) -> str:
+def _digest(files: list[JsonObject]) -> str:
     digest = hashlib.sha256()
     for item in sorted(files, key=lambda item: item["relative_path"]):
         for value in (item["relative_path"], item["raw_sha256"], str(item["raw_size"])):
@@ -196,7 +197,7 @@ def _files(directory: Path, kind: str, max_file_bytes: int) -> list[tuple[str, P
     return sorted(result.items())
 
 
-def _decode(row: dict, max_file_bytes: int) -> bytes:
+def _decode(row: JsonObject, max_file_bytes: int) -> bytes:
     # 限制解压输出，且逐文件核对长度和原始摘要，拒绝损坏与解压炸弹。
     size = row["raw_size"]
     if size < 0 or size > max_file_bytes or row["stored_size"] > max_file_bytes:
@@ -216,7 +217,7 @@ def _decode(row: dict, max_file_bytes: int) -> bytes:
 
 class ArtifactStore:
     def __init__(self, database: Database, *, max_file_bytes: int = MAX_FILE_BYTES,
-                 max_set_bytes: int = MAX_SET_BYTES):
+                 max_set_bytes: int = MAX_SET_BYTES) -> None:
         # 数据库为唯一持久事实来源，本地路径不会保存为集合定位符。
         self.database = database
         # 同时约束导入与还原；配置仅能收紧格式的硬上限。
@@ -226,7 +227,7 @@ class ArtifactStore:
             raise ValueError("artifact limits must be positive")
 
     def capture(self, project_id: str, directory: Path, *, producer_attempt_id: str | None = None,
-                kind: str = SOURCE, metadata: dict | None = None) -> str:
+                kind: str = SOURCE, metadata: JsonObject | None = None) -> str:
         if kind not in {SOURCE, EXECUTION}:
             raise ValueError("artifact kind is unsupported")
         metadata = dict(metadata or {})
@@ -266,7 +267,7 @@ class ArtifactStore:
                 self.seal(set_id, connection)
         return set_id
 
-    def metadata(self, set_id: str) -> dict:
+    def metadata(self, set_id: str) -> JsonObject:
         with self.database.transaction() as connection:
             sql_result = connection.exec_driver_sql(SQL_SET, (set_id,))
             row = row_dict(sql_result)
@@ -286,7 +287,7 @@ class ArtifactStore:
         if row["state"] == STAGING:
             sql_result = connection.exec_driver_sql(SQL_SEAL, (SEALED, set_id))
 
-    def _validate(self, metadata: dict, files: list[dict]) -> None:
+    def _validate(self, metadata: JsonObject, files: list[JsonObject]) -> None:
         _check_paths([row["relative_path"] for row in files])
         total = sum(row["raw_size"] for row in files)
         if total > self.max_set_bytes or total != metadata["raw_bytes"] or len(files) != metadata["file_count"]:

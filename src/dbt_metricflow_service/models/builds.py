@@ -1,9 +1,11 @@
 """固定源码与构建身份，不包含项目管理或交付状态。"""
 
+from __future__ import annotations
+
 import re
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, Self, TypeVar
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -53,7 +55,7 @@ class ConfigSnapshot(Contract):
 
     @field_validator("schema_name")
     @classmethod
-    def valid_schema(cls, value):
+    def valid_schema(cls, value: str | None) -> str | None:
         if value is not None and not re.fullmatch(r"[a-z][a-z0-9_]{0,255}", value):
             raise ValueError("invalid schemaName")
         return value
@@ -98,7 +100,7 @@ class BuildRequest(Contract):
     _branch = field_validator("branch_name")(validate_branch)
 
     @model_validator(mode="after")
-    def fixed_source(self):
+    def fixed_source(self) -> Self:
         # 这里只检查协议组合；仓库准入与配置可用性由应用用例负责。
         if not self.branch_name and not self.commit_sha:
             raise ValueError("branchName or commitSha is required")

@@ -1,10 +1,15 @@
 """项目的唯一发布存储。"""
 
+from __future__ import annotations
+
 from uuid import UUID, uuid4
 
 from psycopg2.extras import Json
 from sqlalchemy import Connection
 
+from dbt_metricflow_service.models.payloads import JsonObject
+from dbt_metricflow_service.storage.postgres import Database
+from dbt_metricflow_service.storage.records import DatabaseRow
 from dbt_metricflow_service.storage.rows import row_dict
 
 from ..models.artifacts import BindingMode, PublishedCatalog
@@ -57,26 +62,28 @@ SUCCEEDED = "SUCCEEDED"
 class PublicationStore:
     """与任务存储共用数据库，活动版本仅在封存事务内推进。"""
 
-    def __init__(self, db):
+    def __init__(self, db: Database) -> None:
         # 连接池由 Runtime 拥有；store 不单独创建连接或提交外部事务。
         self.db = db
 
-    def by_key(self, project_id, key):
+    def by_key(self, project_id: str, key: str) -> DatabaseRow | None:
         with self.db.transaction() as connection:
             return row_dict(connection.exec_driver_sql(SQL_BY_KEY, (project_id, key)))
 
-    def project_ids(self):
+    def project_ids(self) -> list[str]:
         with self.db.transaction() as connection:
             return [row[0] for row in connection.exec_driver_sql(
                 "SELECT project_id FROM runtime_project ORDER BY project_id")]
 
-    def releases(self, project_id):
+    def releases(self, project_id: str) -> list[DatabaseRow]:
         with self.db.transaction() as connection:
             return [dict(row) for row in connection.exec_driver_sql(
                 "SELECT * FROM runtime_release WHERE project_id=%s ORDER BY created_at DESC", (project_id,)
             ).mappings()]
 
-    def reserve_build(self, jobs, project, key, snapshot, source_id, timeout_seconds):
+    def reserve_build(
+        self, jobs: JobStore, project: DatabaseRow, key: str, snapshot: JsonObject, source_id: str, timeout_seconds: int
+    ) -> DatabaseRow:
         from ..platform.namespace import validate_schema_name
         from .jobs import SQL_SELECT_PG_ADVISORY_XACT_LOCK_HASHTEXTEXTENDED
 
@@ -109,8 +116,8 @@ class PublicationStore:
             connection.exec_driver_sql(SQL_ATTACH_RUN, (job["job_id"], release["release_id"]))
             return {**release, "run_id": job["job_id"]}
 
-    def create_candidate(self, project_id: str, request: dict, idempotency_key: str, *,
-                         branch_id: str | None = None) -> dict:
+    def create_candidate(self, project_id: str, request: JsonObject, idempotency_key: str, *,
+                         branch_id: str | None = None) -> JsonObject:
         # 分支行串行化候选序号与请求幂等；不同分支互不淘汰。
         with self.db.transaction() as connection:
             return self.create_candidate_in_transaction(
@@ -122,11 +129,11 @@ class PublicationStore:
         self,
         connection: Connection,
         project_id: str,
-        request: dict,
+        request: JsonObject,
         idempotency_key: str,
         *,
         branch_id: str | None = None,
-    ) -> dict:
+    ) -> JsonObject:
         # 分支行串行化候选序号与请求幂等；不同分支互不淘汰。
         if not idempotency_key:
             raise ValueError("候选幂等键不能为空")
@@ -170,7 +177,7 @@ class PublicationStore:
         )
         return result
 
-    def get_release(self, project_id: str, release_id) -> dict:
+    def get_release(self, project_id: str, release_id: UUID | str) -> JsonObject:
         with self.db.transaction() as connection:
             sql_result = connection.exec_driver_sql(SQL_RELEASE, (project_id, str(release_id), str(release_id)))
             row = row_dict(sql_result)
@@ -178,7 +185,7 @@ class PublicationStore:
                 raise KeyError(str(release_id))
             return row
 
-    def get_publication(self, project_id: str, *, branch_id: str | None = None) -> dict:
+    def get_publication(self, project_id: str, *, branch_id: str | None = None) -> JsonObject:
         # 在单一事务读取指针和记录，发布身份一旦取定就不替换成后续版本。
         with self.db.transaction() as connection:
             sql_result = connection.exec_driver_sql(SQL_BRANCH_READ, (project_id, branch_id, branch_id))
@@ -192,8 +199,8 @@ class PublicationStore:
                 active = dict(row_dict(sql_result))
             return {"projectId": project_id, "activePublication": active}
 
-    def publish_in_transaction(self, connection: Connection, *, job_id: UUID, attempt_token: str,
-                               release_id: UUID, output_set_id: UUID) -> None:
+    def publish_in_transaction(self, connection: Connection, *, job_id: UUID | str, attempt_token: UUID | str,
+                               release_id: UUID | str, output_set_id: UUID | str) -> None:
         # 调用者持有 job/attempt 锁；与受理及清理保持 job → project → release 顺序。
         job = JobStore(self.db)._authorized(connection, job_id, attempt_token)
         if not job:
