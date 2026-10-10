@@ -1,0 +1,480 @@
+{
+  "protocolVersion": "build-deployment-v3",
+  "examples": [
+    {
+      "name": "build",
+      "model": "BuildRequest",
+      "value": {
+        "repository": "https://git.example.com/metrics.git",
+        "branchName": "feature/revenue",
+        "commitSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "environment": "PREVIEW",
+        "executionBinding": "warehouse",
+        "configVersion": "1",
+        "deploymentPolicy": "NONE",
+        "idempotencyKey": "build-001",
+        "origin": null
+      }
+    },
+    {
+      "name": "failed-build",
+      "model": "BuildView",
+      "value": {
+        "buildId": "12345678-1234-4234-8234-123456789abc",
+        "repository": "https://git.example.com/metrics.git",
+        "branchName": "feature/revenue",
+        "requestedCommitSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "commitSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "environment": "PREVIEW",
+        "executionBinding": "warehouse",
+        "configVersion": "1",
+        "toolchainVersion": "fixture",
+        "buildStatus": "FAILED",
+        "phase": "PARSING",
+        "createdAt": "2026-10-10T00:00:00Z",
+        "updatedAt": "2026-10-10T00:00:00Z",
+        "finishedAt": null,
+        "cancelRequested": false,
+        "catalogAvailable": false,
+        "queryAvailable": false,
+        "queryUnavailableReason": null,
+        "error": {
+          "code": "INVALID_DEFINITION",
+          "message": "模型定义无效",
+          "retryable": false,
+          "phase": null,
+          "buildId": null
+        },
+        "initialDeployment": null
+      }
+    },
+    {
+      "name": "deploy",
+      "model": "DeploymentRequest",
+      "value": {
+        "buildId": "12345678-1234-4234-8234-123456789abc",
+        "branchName": "feature/revenue",
+        "expectedTargetVersion": 0,
+        "idempotencyKey": "deploy-1"
+      }
+    },
+    {
+      "name": "empty-target",
+      "model": "DeploymentTargetView",
+      "value": {
+        "repository": "https://git.example.com/metrics.git",
+        "environment": "PREVIEW",
+        "branchName": "feature/revenue",
+        "version": 0,
+        "desiredGeneration": 0,
+        "activeBuildId": null,
+        "activeCommitSha": null,
+        "latestAttempt": null,
+        "observedHeadSha": null,
+        "headObservedAt": null,
+        "sourceState": "UNDEPLOYED"
+      }
+    },
+    {
+      "name": "waiting-intent",
+      "model": "DeploymentAttemptView",
+      "value": {
+        "repository": "https://git.example.com/metrics.git",
+        "environment": "PREVIEW",
+        "branchName": "feature/revenue",
+        "generation": 1,
+        "buildId": "12345678-1234-4234-8234-123456789abc",
+        "deploymentStatus": "WAITING_FOR_BUILD",
+        "reason": null,
+        "createdAt": "2026-10-10T00:00:00Z",
+        "deployedAt": null
+      }
+    },
+    {
+      "name": "options-request",
+      "model": "OptionsRequest",
+      "value": {
+        "idempotencyKey": "options-1",
+        "metricResourceIds": [
+          "metric.revenue"
+        ]
+      }
+    },
+    {
+      "name": "options-queued",
+      "model": "OptionsTaskView",
+      "value": {
+        "optionsTaskId": "12345678-1234-4234-8234-123456789abc",
+        "buildId": "12345678-1234-4234-8234-123456789abc",
+        "state": "QUEUED",
+        "metricResourceIds": [
+          "metric.revenue"
+        ],
+        "options": null,
+        "error": null
+      }
+    },
+    {
+      "name": "query",
+      "model": "QueryRequest",
+      "value": {
+        "idempotencyKey": "query-QUERY",
+        "mode": "QUERY",
+        "metricResourceIds": [
+          "metric.revenue"
+        ],
+        "groupBy": [],
+        "filters": [],
+        "startTime": null,
+        "endTime": null,
+        "orderBy": [],
+        "limit": 1000,
+        "datasetResourceId": null,
+        "dimensionOptionId": null
+      }
+    },
+    {
+      "name": "explain",
+      "model": "QueryRequest",
+      "value": {
+        "idempotencyKey": "query-EXPLAIN",
+        "mode": "EXPLAIN",
+        "metricResourceIds": [
+          "metric.revenue"
+        ],
+        "groupBy": [],
+        "filters": [],
+        "startTime": null,
+        "endTime": null,
+        "orderBy": [],
+        "limit": 1000,
+        "datasetResourceId": null,
+        "dimensionOptionId": null
+      }
+    },
+    {
+      "name": "preview",
+      "model": "QueryRequest",
+      "value": {
+        "idempotencyKey": "query-PREVIEW",
+        "mode": "PREVIEW",
+        "metricResourceIds": [],
+        "groupBy": [],
+        "filters": [],
+        "startTime": null,
+        "endTime": null,
+        "orderBy": [],
+        "limit": 1000,
+        "datasetResourceId": "model.orders",
+        "dimensionOptionId": null
+      }
+    },
+    {
+      "name": "dimension_values",
+      "model": "QueryRequest",
+      "value": {
+        "idempotencyKey": "query-DIMENSION_VALUES",
+        "mode": "DIMENSION_VALUES",
+        "metricResourceIds": [
+          "metric.revenue"
+        ],
+        "groupBy": [],
+        "filters": [],
+        "startTime": null,
+        "endTime": null,
+        "orderBy": [],
+        "limit": 1000,
+        "datasetResourceId": null,
+        "dimensionOptionId": "53bb4f22c1b44e93a386de1f08b67a37"
+      }
+    },
+    {
+      "name": "query-status",
+      "model": "QueryView",
+      "value": {
+        "queryId": "12345678-1234-4234-8234-123456789abc",
+        "buildId": "12345678-1234-4234-8234-123456789abc",
+        "state": "SUCCEEDED",
+        "mode": "QUERY",
+        "commitSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "businessTimezone": "Asia/Shanghai",
+        "normalizedTimeRange": {
+          "startTime": "2026-10-01T00:00:00",
+          "endTime": null
+        },
+        "boundaryPolicy": "metricflow_granularity_alignment",
+        "resultAvailable": true,
+        "error": null
+      }
+    },
+    {
+      "name": "precision-result",
+      "model": "ResultPage",
+      "value": {
+        "queryId": "12345678-1234-4234-8234-123456789abc",
+        "buildId": "12345678-1234-4234-8234-123456789abc",
+        "state": "SUCCEEDED",
+        "mode": "QUERY",
+        "commitSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "businessTimezone": "Asia/Shanghai",
+        "normalizedTimeRange": {
+          "startTime": "2026-10-01T00:00:00",
+          "endTime": null
+        },
+        "boundaryPolicy": "metricflow_granularity_alignment",
+        "resultAvailable": true,
+        "error": null,
+        "sql": null,
+        "columns": [
+          {
+            "name": "amount",
+            "type": "decimal"
+          }
+        ],
+        "rows": [
+          [
+            "12345678901234567890.123456789",
+            null
+          ]
+        ],
+        "offset": 0,
+        "returnedRows": 1,
+        "nextOffset": null,
+        "availableRows": 1,
+        "resultTruncated": false
+      }
+    },
+    {
+      "name": "410",
+      "model": "ErrorView",
+      "value": {
+        "code": "PHYSICAL_OBJECTS_REMOVED",
+        "message": "引擎任务暂不可用",
+        "retryable": false,
+        "phase": null,
+        "buildId": "12345678-1234-4234-8234-123456789abc"
+      }
+    },
+    {
+      "name": "422",
+      "model": "ErrorView",
+      "value": {
+        "code": "INVALID_DIMENSION_OPTION",
+        "message": "引擎任务暂不可用",
+        "retryable": false,
+        "phase": null,
+        "buildId": "12345678-1234-4234-8234-123456789abc"
+      }
+    },
+    {
+      "name": "503",
+      "model": "ErrorView",
+      "value": {
+        "code": "EXECUTION_ENVIRONMENT_UNAVAILABLE",
+        "message": "引擎任务暂不可用",
+        "retryable": true,
+        "phase": null,
+        "buildId": "12345678-1234-4234-8234-123456789abc"
+      }
+    },
+    {
+      "name": "catalog",
+      "model": "CatalogPage",
+      "value": {
+        "items": [
+          {
+            "resourceId": "metric.revenue",
+            "nativeId": "metric.revenue",
+            "name": "revenue",
+            "displayName": "metric.revenue",
+            "description": null,
+            "sourcePath": null,
+            "capabilities": [
+              "QUERY"
+            ],
+            "nativeDetails": {},
+            "kind": "METRIC",
+            "attributes": {
+              "metricType": "simple",
+              "definitionSummary": "收入",
+              "inputMetricIds": [],
+              "datasetIds": [
+                "semantic_model.orders"
+              ],
+              "filters": null,
+              "timeConfig": {}
+            }
+          },
+          {
+            "resourceId": "dimension.orders.region",
+            "nativeId": "dimension.orders.region",
+            "name": "region",
+            "displayName": "dimension.orders.region",
+            "description": null,
+            "sourcePath": null,
+            "capabilities": [],
+            "nativeDetails": {},
+            "kind": "DIMENSION",
+            "attributes": {
+              "datasetId": "semantic_model.orders",
+              "dimensionType": "categorical",
+              "expression": null,
+              "timeGranularity": null
+            }
+          },
+          {
+            "resourceId": "semantic_model.orders",
+            "nativeId": "semantic_model.orders",
+            "name": "orders",
+            "displayName": "semantic_model.orders",
+            "description": null,
+            "sourcePath": null,
+            "capabilities": [],
+            "nativeDetails": {},
+            "kind": "SEMANTIC_MODEL",
+            "attributes": {
+              "modelResourceId": "model.orders",
+              "dimensionIds": [
+                "dimension.orders.region"
+              ],
+              "entities": [],
+              "measures": [],
+              "defaultTimeDimension": null
+            }
+          },
+          {
+            "resourceId": "model.orders",
+            "nativeId": "model.orders",
+            "name": "orders",
+            "displayName": "model.orders",
+            "description": null,
+            "sourcePath": null,
+            "capabilities": [
+              "PREVIEW"
+            ],
+            "nativeDetails": {},
+            "kind": "TABLE",
+            "attributes": {
+              "origin": "BUILT",
+              "relation": {
+                "database": null,
+                "schema": "analytics",
+                "identifier": "rv_example_orders"
+              },
+              "columns": {}
+            }
+          },
+          {
+            "resourceId": "model.order_view",
+            "nativeId": "model.order_view",
+            "name": "order_view",
+            "displayName": "model.order_view",
+            "description": null,
+            "sourcePath": null,
+            "capabilities": [
+              "PREVIEW"
+            ],
+            "nativeDetails": {},
+            "kind": "VIEW",
+            "attributes": {
+              "origin": "BUILT",
+              "relation": {
+                "database": null,
+                "schema": "analytics",
+                "identifier": "rv_example_view"
+              },
+              "columns": {}
+            }
+          }
+        ],
+        "nextCursor": null,
+        "buildId": "12345678-1234-4234-8234-123456789abc"
+      }
+    },
+    {
+      "name": "resource",
+      "model": "ResourceView",
+      "value": {
+        "resourceId": "metric.revenue",
+        "nativeId": "metric.revenue",
+        "name": "revenue",
+        "displayName": "metric.revenue",
+        "description": null,
+        "sourcePath": null,
+        "capabilities": [
+          "QUERY"
+        ],
+        "nativeDetails": {},
+        "buildId": "12345678-1234-4234-8234-123456789abc",
+        "kind": "METRIC",
+        "attributes": {
+          "metricType": "simple",
+          "definitionSummary": "收入",
+          "inputMetricIds": [],
+          "datasetIds": [
+            "semantic_model.orders"
+          ],
+          "filters": null,
+          "timeConfig": {}
+        }
+      }
+    },
+    {
+      "name": "source",
+      "model": "ResourceSourceView",
+      "value": {
+        "buildId": "12345678-1234-4234-8234-123456789abc",
+        "resourceId": "metric.revenue",
+        "path": "models/metrics.yml",
+        "content": "metrics: []\n"
+      }
+    },
+    {
+      "name": "lineage",
+      "model": "ResourceLineageView",
+      "value": {
+        "buildId": "12345678-1234-4234-8234-123456789abc",
+        "resourceId": "metric.revenue",
+        "dependencies": [
+          {
+            "upstreamResourceId": "semantic_model.orders",
+            "downstreamResourceId": "metric.revenue",
+            "kind": "DEPENDS_ON"
+          }
+        ]
+      }
+    },
+    {
+      "name": "native-details",
+      "model": "ResourceNativeView",
+      "value": {
+        "buildId": "12345678-1234-4234-8234-123456789abc",
+        "resourceId": "metric.revenue",
+        "nativeDetails": {
+          "type": "simple"
+        }
+      }
+    }
+  ],
+  "invalidBuilds": [
+    {
+      "repository": "https://git.example.com/metrics.git",
+      "branchName": "feature/revenue",
+      "commitSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "environment": "PREVIEW",
+      "executionBinding": "warehouse",
+      "configVersion": "1",
+      "idempotencyKey": "build-001",
+      "projectId": "legacy"
+    },
+    {
+      "repository": "https://git.example.com/metrics.git",
+      "branchName": "feature/revenue",
+      "commitSha": "abc",
+      "environment": "PREVIEW",
+      "executionBinding": "warehouse",
+      "configVersion": "1",
+      "idempotencyKey": "build-001"
+    }
+  ]
+}

@@ -1,42 +1,29 @@
-"""冷选项先返回持久任务身份，完成后复用原 optionId。"""
-
-from types import MethodType
+"""异步选项身份和结果在后续构建后保持稳定。"""
 from uuid import uuid4
 
-from dbt_metricflow_service.publications.models import QueryOptionsRequest
+import pytest
+
+from dbt_metricflow_service.application.errors import ServiceError
+from dbt_metricflow_service.models.queries import OptionsRequest
 from dbt_metricflow_service.runtime.completion import complete_job
-from dbt_metricflow_service.runtime.service import Runtime
 from tests.test_publication_queries import query_service
 from tests.test_publication_storage import store as store
+from tests.test_v3_catalog_queries import ready_build
 
 
 def test_options_admission_deduplicates_and_reads_same_mapping(store, tmp_path):
-    service, job, release = query_service(store, tmp_path)
-    assert hasattr(service, "submit_options"), "asynchronous query options are not implemented"
-    # 保留真实 Runtime 队列逻辑，只有已发布目录采用现有受控 fixture。
-    runtime = service.runtime
-    for name in ("submit_options", "_submit_child", "_run"):
-        setattr(runtime, name, MethodType(getattr(Runtime, name), runtime))
-    request = QueryOptionsRequest(releaseId=release["release_id"], metricResourceIds=["metric.sample.orders"])
-    accepted = service.submit_options(job["project_id"], request)
-    assert accepted["state"] == "QUEUED"
-    assert service.submit_options(job["project_id"], request)["optionsJobId"] == accepted["optionsJobId"]
-    child = runtime.jobs.claim(str(uuid4()), toolchain_version=job["toolchain_version"], kinds=["QUERY_OPTIONS"])
-    complete_job(runtime.jobs, child["job_id"], child["lease_token"], runtime.options(None, ("orders",)))
-    result = service.get_options(job["project_id"], accepted["optionsJobId"])
-    assert result["state"] == "READY"
-    assert result["options"] == service.query_options(job["project_id"], request)["options"]
-    import pytest
-
-    from dbt_metricflow_service.publications.service import ReleaseGone
-    from tests.test_publication_result_pages import queued
-    from tests.test_publication_transaction import prepared
-
-    with pytest.raises(KeyError):
-        service.get_options("wrong-project", accepted["optionsJobId"])
-    query = queued(service, job, release)
-    jobs, candidate, _, output, _ = prepared(store, tmp_path, job["project_id"])
-    complete_job(jobs, candidate["job_id"], candidate["lease_token"], output_set_id=output)
-    with pytest.raises(ReleaseGone):
-        service.get_options(job["project_id"], accepted["optionsJobId"])
-    assert service.query_status(job["project_id"], query)["queryId"] == query
+    service, job, build = query_service(store, tmp_path)
+    request = OptionsRequest(idempotencyKey=uuid4().hex, metricResourceIds=["metric.sample.orders"])
+    accepted = service.submit_options(build["build_id"], request, "platform")
+    assert accepted.state == "QUEUED"
+    assert service.submit_options(build["build_id"], request, "platform").options_task_id == accepted.options_task_id
+    child = service.jobs.claim(str(uuid4()), toolchain_version=job["toolchain_version"], kinds=["QUERY_OPTIONS"])
+    existing = service.jobs.result(str(service.fixture_options.options_task_id))["payload_json"]
+    assert complete_job(service.jobs, child["job_id"], child["lease_token"], existing)
+    result = service.get_options(accepted.options_task_id)
+    assert result.state == "SUCCEEDED"
+    assert result.options == service.get_options(service.fixture_options.options_task_id).options
+    with pytest.raises(ServiceError):
+        service.get_options(uuid4())
+    ready_build(store, tmp_path)
+    assert service.get_options(accepted.options_task_id).options == result.options

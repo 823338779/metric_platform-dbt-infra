@@ -4,13 +4,10 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from urllib.parse import urlsplit
 from uuid import UUID
 
 from dbt_metricflow_service.execution.artifacts import _is_link
-from dbt_metricflow_service.platform.bindings import _prefix
-from dbt_metricflow_service.platform.namespace import validate_schema_name
-from dbt_metricflow_service.projects import PROJECT_NAME_PATTERN
+from dbt_metricflow_service.platform.bindings import PROJECT_NAME_PATTERN
 from dbt_metricflow_service.runtime.service import current_toolchain
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
@@ -23,13 +20,11 @@ MIGRATE = "migrate"
 REGISTER_BINDINGS = "register-bindings"
 RECONCILE = "reconcile-attempt"
 GC = "gc"
-PUBLISH = "publish"
+BUILD = "build"
+MIGRATE_HISTORY = "migrate-history"
 IMPORT_PUBLICATION = "import-publication"
-BUILD = "BUILD_RUN"
-QUERY = "METRIC_QUERY"
-MANIFEST = "manifest.json"
-BINDING_KEYS = frozenset({"projectId", "remote", "projectSubdir", "profileBindingId"})
-BINDING_OPTIONAL_KEYS = frozenset({"configVersion", "queryRetrySafe", "schemaName"})
+BINDING_KEYS = frozenset({"repository", "executionBinding", "configVersion", "config"})
+IDENTITY_KEYS = ("repository", "executionBinding", "configVersion")
 SQL_ATTEMPT = "SELECT lease_token,state FROM runtime_attempt WHERE attempt_id=%s"
 SQL_GC = """SELECT set_id FROM runtime_artifact_set
  WHERE created_at < clock_timestamp() - %s * interval '1 hour' ORDER BY created_at LIMIT %s"""
@@ -60,38 +55,27 @@ def _json(path: Path, maximum: int) -> dict | list:
 
 
 def register_bindings(db: Database, settings: Settings, path: Path) -> list[str]:
-    """把已验证的受控 Git/profile 绑定整体登记；不保存 URL 凭据。"""
+    """登记仓库允许使用的不可变执行配置，无业务项目注册。"""
+    from dbt_metricflow_service.models.builds import ConfigSnapshot
+    from dbt_metricflow_service.storage.builds import BuildStore
+
     records = _json(path, settings.max_artifact_file_bytes)
     if not isinstance(records, list):
-        raise ValueError("project bindings must be a list")
-    seen: set[str] = set()
+        raise ValueError("bindings must be a list")
+    parsed = []
     for record in records:
-        if (not isinstance(record, dict) or not BINDING_KEYS <= set(record)
-                or set(record) - BINDING_KEYS - BINDING_OPTIONAL_KEYS):
-            raise ValueError("project binding fields are invalid")
-        if type(record.get("queryRetrySafe", False)) is not bool:
-            raise ValueError("queryRetrySafe must be boolean")
-        if not isinstance(record.get("configVersion", settings.config_version), str):
-            raise ValueError("configVersion must be a string")
-        project_id = _project_id(record["projectId"])
-        if project_id in seen:
-            raise ValueError("project binding is duplicated")
-        seen.add(project_id)
-        _prefix(record["projectSubdir"])
-        remote = record["remote"]
-        if not isinstance(remote, str) or not remote or any(char in remote for char in ("\n", "\r")):
-            raise ValueError("Git remote is invalid")
-        parsed = urlsplit(remote)
-        if parsed.password or parsed.query or parsed.fragment or parsed.scheme in {"http", "https"} and parsed.username:
-            raise ValueError("Git remote must not contain credentials or query parameters")
-        if not isinstance(record["profileBindingId"], str) or not record["profileBindingId"]:
-            raise ValueError("profile binding identifier is required")
-        if "schemaName" in record:
-            validate_schema_name(record["schemaName"])
-    jobs = JobStore(db)
-    for record in records:
-        jobs.register_project(record["projectId"], record, record.get("configVersion", settings.config_version))
-    return [record["projectId"] for record in records]
+        if not isinstance(record, dict) or set(record) != BINDING_KEYS:
+            raise ValueError("binding fields are invalid")
+        config = ConfigSnapshot.model_validate(record["config"])
+        if any(not isinstance(record[key], str) or not record[key] for key in IDENTITY_KEYS):
+            raise ValueError("binding identity is required")
+        parsed.append((record, config))
+    # 输入整体校验后再登记，每个版本不可被后续命令静默覆盖。
+    store = BuildStore(db)
+    for record, config in parsed:
+        store.register_binding(record["repository"], record["executionBinding"], record["configVersion"],
+                               config.model_dump(mode="json", by_alias=True, exclude_none=True))
+    return [record["executionBinding"] for record, _ in parsed]
 
 
 def reconcile_attempt(db: Database, attempt_id: str, *, confirm_external_stopped: bool) -> bool:
@@ -110,10 +94,11 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="PostgreSQL 运行时管理及旧记录只读迁移")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser(MIGRATE)
-    publish = commands.add_parser(PUBLISH)
-    publish.add_argument("--project-id", required=True)
-    publish.add_argument("--idempotency-key", required=True)
-    publish.add_argument("--commit-sha", required=True)
+    build = commands.add_parser(BUILD)
+    build.add_argument("--file", type=Path, required=True)
+    history = commands.add_parser(MIGRATE_HISTORY)
+    history.add_argument("--bindings", type=Path, required=True)
+    history.add_argument("--dry-run", action="store_true")
     publication_import = commands.add_parser(IMPORT_PUBLICATION)
     publication_import.add_argument("--file", type=Path, required=True)
     publication_import.add_argument("--dry-run", action="store_true")
@@ -138,23 +123,25 @@ def main(argv: list[str] | None = None) -> None:
         else:
             db.check()
             if args.command == IMPORT_PUBLICATION:
-                from dbt_metricflow_service.publications.migration import import_publication
+                from dbt_metricflow_service.storage.publication_import import import_publication
 
                 result = import_publication(db, _artifacts(db, settings),
                                             _json(args.file, settings.max_artifact_file_bytes), dry_run=args.dry_run)
-            elif args.command == PUBLISH:
-                # 管理入口只受理服务绑定，不启动 worker、不读取平台数据库。
-                from types import SimpleNamespace
+            elif args.command == MIGRATE_HISTORY:
+                from dbt_metricflow_service.storage.migration import migrate_history
 
-                from dbt_metricflow_service.publications.service import PublicationService
+                with db.transaction() as connection:
+                    result = migrate_history(connection, _json(args.bindings, settings.max_artifact_file_bytes),
+                                             dry_run=args.dry_run)
+            elif args.command == BUILD:
+                from dbt_metricflow_service.application.builds import BuildService
+                from dbt_metricflow_service.models.builds import BuildRequest
+                from dbt_metricflow_service.storage.builds import BuildStore
 
-                runtime = SimpleNamespace(db=db, jobs=JobStore(db), settings=settings,
-                                          toolchain=settings.toolchain_version or current_toolchain())
-                from dbt_metricflow_service.publications.models import FixedCommitRequest
-                runtime.artifacts = _artifacts(db, settings)
-                release = PublicationService(runtime).submit(args.project_id, FixedCommitRequest(
-                    commitSha=args.commit_sha, idempotencyKey=args.idempotency_key))
-                result = {"releaseId": release["release_id"], "runId": release["run_id"], "state": release["state"]}
+                service = BuildService(BuildStore(db), settings.toolchain_version or current_toolchain(),
+                                       settings.command_timeout_seconds)
+                request = BuildRequest.model_validate(_json(args.file, settings.max_artifact_file_bytes))
+                result = service.submit(request, "admin").model_dump(mode="json", by_alias=True)
             elif args.command == REGISTER_BINDINGS:
                 result = register_bindings(db, settings, args.path)
             elif args.command == RECONCILE:

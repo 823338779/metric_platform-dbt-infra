@@ -8,7 +8,7 @@ import httpx
 import pytest
 from sqlalchemy.exc import DBAPIError, IntegrityError, TimeoutError
 
-from dbt_metricflow_service.api.runtime import create_runtime_app
+from dbt_metricflow_service.api.app import create_app
 from dbt_metricflow_service.runtime.worker import Worker
 from tests.test_runtime_api import runtime_pair as runtime_pair
 
@@ -18,7 +18,7 @@ from tests.test_runtime_api import runtime_pair as runtime_pair
 )
 async def test_database_errors_return_503(runtime_pair, monkeypatch, error):
     runtimes, _ = runtime_pair
-    app = create_runtime_app(runtimes[0].settings)
+    app = create_app(runtimes[0].settings)
 
     def unavailable(*args, **kwargs):
         raise error
@@ -27,9 +27,9 @@ async def test_database_errors_return_503(runtime_pair, monkeypatch, error):
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
                                     base_url="http://test") as client:
-            response = await client.get("/v2/projects/test/validations/" + str(uuid4()))
+            response = await client.get("/v3/queries/" + str(uuid4()) + "/status")
         assert response.status_code == 503
-        assert response.json() == {"detail": {"code": "runtime_unavailable"}}
+        assert response.json()["error"]["code"] == "STORAGE_UNAVAILABLE"
         assert "private-password" not in response.text
     finally:
         app.state.runtime.db.close()

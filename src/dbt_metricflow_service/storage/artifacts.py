@@ -23,9 +23,6 @@ MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_SET_BYTES = 256 * 1024 * 1024
 SOURCE = "SOURCE"
 EXECUTION = "EXECUTION"
-VALIDATION_INPUT = "VALIDATION_INPUT"
-VALIDATION_INPUT_FILE = "changes.json"
-MAX_VALIDATION_INPUT_BYTES = 8 * 1024 * 1024
 STAGING = "STAGING"
 SEALED = "SEALED"
 RAW = "raw"
@@ -141,6 +138,16 @@ def _files(directory: Path, kind: str, max_file_bytes: int) -> list[tuple[str, P
     if not isinstance(config, dict):
         raise ValueError("dbt project configuration must be a mapping")
     inputs = set(ROOT_FILES)
+    # 与 Git 读取一致，把工程内本地依赖也纳入可重启源码快照。
+    for filename in ("packages.yml", "dependencies.yml"):
+        dependency_file = root / filename
+        if dependency_file.is_file():
+            if dependency_file.stat().st_size > max_file_bytes or _is_link(dependency_file):
+                raise ValueError("invalid dependency declaration")
+            dependencies = yaml.safe_load(dependency_file.read_bytes()) or {}
+            for package in dependencies.get("packages", []):
+                if "local" in package:
+                    inputs.add(_relative(package["local"]).as_posix())
     for key, defaults in RESOURCE_PATHS.items():
         paths = config.get(key, defaults)
         if not isinstance(paths, list) or any(not isinstance(path, str) for path in paths):
@@ -257,32 +264,6 @@ class ArtifactStore:
             connection.exec_driver_sql(SQL_DIGEST, (_digest(files), set_id))
             if producer_attempt_id is None:
                 self.seal(set_id, connection)
-        return set_id
-
-    def capture_validation_input(
-        self, project_id: str, payload: bytes, connection: Connection, *, version: int = 1
-    ) -> str:
-        """与 job 受理共用事务；专用输入不放宽普通项目快照的文件白名单。"""
-        if len(payload) > min(MAX_VALIDATION_INPUT_BYTES, self.max_file_bytes, self.max_set_bytes):
-            raise ValueError("validation input exceeds byte limit")
-        # artifact 即使被其他内部调用者提交，也必须符合公开草稿协议。
-        from dbt_metricflow_service.validation.models import BranchDraftValidationRequest, DraftValidationRequest
-
-        # 受理端显式选择协议版本；旧接口不因载荷包含新字段而自动升级。
-        model = BranchDraftValidationRequest if version == 2 else DraftValidationRequest
-        model.model_validate_json(payload)
-        set_id = str(uuid4())
-        item = {"relative_path": VALIDATION_INPUT_FILE, "raw_sha256": hashlib.sha256(payload).hexdigest(),
-                "raw_size": len(payload)}
-        connection.exec_driver_sql(SQL_INSERT_SET, (
-            set_id, project_id, None, VALIDATION_INPUT, STAGING, None, None, None,
-            "1", "1", "1", _digest([item]), 1, len(payload), Json({}), Json({}), Json({}),
-        ))
-        connection.exec_driver_sql(SQL_INSERT_FILE, (
-            set_id, VALIDATION_INPUT_FILE, psycopg2.Binary(payload), RAW, item["raw_sha256"],
-            len(payload), len(payload), DEFAULT_MEDIA_TYPE, False,
-        ))
-        self.seal(set_id, connection)
         return set_id
 
     def metadata(self, set_id: str) -> dict:

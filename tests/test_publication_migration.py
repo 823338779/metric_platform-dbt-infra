@@ -4,8 +4,8 @@ from uuid import uuid4
 
 import pytest
 
-from dbt_metricflow_service.publications.migration import import_publication
 from dbt_metricflow_service.runtime.completion import complete_job
+from dbt_metricflow_service.storage.publication_import import import_publication
 from tests.test_publication_storage import store as store
 from tests.test_publication_transaction import prepared
 

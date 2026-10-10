@@ -2,7 +2,7 @@
 
 import pytest
 
-from dbt_metricflow_service.publications.template import validate_templates
+from dbt_metricflow_service.platform.template import validate_templates
 
 
 @pytest.mark.parametrize("code", [

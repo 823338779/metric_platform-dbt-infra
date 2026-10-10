@@ -7,7 +7,7 @@ from sqlalchemy import Connection
 
 from dbt_metricflow_service.storage.rows import row_dict
 
-from ..publications.models import BindingMode, PublishedCatalog
+from ..models.artifacts import BindingMode, PublishedCatalog
 from .artifacts import MAX_FILE_BYTES, SQL_FILE, SQL_SET, _decode
 from .branches import SQL_BRANCH_LOCK, SQL_BRANCH_READ, SQL_PARENT_LOCK
 from .jobs import JobStore, StoreConflict

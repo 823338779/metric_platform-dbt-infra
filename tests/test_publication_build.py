@@ -10,7 +10,7 @@ import pytest
 import yaml
 from resource_helpers import make_resource_project
 
-from dbt_metricflow_service.publications.build import (
+from dbt_metricflow_service.platform.build import (
     prepare_publication_project,
     validate_bound_manifest,
     validate_readonly_sql,
@@ -26,7 +26,7 @@ from dbt_metricflow_service.publications.build import (
 ])
 def test_only_configured_freshness_thresholds_require_execution(freshness, expected):
     """原生 manifest 的空阈值对象不是 freshness 规则，零阈值则是有效规则。"""
-    from dbt_metricflow_service.publications.build import requires_source_freshness
+    from dbt_metricflow_service.platform.build import requires_source_freshness
 
     assert requires_source_freshness({"freshness": freshness}) is expected
 
@@ -84,3 +84,16 @@ def test_actual_dbt_tests_parse_under_publication_mapping(tmp_path, test_config,
             validate_bound_manifest(target, "main", prefix)
     else:
         validate_bound_manifest(target, "main", prefix)
+def test_custom_target_directory_is_normalized_for_sealing(tmp_path):
+    """命令和封存使用同一输出目录，原始源码仍由输入快照保留。"""
+    from uuid import uuid4
+
+    import yaml
+
+    from dbt_metricflow_service.platform.build import prepare_publication_project
+
+    project_file = tmp_path / "dbt_project.yml"
+    project_file.write_text("name: sample\nversion: '1.0'\ntarget-path: custom-target\n", encoding="utf-8")
+    prepare_publication_project(tmp_path, uuid4(), "analytics")
+    config = yaml.safe_load(project_file.read_text(encoding="utf-8"))
+    assert config["target-path"] == "target"

@@ -13,4 +13,6 @@ def mutation_guard(settings):
         if authorization is None or not hmac.compare_digest(
                 authorization.encode(), ("Bearer " + token).encode()):
             raise HTTPException(401, detail={"code": "service_credential_required"})
+        # 幂等来源来自部署凭据，不信任客户端自报的业务身份。
+        return "service"
     return require_service

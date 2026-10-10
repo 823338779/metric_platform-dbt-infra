@@ -8,8 +8,8 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 logger = logging.getLogger(__name__)
 DEFAULT_MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024
-V2_WRITE_PATH = re.compile(
-    r"^/v2/projects/[^/]+/(validations|releases|queries|query-options|query-option-jobs)$"
+ENGINE_WRITE_PATH = re.compile(
+    r"^/v3/(builds|deployments|builds/[^/]+/(cancel|queries|query-options))$"
 )
 
 
@@ -24,7 +24,7 @@ class RequestBodyLimitMiddleware:
         if (
             scope["type"] != "http"
             or scope.get("method") != "POST"
-            or not V2_WRITE_PATH.fullmatch(scope.get("path", ""))
+            or not ENGINE_WRITE_PATH.fullmatch(scope.get("path", ""))
         ):
             await self._app(scope, receive, send)
             return
@@ -74,9 +74,10 @@ class RequestBodyLimitMiddleware:
         response = JSONResponse(
             status_code=413,
             content={
-                "detail": {
-                    "code": "request_too_large",
+                "error": {
+                    "code": "REQUEST_TOO_LARGE",
                     "message": "request body exceeds limit",
+                    "retryable": False, "phase": None, "buildId": None,
                 }
             },
         )

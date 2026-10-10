@@ -14,6 +14,8 @@ from .postgres import Database
 
 # SQL 统一作为静态常量，数据全部由绑定参数传入。
 SQL_SELECT_PARENT_RUN_ID_FROM = "SELECT parent_run_id FROM runtime_job WHERE job_id=%s"
+SQL_ENGINE_DEPLOYMENT_REFERENCE = """SELECT 1 FROM engine_deployment_target t
+ JOIN engine_build b ON b.build_id=t.active_build_id WHERE b.run_id=%s LIMIT 1"""
 SQL_SELECT_J_A = (
     "SELECT j.*,a.attempt_id,a.execution_stage,a.lease_token FROM runtime_job j JOIN runtime_attempt a "
     "ON a.attempt_id=j.current_attempt_id WHERE j.job_id=%s AND j.status='RUNNING' AND "
@@ -208,7 +210,9 @@ SQL_OPTIONS_RETRY = """UPDATE runtime_job j SET status='QUEUED',current_attempt_
  AND NOT EXISTS(SELECT 1 FROM runtime_attempt a WHERE a.job_id=j.job_id
  AND a.execution_stage='EXTERNAL' AND a.stop_confirmed_at IS NULL)"""
 SQL_RELEASE_RUN_ARTIFACTS = """UPDATE runtime_job SET input_set_id=NULL,output_set_id=NULL
- WHERE job_id=%s OR parent_run_id=%s"""
+ WHERE (job_id=%s OR parent_run_id=%s)
+ AND NOT EXISTS(SELECT 1 FROM engine_build b WHERE b.run_id=runtime_job.job_id)
+ AND NOT EXISTS(SELECT 1 FROM engine_build b WHERE b.run_id=runtime_job.parent_run_id)"""
 SQL_EXTERNAL_ATTEMPT = "SELECT 1 FROM runtime_attempt WHERE job_id=%s AND execution_stage='EXTERNAL' LIMIT 1"
 FORBIDDEN_REQUEST_KEYS = frozenset({"resources", "credentials", "password", "token", "secret", "environment", "env"})
 LEGACY_IMPORT_DIGEST = "legacyImportDigest"
@@ -241,6 +245,14 @@ def _safe_request(value):
     if isinstance(value, list):
         return [_safe_request(item) for item in value]
     return value
+
+
+SQL_ATTACH_DIGEST = "UPDATE runtime_job SET request_json=request_json || %s::jsonb WHERE job_id=%s"
+SQL_RESULT_EXISTS = "SELECT EXISTS(SELECT 1 FROM runtime_job_result WHERE job_id=%s)"
+SQL_OPTIONS_FOR_BUILD = """SELECT * FROM runtime_job WHERE parent_run_id=%s AND kind='QUERY_OPTIONS'
+ AND status='SUCCEEDED' ORDER BY created_at DESC"""
+SQL_ATTEMPT_EXTERNAL = "SELECT execution_stage FROM runtime_attempt WHERE attempt_id=%s"
+SQL_ENGINE_CANCEL = "SELECT cancel_requested FROM engine_build WHERE run_id=%s"
 
 
 class JobStore:
@@ -309,6 +321,21 @@ class JobStore:
             sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB_2, (scope, key))
             return row_dict(sql_result)
 
+    def result_exists(self, job_id):
+        # 状态读取仅检查结果引用，不加载结果正文。
+        with self.db.transaction() as connection:
+            return connection.exec_driver_sql(SQL_RESULT_EXISTS, (str(job_id),)).scalar_one()
+
+    def options_for(self, run_id):
+        # 查询只消费同一固定构建的已完成选项任务。
+        with self.db.transaction() as connection:
+            return [dict(row) for row in connection.exec_driver_sql(SQL_OPTIONS_FOR_BUILD, (run_id,)).mappings()]
+
+    def external_started(self, attempt_id):
+        # 取消时以持久 attempt 为准；无记录时不能证明外部执行已经停止。
+        with self.db.transaction() as connection:
+            return connection.exec_driver_sql(SQL_ATTEMPT_EXTERNAL, (attempt_id,)).scalar_one_or_none() != "PREPARING"
+
     def result(self, job_id):
         with self.db.transaction() as connection:
             sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB_RESULT, (str(job_id),))
@@ -340,7 +367,7 @@ class JobStore:
         branch_id=None,
     ):
         # 幂等作用域先串行化；parent 锁统一先于项目行和子任务，避免清理受理穿透。
-        with self.db.transaction() as connection:
+        with self.db.fact_transaction() as connection:
             return self.reserve_in_transaction(
                 connection, kind, project_id, request_json,
                 job_id=job_id,
@@ -508,7 +535,7 @@ class JobStore:
 
     def requeue_options(self, job_id):
         # 同步选项的明确终止失败可重试，沿用原截止时间和总尝试上限。
-        with self.db.transaction() as connection:
+        with self.db.fact_transaction() as connection:
             sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB, (str(job_id),))
             row = row_dict(sql_result)
             if row and row["parent_run_id"]:
@@ -521,7 +548,7 @@ class JobStore:
 
     def claim(self, worker_id, *, config_version="1", config_versions=None, toolchain_version="default", kinds=None):
         # 短事务领取一个任务，跳过其他 worker 已锁住的任务；VOLATILE 输入必须仍有效。
-        with self.db.transaction() as connection:
+        with self.db.fact_transaction() as connection:
             versions = config_versions if config_versions is not None else [config_version]
             sql_result = connection.exec_driver_sql(
                 SQL_SELECT_FROM_RUNTIME_JOB_3,
@@ -576,7 +603,7 @@ class JobStore:
             return sql_result.rowcount
 
     def phase(self, job_id, token, phase, *, external=False, external_execution_refs=None):
-        with self.db.transaction() as connection:
+        with self.db.fact_transaction() as connection:
             job = self._authorized(connection, job_id, token)
             if not job:
                 return False
@@ -592,9 +619,9 @@ class JobStore:
                 )
             return True
 
-    def attach_input(self, job_id, token, set_id):
+    def attach_input(self, job_id, token, set_id, *, project_digest=None):
         # 首次构建的源码在外部写入前固定，后续准备阶段重试可复用该集合。
-        with self.db.transaction() as connection:
+        with self.db.fact_transaction() as connection:
             job = self._authorized(connection, job_id, token)
             if not job:
                 return False
@@ -605,6 +632,8 @@ class JobStore:
             if job["input_set_id"] is not None and job["input_set_id"] != str(set_id):
                 raise ValueError("Job input is immutable after admission")
             sql_result = connection.exec_driver_sql(SQL_UPDATE_RUNTIME_JOB_SET_4, (set_id, str(job_id)))
+            if project_digest is not None:
+                connection.exec_driver_sql(SQL_ATTACH_DIGEST, (Json({"projectDigest": project_digest}), str(job_id)))
             return True
 
     def _release_project(self, connection, job_id):
@@ -633,12 +662,19 @@ class JobStore:
         if len(encoded.encode()) > self.max_result_bytes:
             raise ValueError("Job result exceeds configured size limit")
         try:
-            with self.db.transaction() as connection:
+            with self.db.fact_transaction() as connection:
                 job = self._authorized(connection, job_id, token)
                 if not job:
                     return False
                 if job["kind"] == BUILD_RUN and output_set_id is None:
                     raise ValueError("BUILD_RUN requires a complete validated output artifact set")
+                # 命令已明确结束，若取消意图先提交，则只确认取消、不发布成功或部署。
+                cancelled = connection.exec_driver_sql(SQL_ENGINE_CANCEL, (str(job_id),)).scalar_one_or_none()
+                if cancelled:
+                    connection.exec_driver_sql(SQL_UPDATE_RUNTIME_ATTEMPT_SET_3, (True, True, job["attempt_id"]))
+                    connection.exec_driver_sql(SQL_UPDATE_RUNTIME_JOB_SET_6, ("CANCELLED", Json({}), str(job_id)))
+                    self._release_project(connection, job_id)
+                    return True
                 if output_set_id is not None:
                     if job["input_mode"] == VOLATILE:
                         raise ValueError("Volatile resources cannot publish durable project artifacts")
@@ -649,6 +685,15 @@ class JobStore:
                     if output["project_id"] != job["project_id"]:
                         raise ValueError("Output belongs to a different project")
                     if job["kind"] == BUILD_RUN:
+                        # 新构建的输出必须引用同一固定源码、摘要、配置及工具链。
+                        if job["request_json"].get("buildId"):
+                            expected = {"source_set_id": job["input_set_id"],
+                                        "source_commit_sha": job["request_json"].get("commitSha"),
+                                        "project_digest": job["request_json"].get("projectDigest"),
+                                        "config_version": job["config_version"],
+                                        "toolchain_version": job["toolchain_version"]}
+                            if any(value is None or output[name] != value for name, value in expected.items()):
+                                raise ValueError("build output does not match fixed source evidence")
                         sql_result = connection.exec_driver_sql(SQL_SELECT_RELATIVE_PATH_FROM, (output_set_id,))
                         files = {row["relative_path"] for row in sql_result.mappings()}
                         if not REQUIRED_BUILD_FILES.issubset(files):
@@ -716,7 +761,7 @@ class JobStore:
         # 错误详情也有字节预算，禁止在失败路径写入无限增长的异常堆栈。
         if len(json.dumps(detail or {}, ensure_ascii=False).encode()) > self.max_diagnostic_bytes:
             detail = {"message": "Diagnostic exceeded configured size limit"}
-        with self.db.transaction() as connection:
+        with self.db.fact_transaction() as connection:
             job = self._authorized(connection, job_id, token)
             if not job:
                 return False
@@ -736,7 +781,7 @@ class JobStore:
 
     def recover(self):
         # 恢复只处理过期租约/截止时间，健康实例的 RUNNING 任务不会被启动流程打断。
-        with self.db.transaction() as connection:
+        with self.db.fact_transaction() as connection:
             sql_result = connection.exec_driver_sql(SQL_SELECT_J_FROM)
             jobs = [dict(row) for row in sql_result.mappings()]
             for job in jobs:
@@ -786,7 +831,7 @@ class JobStore:
 
     def confirm_stopped(self, attempt_id, token):
         # 失效执行者仅可凭自己的 token 确认停止，不能改写公开结果。
-        with self.db.transaction() as connection:
+        with self.db.fact_transaction() as connection:
             sql_result = connection.exec_driver_sql(
                 SQL_SELECT_JOB_ID_FROM_2,
                 (str(attempt_id), str(token)),
@@ -806,7 +851,7 @@ class JobStore:
 
     def reserve_cleanup(self, parent_run_id, toolchain_version="default"):
         # 与查询受理锁同一 parent；阻止所有排队/执行任务和任何未确认停止的历史 attempt。
-        with self.db.transaction() as connection:
+        with self.db.fact_transaction() as connection:
             sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB_4, (str(parent_run_id),))
             parent = row_dict(sql_result)
             if not parent or parent["kind"] != BUILD_RUN:
@@ -816,6 +861,9 @@ class JobStore:
 
             sql_result = connection.exec_driver_sql(SQL_PROTECTED_RUN, (str(parent_run_id), str(parent_run_id)))
             if row_dict(sql_result):
+                raise CleanupBlocked("run_cleanup_blocked")
+            # v3 当前部署也保护同一物理 run；历史目录本身不阻止显式物理清理。
+            if connection.exec_driver_sql(SQL_ENGINE_DEPLOYMENT_REFERENCE, (str(parent_run_id),)).first():
                 raise CleanupBlocked("run_cleanup_blocked")
             sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB_5, (str(parent_run_id),))
             existing = row_dict(sql_result)

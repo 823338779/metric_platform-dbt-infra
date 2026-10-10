@@ -3,7 +3,7 @@
 
 import pytest
 
-from dbt_metricflow_service.publications.plan import validate_publication_evidence
+from dbt_metricflow_service.platform.build_plan import validate_publication_evidence
 
 
 def state():
@@ -18,7 +18,7 @@ def state():
 
 
 def test_full_build_includes_every_physical_model():
-    import dbt_metricflow_service.publications.plan as planner
+    import dbt_metricflow_service.platform.build_plan as planner
     assert hasattr(planner, "full_build_plan")
     current = state()
     current["nodes"]["model.p.transient"] = {"resource_type": "model", "config": {"materialized": "ephemeral"}}
@@ -29,7 +29,7 @@ def test_full_build_includes_every_physical_model():
 
 
 def test_full_build_evidence_cannot_omit_build_or_models():
-    import dbt_metricflow_service.publications.plan as planner
+    import dbt_metricflow_service.platform.build_plan as planner
     assert hasattr(planner, "full_build_plan")
     plan = planner.full_build_plan(state())
     valid = {"build": "PASSED", "tests": "PASSED", "semanticValidation": "PASSED",

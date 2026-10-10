@@ -4,63 +4,63 @@ from uuid import uuid4
 
 import pytest
 
-from dbt_metricflow_service.publications.errors import PublicationError
-from dbt_metricflow_service.publications.models import PublishedQueryRequest
+from dbt_metricflow_service.application.errors import ServiceError as PublicationError
+from dbt_metricflow_service.models.queries import QueryRequest as PublishedQueryRequest
 from dbt_metricflow_service.runtime.completion import complete_job
 from tests.test_publication_queries import query_service
 from tests.test_publication_storage import store as store
 
 
 def queued(service, job, release):
-    receipt = service.submit_query(job["project_id"], PublishedQueryRequest(
-        releaseId=release["release_id"], idempotencyKey=uuid4().hex, mode="QUERY",
+    receipt = service.submit(release["build_id"], PublishedQueryRequest(
+         idempotencyKey=uuid4().hex, mode="QUERY",
         metricResourceIds=["metric.sample.orders"]), "platform")
-    return receipt["queryId"]
+    return receipt.query_id
 
 
 def finish(service, job, payload):
-    child = service.runtime.jobs.claim(str(uuid4()), toolchain_version=job["toolchain_version"], kinds=["METRIC_QUERY"])
-    complete_job(service.runtime.jobs, child["job_id"], child["lease_token"], payload)
+    child = service.jobs.claim(str(uuid4()), toolchain_version=job["toolchain_version"], kinds=["METRIC_QUERY"])
+    complete_job(service.jobs, child["job_id"], child["lease_token"], payload)
 
 
 def test_pages_preserve_rows_and_status_never_reads_payload(store, tmp_path, monkeypatch):
     service, job, release = query_service(store, tmp_path)
-    assert hasattr(service, "query_status"), "lightweight query status is not implemented"
+    assert hasattr(service, "status"), "lightweight query status is not implemented"
     query = queued(service, job, release)
     with pytest.raises(PublicationError) as pending:
-        service.query_result_page(job["project_id"], query)
-    assert pending.value.reason == "result_not_ready"
+        service.results(query)
+    assert pending.value.error.code == "RESULT_NOT_READY"
     rows = [[i, "12345678901234567890.123456789", None] for i in range(403)]
     finish(service, job, {"columns": [{"name": "value", "type": "string"}], "rows": rows, "truncated": True})
-    original_result = service.runtime.jobs.result
-    monkeypatch.setattr(service.runtime.jobs, "result", lambda *_: pytest.fail("status read payload_json"))
-    assert service.query_status(job["project_id"], query)["resultAvailable"] is True
-    monkeypatch.setattr(service.runtime.jobs, "result", original_result)
+    original_result = service.jobs.result
+    monkeypatch.setattr(service.jobs, "result", lambda *_: pytest.fail("status read payload_json"))
+    assert service.status(query).model_dump(mode="json", by_alias=True)["resultAvailable"] is True
+    monkeypatch.setattr(service.jobs, "result", original_result)
     collected, offset = [], 0
     while offset is not None:
-        page = service.query_result_page(job["project_id"], query, offset, 200)
+        page = service.results(query, offset, 200).model_dump(by_alias=True)
         assert page["availableRows"] == 403
         assert page["resultTruncated"] is True
         collected.extend(page["rows"])
         offset = page["nextOffset"]
     assert collected == rows
-    assert service.query_result_page(job["project_id"], query, 999)["rows"] == []
-    with pytest.raises(KeyError):
-        service.query_status("wrong-project", query)
+    assert service.results(query, 999).rows == []
+    with pytest.raises(PublicationError):
+        service.status(uuid4())
 
 
 def test_large_row_is_explicit_error_and_small_page_advances_by_returned_rows(store, tmp_path):
     service, job, release = query_service(store, tmp_path)
-    assert hasattr(service, "query_result_page"), "result pagination is not implemented"
+    assert hasattr(service, "results"), "result pagination is not implemented"
     query = queued(service, job, release)
     finish(service, job, {"columns": [], "rows": [["x" * (9 * 1024 * 1024)]], "truncated": False})
     with pytest.raises(PublicationError) as too_large:
-        service.query_result_page(job["project_id"], query)
-    assert too_large.value.reason == "result_row_too_large"
+        service.results(query)
+    assert too_large.value.error.code == "RESULT_TOO_LARGE"
 
 
 def test_transport_shrinks_whole_rows_and_explain_preserves_sql(monkeypatch):
-    import dbt_metricflow_service.publications.results as results
+    import dbt_metricflow_service.platform.results as results
 
     monkeypatch.setattr(results, "MAX_PAGE_BYTES", 300)
     rows = [["x" * 100], ["y" * 100]]

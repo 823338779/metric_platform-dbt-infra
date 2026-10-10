@@ -12,8 +12,7 @@ from pathlib import Path
 
 import yaml
 
-from dbt_metricflow_service.platform.namespace import validate_schema_name
-
+PROJECT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
 DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 ROOT_INPUTS = frozenset({"dbt_project.yml", "packages.yml", "package-lock.yml", "dependencies.yml", "selectors.yml"})
@@ -21,35 +20,13 @@ INPUT_DIRECTORIES = frozenset({"models", "macros", "tests", "analyses", "seeds",
 RESOURCE_PATHS = {
     "model-paths": "models", "macro-paths": "macros", "test-paths": "tests",
     "analysis-paths": "analyses", "seed-paths": "seeds", "snapshot-paths": "snapshots",
+    "docs-paths": "models", "asset-paths": "assets",
 }
 GIT_OPTIONS = ("-c", "protocol.ext.allow=never", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false")
 MAX_TREE_BYTES = 8 * 1024 * 1024
-GIT_INIT = "init"
-GIT_BARE = "--bare"
 GIT_FETCH = "fetch"
-GIT_MAIN = "refs/heads/main"
-GIT_HEAD = "FETCH_HEAD"
-GIT_REV_PARSE = "rev-parse"
-GIT_VERIFY = "--verify"
 GIT_NO_TAGS = "--no-tags"
 GIT_SEPARATOR = "--"
-GIT_TREE = "ls-tree"
-GIT_RECURSIVE = "-r"
-GIT_ZERO = "-z"
-GIT_BLOB = "blob"
-GIT_MODES = frozenset({"100644", "100755"})
-GIT_CACHE_PREFIX = "observe-"
-UTF8 = "utf-8"
-ROOT_PATH = "."
-HEADS_PREFIX = "refs/heads/"
-REF_FORBIDDEN = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]|\.\.|@\{")
-REF_SEPARATOR = "/"
-REF_DOT = "."
-REF_LOCK = ".lock"
-
-
-
-
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,19 +40,8 @@ class ProjectBinding:
     schema_name: str | None = None
 
 
-def load_bindings(path: Path) -> dict[str, ProjectBinding]:
-    """从服务配置读取项目绑定，HTTP 请求无权指定 remote。"""
-
-    records = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(records, list):
-        raise ValueError("平台项目绑定配置无效")
-    bindings = {item["projectId"]: ProjectBinding(
-        item["projectId"], item["remote"], item["projectSubdir"], item["profileBindingId"],
-        validate_schema_name(item["schemaName"]) if "schemaName" in item else None,
-    ) for item in records}
-    if len(bindings) != len(records):
-        raise ValueError("平台项目绑定重复")
-    return bindings
+def binding_digest(binding: dict) -> str:
+    return hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def _git(directory: Path, *args: str, limit: int = MAX_TREE_BYTES) -> bytes:
@@ -148,18 +114,33 @@ def _resolve_revision(binding, commit_sha, expected_digest, work_root):
             if prefix and not raw_path.startswith(prefix):
                 continue
             relative = raw_path[len(prefix):]
-            if relative == "dbt_project.yml" or _included(relative):
-                if any(part in {"", ".", ".."} for part in relative.split("/")):
-                    raise ValueError("dbt 项目输入无效")
-                entries[relative] = (mode, blob)
+            if any(part in {"", ".", ".."} for part in relative.split("/")):
+                raise ValueError("dbt 项目输入无效")
+            entries[relative] = (mode, blob)
         if "dbt_project.yml" not in entries:
             raise ValueError("dbt_project.yml 缺失")
         project_yaml = yaml.safe_load(_git(cache, "cat-file", "-p", entries["dbt_project.yml"][1]))
         if not isinstance(project_yaml, dict):
             raise ValueError("dbt_project.yml 无效")
+        # 按工程声明的实际目录采集，不把非默认目录静默丢弃。
+        folders = []
         for key, folder in RESOURCE_PATHS.items():
-            if key in project_yaml and project_yaml[key] != [folder]:
+            configured = project_yaml.get(key, [folder])
+            if not isinstance(configured, list) or any(not isinstance(value, str) for value in configured):
                 raise ValueError("dbt 资源目录配置无效")
+            folders.extend(_prefix(value) for value in configured)
+        # 本地依赖同属固定 Git 工程，允许受控根内路径，不能静默漏掉非模型目录。
+        for filename in ("packages.yml", "dependencies.yml"):
+            if filename not in entries:
+                continue
+            dependencies = yaml.safe_load(_git(cache, "cat-file", "-p", entries[filename][1])) or {}
+            for package in dependencies.get("packages", []):
+                if "local" in package:
+                    folders.append(_prefix(package["local"]))
+                elif "package-lock.yml" not in entries:
+                    raise ValueError("远端依赖必须提供固定 package-lock.yml")
+        entries = {path: item for path, item in entries.items()
+                   if path in ROOT_INPUTS or any(path.startswith(folder) for folder in folders)}
         digest = hashlib.sha256()
         for relative, (mode, blob) in sorted(entries.items()):
             digest.update(relative.encode("utf-8") + b"\0" + f"{mode} {blob}".encode("utf-8") + b"\0")

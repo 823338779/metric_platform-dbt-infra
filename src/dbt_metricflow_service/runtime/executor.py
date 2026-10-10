@@ -138,10 +138,6 @@ class RuntimeExecutor:
             try:
                 if job["kind"] == BUILD_RUN:
                     return await self._build(job, runner, attempt)
-                if job["kind"] == DRAFT_VALIDATION:
-                    from ..validation.execution import execute_commit_validation
-
-                    return await execute_commit_validation(self, job, runner, attempt)
                 # 构建在源码固定前失败时尚未执行任何仓库命令，无目录可还原。
                 if job["kind"] == RUN_CLEANUP and job["input_set_id"] is None:
                     return ExecutionResult({})
@@ -164,17 +160,58 @@ class RuntimeExecutor:
                 await _finish_task(asyncio.create_task(runner.close()))
 
     async def _build(self, job: dict, runner: JobRunner, attempt: Path) -> ExecutionResult:
-        from ..publications.build import execute_publication
+        from ..platform.build import execute_publication
 
-        if not job["input_set_id"] or not job["request_json"].get("releaseId"):
+        if job["request_json"].get("buildId"):
+            job = await self._prepare_build_source(job)
+        elif not job["input_set_id"] or not job["request_json"].get("releaseId"):
             raise ExecutionError("FIXED_COMMIT_INPUT_REQUIRED")
         project = attempt / PROJECT_DIRECTORY
         await _thread(self.artifacts.materialize, job["input_set_id"], project)
         return await execute_publication(self, job, runner, attempt, project)
 
+    async def _prepare_build_source(self, job: dict) -> dict:
+        """受理之后获取固定源码；所有慢 I/O 均在短事务之外。"""
+        import shutil
+
+        from ..application.builds import BuildService
+        from ..platform.bindings import ProjectBinding, resolve_commit
+        from ..platform.source import remote_head
+        from ..storage.builds import BuildStore
+
+        body = job["request_json"]
+        if job["input_set_id"]:
+            return job
+        builds = BuildStore(self.jobs.db)
+        service = BuildService(builds, job["toolchain_version"], self.settings.command_timeout_seconds)
+        try:
+            sha = body.get("commitSha")
+            if not sha:
+                sha = await _thread(remote_head, body["repository"], body["branchName"], self.settings.temp_root)
+                if sha is None:
+                    raise ValueError("source branch does not exist")
+            await _thread(service.pin_source, body["buildId"], sha, job["lease_token"])
+            await _thread(self.jobs.phase, job["job_id"], job["lease_token"], "FETCHING_SOURCE")
+            binding = ProjectBinding(job["project_id"], body["repository"], ".", job["profile_binding_id"])
+            directory, digest = await _thread(resolve_commit, binding, sha, self.settings.temp_root)
+            try:
+                source = await _thread(self.artifacts.capture, job["project_id"], directory, metadata={
+                    "source_commit_sha": sha, "project_digest": digest, "config_version": job["config_version"],
+                    "toolchain_version": job["toolchain_version"]})
+            finally:
+                await _thread(shutil.rmtree, directory)
+            if not await _thread(self.jobs.attach_input, job["job_id"], job["lease_token"], source,
+                                     project_digest=digest):
+                raise ExecutionError(ERROR_LEASE_LOST, stopped=True)
+            return await _thread(self.jobs.get, job["job_id"]) | {
+                "attempt_id": job["attempt_id"], "lease_token": job["lease_token"]}
+        except (ValueError, OSError) as error:
+            raise ExecutionError("SOURCE_UNAVAILABLE", stopped=True) from error
+
     async def _command(self, job: dict, runner: JobRunner, spec: CommandSpec, phase: str) -> JobRecord:
         # 提前记录外部执行；失去租约的节点绝不再启动子进程。
-        valid = await _thread(self.jobs.phase, job["job_id"], job["lease_token"], phase, external=True)
+        external = spec.write_operation or job["kind"] in {METRIC_QUERY, QUERY_OPTIONS, RUN_CLEANUP}
+        valid = await _thread(self.jobs.phase, job["job_id"], job["lease_token"], phase, external=external)
         if not valid:
             raise ExecutionError(ERROR_LEASE_LOST, stopped=False)
         submitted = await runner.submit(job["project_id"], spec)
@@ -182,7 +219,7 @@ class RuntimeExecutor:
         if record.status is not JobStatus.SUCCEEDED:
             timed_out = record.status is JobStatus.TIMED_OUT
             # parse/debug 的正常退出无需仓库写入核对，其他写命令失联不能据退出码释放保护。
-            may_write = job["kind"] in {BUILD_RUN, RUN_CLEANUP} or (
+            may_write = spec.write_operation or job["kind"] == RUN_CLEANUP or (
                 job["kind"] == DBT_COMMAND and job["request_json"].get("command") not in LOCAL_DBT_COMMANDS
             )
             raise ExecutionError(

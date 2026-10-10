@@ -7,6 +7,8 @@ import re
 from pathlib import Path
 from uuid import UUID
 
+import yaml
+
 SCHEMA_NAME_PATTERN = re.compile(r"[a-z][a-z0-9_]*\Z")
 TABLE_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 MAX_SCHEMA_NAME_LENGTH = 256
@@ -14,6 +16,8 @@ MAX_TABLE_NAME_LENGTH = 1024
 ALIAS_MACRO_PATTERN = re.compile(r"\{%\s*macro\s+generate_alias_name\s*\(", re.IGNORECASE)
 ALIAS_MACRO_FILE = "generate_alias_name.sql"
 MACROS_DIRECTORY = "macros"
+TARGET_PATH = "target-path"
+TARGET_DIRECTORY = "target"
 
 
 def validate_schema_name(schema: str) -> str:
@@ -40,6 +44,20 @@ def prepare_versioned_project(project: Path, run_id: UUID, schema: str) -> str:
         for path in macros.rglob("*.sql"):
             if ALIAS_MACRO_PATTERN.search(path.read_text(encoding="utf-8")):
                 raise ValueError("项目已定义受控物理表别名宏")
+    # 检查所有实际宏目录；注入的物理命名宏必须在非默认配置下同样被 dbt 加载。
+    project_file = project / "dbt_project.yml"
+    configuration = yaml.safe_load(project_file.read_text(encoding="utf-8")) if project_file.is_file() else {}
+    macro_paths = configuration.get("macro-paths", [MACROS_DIRECTORY])
+    for directory in macro_paths:
+        for path in (project / directory).rglob("*.sql"):
+            if ALIAS_MACRO_PATTERN.search(path.read_text(encoding="utf-8")):
+                raise ValueError("项目已定义受控物理表别名宏")
+    if MACROS_DIRECTORY not in macro_paths:
+        configuration["macro-paths"] = [*macro_paths, MACROS_DIRECTORY]
+    # 执行命令固定写入 target；任务副本同步配置，确保封存和历史读取找到同一批产物。
+    if project_file.is_file():
+        configuration[TARGET_PATH] = TARGET_DIRECTORY
+        project_file.write_text(yaml.safe_dump(configuration, sort_keys=False), encoding="utf-8")
     macros.mkdir(exist_ok=True)
     (macros / ALIAS_MACRO_FILE).write_text(
         "{% macro generate_alias_name(custom_alias_name=none, node=none) -%}\n"

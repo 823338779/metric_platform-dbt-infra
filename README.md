@@ -1,12 +1,24 @@
-# dbt MetricFlow Service
+# dbt / MetricFlow 引擎服务
 
-接收受控项目的固定 Git commit SHA，执行定义验证、全量构建发布和指标查询。服务只使用 PostgreSQL 持久化；FastAPI 与 worker 保持同一进程，dbt/MetricFlow 在任务子进程中执行。
+服务负责固定 Git 源码构建、产物封存、部署指针、资源目录及 MetricFlow 查询。它不创建分支、不合并代码、不理解 Agent 会话状态，也不读取指标平台数据库。`origin` 仅作调用方追溯标签。
 
-Git 分支的创建、提交、合并和触发时机由调用方负责。服务不读取“最新 main”决定发布输入，不管理远端 ref，不接收 webhook，也不自动扫描仓库。
+## 包职责
 
-## 启动与配置
+| package | 职责 |
+| --- | --- |
+| `models` | `/v3` 请求响应与封存资源模型；无 I/O |
+| `api` | 唯一 HTTP 装配、鉴权、参数和错误转换 |
+| `application` | builds、deployments、catalog、queries 四个具体用例服务；不持有 Runtime |
+| `storage` | PostgreSQL 短事务、任务/产物存储、变化流和历史迁移 |
+| `runtime` | 同进程 worker、租约恢复、完成事务、执行工作目录 |
+| `platform` | 固定 Git 读取、完整工程构建、原生目录与查询适配 |
+| `execution` / `adapters` | 子进程控制、脱敏及底层引擎适配 |
 
-需要 Python 3.11–3.14（推荐 3.12）、uv、Git、PostgreSQL，以及项目使用的数据仓库。源码依赖通过 `vendor/dbt` 和 `vendor/metricflow` 固定，安装版本以 `uv.lock` 为准，不修改上游源码。
+无额外 Repository/Port/Facade 镜像层。历史 SQL、历史模型和原始封存 schema 留在 storage/models 内，仅用于历史读取、迁移和物理引用保护。
+
+## 启动
+
+需要 Python 3.11–3.14（推荐 3.12）、uv、Git、PostgreSQL 和目标数据仓库。依赖以 `uv.lock` 为准，vendor 不由本服务改造。
 
 ```powershell
 uv sync --frozen --all-groups
@@ -17,119 +29,103 @@ uv run --frozen dbt-service-admin register-bindings bindings.json
 uv run --frozen dbt-metricflow-service
 ```
 
-先迁移、登记绑定，再启动服务。普通服务启动只检查 schema，不自动迁移。未配置 `SERVICE_DATABASE_URL` 时启动失败，不回退本地模式。API 启动同进程 worker，关闭时等待子进程清理。
-
-服务与管理命令默认读取 `config/service.yaml`，可用 `SERVICE_CONFIG_FILE` 替换。优先级为环境变量 > 配置文件 > 默认值。文件中的相对路径相对配置文件，环境变量中的相对路径相对工作目录。未知配置项会被拒绝。
+普通启动只检查数据库 schema，不自动执行迁移。API 和 worker 同进程运行；已受理任务在数据库中，不依赖 Agent 在线。配置读取顺序：环境变量 > `SERVICE_CONFIG_FILE` 指定文件（默认 `config/service.yaml`）> 默认值。文件内相对路径相对配置文件。
 
 | 配置 | 用途 |
 | --- | --- |
-| `SERVICE_DATABASE_URL` | 必需，PostgreSQL 元数据库，支持 URL 和 libpq DSN |
-| `SERVICE_TOKEN` | 发布和验证 POST 接口的 Bearer 凭据；未设置则关闭这些写入口 |
-| `DBT_PROFILES` / `DBT_PROFILES_DIR` | 在配置文件内维护 dbt profiles，或指定外部目录；二选一 |
-| `SERVICE_TEMP_ROOT` | 可丢弃的任务工作目录 |
-| `SERVICE_CONFIG_VERSION` | 连接及编译配置版本，变化时同步更新项目绑定 |
-| `SERVICE_TOOLCHAIN_VERSION` | 工具链标识；未设置时由安装包和服务源码计算 |
-| `WORKER_CONCURRENCY` | 每实例执行槽位，默认 2 |
-| `JOB_LEASE_SECONDS` / `JOB_HEARTBEAT_SECONDS` | 默认 90 / 15 秒，租约至少覆盖三个心跳间隔 |
-| `COMMAND_TIMEOUT_SECONDS` | 命令超时，默认 1800 秒 |
-| `MAX_OUTPUT_BYTES` / `MAX_RESULT_BYTES` | 默认 1 MiB 输出尾部 / 16 MiB 查询结果 |
-| `MAX_ARTIFACT_FILE_BYTES` / `MAX_ARTIFACT_BYTES` | 默认 64 MiB 单文件 / 256 MiB 产物集 |
-| `SYNCHRONOUS_WAIT_SECONDS` | 同步选项及管理清理的等待预算，默认 30 秒 |
-| `SERVICE_HOST` / `SERVICE_PORT` | HTTP 监听地址及端口 |
+| `SERVICE_DATABASE_URL` | PostgreSQL 元数据库；必需 |
+| `SERVICE_TOKEN` | 所有 POST 的 Bearer 凭据，未配置则禁用写入口 |
+| `DBT_PROFILES` / `DBT_PROFILES_DIR` | 内联 profiles 或外部目录；二选一 |
+| `SERVICE_TEMP_ROOT` | 可丢弃执行目录 |
+| `SERVICE_CONFIG_VERSION` | 本 worker 可执行的配置版本，默认 1 |
+| `SERVICE_TOOLCHAIN_VERSION` | 工具链标识；默认按依赖版本及源码计算 |
+| `WORKER_CONCURRENCY` | 执行槽位，默认 2 |
+| `JOB_LEASE_SECONDS` / `JOB_HEARTBEAT_SECONDS` | 默认 90 / 15 秒 |
+| `COMMAND_TIMEOUT_SECONDS` | 单次命令预算，默认 1800 秒 |
+| `MAX_OUTPUT_BYTES` / `MAX_RESULT_BYTES` | 默认 1 MiB 诊断 / 16 MiB 保存结果 |
+| `MAX_ARTIFACT_FILE_BYTES` / `MAX_ARTIFACT_BYTES` | 默认 64 MiB 单文件 / 256 MiB 集合 |
+| `SERVICE_HOST` / `SERVICE_PORT` | HTTP 地址、端口 |
 
-`DBT_PROFILES` 生成的 profiles 保留 dbt 环境变量模板，密码通过部署 Secret 提供。不要把仓库、profile 或数据库凭据交给模型。
-
-项目绑定示例：
+绑定以仓库、executionBinding、configVersion 为键，版本不可覆盖。凭据由 Git/profile 环境提供，不写入绑定或请求。示例：
 
 ```json
-[
-  {
-    "projectId": "sales",
-    "remote": "https://git.example.com/data/sales.git",
-    "projectSubdir": ".",
-    "profileBindingId": "postgres",
-    "configVersion": "1"
-  }
-]
+[{"repository":"https://git.example.com/data/sales.git","executionBinding":"warehouse","configVersion":"1",
+  "config":{"profileBindingId":"postgres","environments":["PREVIEW","PRODUCTION"],
+            "businessTimezone":"Asia/Shanghai","queryRetrySafe":false}}]
 ```
 
-`remote` 不允许携带 URL 密码。Git 凭据由部署环境提供。可选 `schemaName` 为受控 schema；每次构建仍使用独立 run 表名前缀。未指定时生成独立 `run_<uuid>` schema。可选 `queryRetrySafe` 声明查询的只读重试能力。
+可选 `schemaName` 指定受控 schema；每次构建仍有独立表名前缀。省略时使用独立 `run_<uuid>` schema。历史查询需要匹配原工具链与配置的执行环境，不应伪造版本标识。
 
-## 固定提交验证与发布
-
-下面路径均以 `/v2/projects/{projectId}` 为前缀。验证和发布请求使用同一输入形状：
+## 构建与部署
 
 ```json
-{
-  "commitSha": "完整的40位或64位小写Git提交SHA",
-  "idempotencyKey": "调用方分配的一次请求标识"
-}
+{"repository":"https://git.example.com/data/sales.git","branchName":"feature/orders",
+ "commitSha":"0123456789012345678901234567890123456789","environment":"PREVIEW",
+ "executionBinding":"warehouse","configVersion":"1","deploymentPolicy":"NONE","idempotencyKey":"build-001"}
 ```
 
-`POST /validations` 受理验证，`GET /validations/{validationId}` 轮询结果。验证检查 YAML、受控模板、dbt parse/compile、只读 SQL 和语义定义，不执行 build，不创建发布。`SUCCEEDED + valid=false` 表示定义未通过；`FAILED` 表示执行或基础设施失败。
+`POST /v3/builds` 在 Git I/O 前原子保存构建身份和持久任务，返回 202。部署策略默认为 NONE。PREVIEW 可指定分支、完整 SHA 或两者；main 只可用于 PRODUCTION，正式环境必须显式 SHA。无分支只允许构建，不部署。分支输入在 worker 首次解析后固定 SHA，重试不会跟随最新 head。
 
-`POST /releases` 受理全量构建发布，返回 `releaseId`、`runId` 等发布描述；通过 `GET /releases/{releaseId}` 轮询。两种 POST 都需要 `Authorization: Bearer <SERVICE_TOKEN>`。remote、profile、schema 和工具链来自服务绑定，请求不能覆盖。
+同仓库、可信调用方、操作类型下同幂等键恢复原身份；输入不同返回 409。新键同 SHA 产生新构建。构建成功与部署成功独立，`initialDeployment` 描述随构建附带的意图。
 
-完整 SHA 可以来自任意由受控 remote 提供的提交，不要求属于 main。Git 服务必须允许读取该 SHA。发布受理在数据库事务之外读取并封存固定源码，再原子创建候选与任务；worker 使用封存输入。验证任务在执行时读取其固定 SHA，提交必须仍可从 remote 获取。
+`ON_SUCCESS` 受理时即分配 generation；较新意图即使失败，也不会恢复较旧待处理意图。独立部署使用 `POST /v3/deployments`，传入 `buildId/branchName/expectedTargetVersion/idempotencyKey`。目标自然键是 repository/environment/branchName。切换前重新核对远端 head、构建可用性和目标版本；真实 ref 消失停用指针，网络失败只标记 UNKNOWN。
 
-同键同 SHA 恢复原任务，即使当前配置或活动发布已变化；同键不同 SHA 返回 409。新执行或配置变化后重新验证，使用新的幂等键。
+完整构建运行 deps、parse、compile、build（含测试）、必要的 source freshness、物理关系核验及 MetricFlow 探测。支持 table/view/ephemeral 和不写失败表的测试；seed、snapshot、自定义物化、SQL header、执行 hook 和数据库命令宏明确拒绝。工程读取遵循实际资源目录配置。模板约束不等于任意不可信代码沙箱。
 
-管理命令也必须显式传 SHA：
+取消先持久化意图。已确认取消返回 CANCELLED；外部写执行无法确认时返回 OUTCOME_UNKNOWN，保留保护引用且不自动重跑。
+
+管理构建使用同一应用用例：
 
 ```powershell
-uv run --frozen dbt-service-admin publish --project-id sales --commit-sha <完整SHA> --idempotency-key release-001
+uv run --frozen dbt-service-admin build --file build-request.json
 ```
 
-每个新发布均为 `FULL_BUILD`，不复用旧版物理模型。仍执行完整模板及 SQL 检查、必要的 source freshness、全部模型和测试、物理关系核验与 MetricFlow 查询探测。所有模型使用本次 run 的独立命名，失败不覆盖上一活动版本。
+## 查询和历史读取
 
-支持受控 SQL 项目的 table、view、ephemeral 和不写失败表的测试。发布不支持 seed、snapshot、Python 模型、自定义物化、执行 hook、SQL header 或数据库命令宏。编译 SQL 必须是单条只读取数语句。这是受控项目执行约束，不是任意不可信 dbt 项目的沙箱。
-
-## 目录与查询
-
-| 接口 | 用途 |
+| 路径 | 行为 |
 | --- | --- |
-| `GET /v2/projects` | 项目与发布概览 |
-| `GET /publication` | 当前活动发布、配置/工具链上下文、`fixed-commit-v1` 能力 |
-| `GET /releases`、`GET /releases/{releaseId}` | 发布历史与验证摘要 |
-| `GET /releases/{releaseId}/catalog` | 活动版本目录搜索与分页 |
-| `GET /releases/{releaseId}/resources/{resourceId}` | 资源详情，另有 `/lineage`、`/source`、`/native-details` |
-| `POST /query-options` | 同步查询可用维度选项 |
-| `POST /query-option-jobs`、`GET /query-option-jobs/{id}` | 异步查询选项 |
-| `POST /queries` | 提交 QUERY、EXPLAIN、PREVIEW 或 DIMENSION_VALUES 查询 |
-| `GET /queries/{id}/status` | 不加载结果正文的状态轮询 |
-| `GET /queries/{id}/results?offset=0&limit=100` | 结果分页，最多 200 行、8 MiB |
-| `GET /queries/{id}` | 完整有界查询结果 |
+| `GET /v3/builds`、`GET /v3/builds/{buildId}` | repository 筛选历史、固定身份读取 |
+| `GET /v3/builds/{buildId}/logs` | 可续读的持久阶段/错误码日志，不回显原始 CLI |
+| `POST /v3/builds/{buildId}/cancel` | 取消构建 |
+| `GET /v3/deployments/current`、`GET /v3/deployments` | 自然键当前观察、意图历史 |
+| `GET /v3/builds/{buildId}/catalog` | 目录搜索、kind 筛选、游标分页 |
+| `GET /v3/builds/{buildId}/resources/{resourceId}` | 资源详情；另有 `/lineage`、`/source`、`/native-details` |
+| `POST /v3/builds/{buildId}/query-options` | 202 持久异步选项任务 |
+| `GET /v3/query-options/{optionsTaskId}` | 选项状态与结果 |
+| `POST /v3/builds/{buildId}/queries` | QUERY、EXPLAIN、PREVIEW、DIMENSION_VALUES |
+| `GET /v3/queries/{queryId}/status` | 仅任务/结果存在性，不加载结果正文 |
+| `GET /v3/queries/{queryId}/results` | offset/limit 分页，最多 200 行和 8 MiB |
+| `GET /v3/changes` | 同事务持久变化流；省略 cursor 从起点重放 |
 
-查询使用目录返回的 `resourceId` 和服务生成的 `optionId`，不接受任意 SQL。时间参数按发布的业务时区归一化。新目录/查询只接受活动版本，已替代版本返回 410；已受理查询及同键重试始终绑定原 run。
+目录、选项、查询始终使用选定 buildId；不重新解析当前部署。新构建不使旧构建目录和查询失效。物理清理后仍保留目录，`queryAvailable=false`。QUERY/EXPLAIN 使用 metricResourceIds；分组/过滤/维度取值使用该构建及指标集合异步生成的 optionId。PREVIEW 使用 datasetResourceId。查询行数默认 1000、最大 10000；分页只切片已保存结果，不重新执行 SQL。数值精度和 null 保留，时间按固定构建时区归一化。
 
-元数据保存在 PostgreSQL，源码和输出按摘要封存。产物封存、发布指针和任务成功在同一事务提交；失效租约不能发布。失联外部写执行标记 `EXECUTION_OUTCOME_UNKNOWN`，不会盲目重复写入。
+其他列表默认 50、最多 200，统一 `items/nextCursor`。错误统一为 `error`，包含 `code/message/retryable/phase/buildId`。完整协议以 `/openapi.json` 为准；健康及版本接口仍是 `/health/live`、`/health/ready`、`/v1/versions`。
 
-健康与版本接口为 `/health/live`、`/health/ready`、`/v1/versions`。业务 OpenAPI 以实际 `/docs`、`/openapi.json` 为准。服务仍面向受控网络部署。
+## 升级与运维
 
-## 从旧版升级
+这是整体协议替换。旧 `/v1` 业务路由、所有 `/v2/projects`、独立 validation、同步选项和分支登记入口均已移除，不提供兼容路由。调用方需另行迁移，不能混用新旧部署。
 
-本次是明确的接口收缩，调用方必须同步升级：
+升级前停止旧受理并排空任务，备份元数据库和目标仓库。执行 migrate 后，用旧 projectId 到真实 repository 的 JSON 映射迁移历史，禁止使用统一默认仓库：
 
-- 下线 `/v1/dbt/jobs`、`/v1/metricflow/jobs`、`/v1/jobs`、`/v1/project-runs`、`/v1/query-jobs`。
-- 下线所有分支业务路由、`/internal/git-branch-events` 和 `compatibility/*`。
-- 验证改为固定提交，不再接受 changes、baseCommitSha、workspaceId 或 draftRevision。
-- 移除 SQLite、本地项目执行、临时 YAML resources 和本地旧任务导入命令。
-- 移除 `PROJECTS_ROOT`、`JOB_ARTIFACTS_ROOT`、`PLATFORM_BINDINGS_FILE`、`PLATFORM_DB_PATH` 和所有 `BRANCH_*` 配置；写入口凭据改为 `SERVICE_TOKEN`。
+```powershell
+uv run --frozen dbt-service-admin migrate-history --bindings history-bindings.json --dry-run
+uv run --frozen dbt-service-admin migrate-history --bindings history-bindings.json
+```
 
-升级前停止受理并排空旧任务，备份数据库。历史迁移不改写，已有发布、查询和封存字节不删除。数据库 branch 行及旧任务枚举暂保留为内部历史兼容结构，不再驱动 Git 分支管理。旧发布的复用绑定仍受引用/GC 保护，历史记录可通过项目级 ID 读取。
+迁移给旧构建确定性分配 buildId，保持旧封存字节与关联不变。来源冲突返回报告且不写入；来源不完整只保留历史，不允许部署或查数。旧 validation 仅保留审计。`import-publication` 只用于旧版外部身份迁入旧审计表，不是构建发布接口。
 
-查询仍固定原 run 的配置及工具链；新 worker 只领取匹配版本的任务。已有历史 run 需要继续查询时，必须保留与其匹配的执行环境，不能把不兼容代码伪装成相同版本。元数据库备份不包含目标仓库表。
-
-## 运维与验证
-
-`dbt-service-admin` 保留 `migrate`、`register-bindings`、`publish`、`import-publication`、`reconcile-attempt` 和 `gc`。已发布或被引用的 run 不会被 GC 删除。对执行结果未知的任务，先人工确认目标仓库执行已结束，再执行：
+对结果未知的执行，人工核实目标仓库停止后才释放保护：
 
 ```powershell
 uv run --frozen dbt-service-admin reconcile-attempt <attempt-uuid> --confirm-external-stopped
 uv run --frozen dbt-service-admin gc --older-than-hours 24 --limit 100
 ```
 
-回归必须使用独立测试库：
+gc 只回收无引用产物，没有历史自动 TTL。新变化流不自动裁剪；消费端提交本地投影与游标应使用同一事务。
+
+## 验证
+
+必须使用可丢弃的独立测试库。无需 Agent 或指标平台：
 
 ```powershell
 $env:SERVICE_TEST_DATABASE_URL = "postgresql://user:password@localhost/dbt_service_test"
@@ -137,14 +133,10 @@ uv run --frozen pytest -q
 uv run --frozen ruff check src tests
 ```
 
-真实 PostgreSQL 构建/验证/查询验收另设置 `PLATFORM_TEST_POSTGRES=1` 及 `PLATFORM_TEST_PGHOST`、`PLATFORM_TEST_PGPORT`、`PLATFORM_TEST_PGUSER`、`PLATFORM_TEST_PGPASSWORD`、`PLATFORM_TEST_PGDATABASE`，运行 `tests/integration/test_publication_proxy_flow.py`。测试创建独立 run schema，应只使用可丢弃测试仓库。该验收不代表 StarRocks 已执行真实回归。
+真实引擎验收设置 `PLATFORM_TEST_POSTGRES=1` 和 `PLATFORM_TEST_PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE`，执行：
 
-## 包职责
+```powershell
+uv run --frozen pytest -q tests/integration/test_publication_proxy_flow.py
+```
 
-- `api`：PostgreSQL 应用装配、鉴权和请求限制。
-- `publications`：发布受理、全量构建、目录与查询；三种应用服务独立。
-- `validation`：固定提交的只读定义验证。
-- `runtime`：同进程 worker、执行器、完成事务协调和临时工作区。
-- `execution`：内部子进程 runner、输出上限和凭据遮盖。
-- `platform` / `adapters`：固定 Git 输入、物理命名、原生目录与 MetricFlow/仓库适配。
-- `storage`：SQL、产物、任务/发布/查询事务与历史迁移。
+测试覆盖完整构建、部署、四种查询、版本隔离与不安全模板失败，创建独立测试 schema；该证据不代表 StarRocks 已做真实集成验证。

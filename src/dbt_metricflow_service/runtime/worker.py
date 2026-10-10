@@ -50,6 +50,9 @@ class Worker:
         while not self._stopping:
             try:
                 await asyncio.to_thread(self.runtime.jobs.recover)
+                deployments = getattr(self.runtime, "deployments", None)
+                if deployments is not None:
+                    await asyncio.to_thread(deployments.reconcile_pending)
             except (DatabaseError, PoolTimeout, RuntimeError) as error:
                 logger.warning(FAILURE_LOG, type(error).__name__)
             await asyncio.sleep(self.runtime.settings.heartbeat_seconds)
@@ -61,7 +64,7 @@ class Worker:
                     self.runtime.jobs.claim, str(self.runtime.instance_id),
                     toolchain_version=self.runtime.toolchain,
                     config_versions=[self.runtime.settings.config_version],
-                    kinds=["BUILD_RUN", "DRAFT_VALIDATION", "METRIC_QUERY", "QUERY_OPTIONS", "RUN_CLEANUP"],
+                    kinds=["BUILD_RUN", "METRIC_QUERY", "QUERY_OPTIONS", "RUN_CLEANUP"],
                 )
                 if job is not None:
                     await self._execute(job)
@@ -89,7 +92,16 @@ class Worker:
         except asyncio.CancelledError:
             execution.cancel()
             await asyncio.gather(execution, return_exceptions=True)
-            await self._fail(job, INTERRUPTED, stopped=False)
+            # 尚未开始外部命令时可确认取消；外部写入仍保持未知及引用保护。
+            external = await asyncio.to_thread(self.runtime.jobs.external_started, job["attempt_id"])
+            cancelled = False
+            if job.get("request_json", {}).get("buildId"):
+                from ..storage.builds import BuildStore
+
+                build = await asyncio.to_thread(BuildStore(self.runtime.db).get, job["request_json"]["buildId"])
+                cancelled = build["cancel_requested"]
+            code = "CANCELLED" if cancelled and not external else INTERRUPTED
+            await self._fail(job, code, detail={EXTERNAL_OUTCOME_UNKNOWN: external}, stopped=not external)
             if self._stopping:
                 raise
         except ExecutionError as error:
@@ -98,7 +110,10 @@ class Worker:
             await self._fail(job, code, detail=detail, stopped=error.stopped)
         except Exception as error:
             # 不保存任意异常文本，其中可能含凭据或临时输入。
-            await self._fail(job, WORKER_FAILED, detail={"type": type(error).__name__}, stopped=False)
+            external = await asyncio.to_thread(self.runtime.jobs.external_started, job["attempt_id"])
+            await self._fail(job, WORKER_FAILED,
+                             detail={"type": type(error).__name__, EXTERNAL_OUTCOME_UNKNOWN: external},
+                             stopped=not external)
             logger.warning(FAILURE_LOG, type(error).__name__)
         finally:
             heartbeat.cancel()
@@ -118,6 +133,14 @@ class Worker:
         while not execution.done():
             await asyncio.sleep(self.runtime.settings.heartbeat_seconds)
             try:
+                # 请求取消只是意图；未知外部写入继续保留引用保护。
+                if job.get("request_json", {}).get("buildId"):
+                    from ..storage.builds import BuildStore
+
+                    build = await asyncio.to_thread(BuildStore(self.runtime.db).get, job["request_json"]["buildId"])
+                    if build["cancel_requested"]:
+                        execution.cancel()
+                        return
                 valid = await asyncio.to_thread(
                     self.runtime.jobs.heartbeat, job["job_id"], job["lease_token"],
                 )

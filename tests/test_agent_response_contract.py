@@ -7,9 +7,9 @@ from types import SimpleNamespace
 
 from fastapi import FastAPI
 
-from dbt_metricflow_service.publications.api import create_publication_router
-from dbt_metricflow_service.publications.models import OptionsTask, QueryResultPage, QueryStatus
-from dbt_metricflow_service.validation.models import ValidationResult
+from dbt_metricflow_service.api.queries import router
+from dbt_metricflow_service.storage.history_models import OptionsTask, QueryResultPage, QueryStatus
+from dbt_metricflow_service.storage.validation_audit import ValidationResult
 
 
 def test_shared_fixture_matches_typed_contract_and_hash_manifest():
@@ -26,13 +26,15 @@ def test_shared_fixture_matches_typed_contract_and_hash_manifest():
 
 def test_new_routes_publish_typed_response_schemas():
     app = FastAPI()
-    app.include_router(create_publication_router(SimpleNamespace(db=None, jobs=SimpleNamespace(db=None), settings=SimpleNamespace(service_token=None))))
+    runtime = SimpleNamespace(db=None, jobs=SimpleNamespace(db=None),
+                              settings=SimpleNamespace(service_token=None))
+    app.include_router(router(runtime, lambda: "service"))
     paths = app.openapi()["paths"]
     for path, method, status in [
-        ("/v2/projects/{project_id}/query-option-jobs", "post", "202"),
-        ("/v2/projects/{project_id}/query-option-jobs/{options_job_id}", "get", "200"),
-        ("/v2/projects/{project_id}/queries/{query_id}/status", "get", "200"),
-        ("/v2/projects/{project_id}/queries/{query_id}/results", "get", "200"),
+        ("/v3/builds/{build_id}/query-options", "post", "202"),
+        ("/v3/query-options/{options_task_id}", "get", "200"),
+        ("/v3/queries/{query_id}/status", "get", "200"),
+        ("/v3/queries/{query_id}/results", "get", "200"),
     ]:
         schema = paths[path][method]["responses"][status]["content"]["application/json"]["schema"]
         assert schema, path

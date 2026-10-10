@@ -3,12 +3,15 @@ from __future__ import annotations
 import hashlib
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
-from dbt_metricflow_service.platform.bindings import ProjectBinding, load_bindings, resolve_revision
-from dbt_metricflow_service.publications.models import FixedCommitRequest
+from dbt_metricflow_service.admin import register_bindings
+from dbt_metricflow_service.platform.bindings import ProjectBinding, resolve_revision
+from dbt_metricflow_service.storage.history_models import FixedCommitRequest
+from tests.test_publication_storage import store as store
 
 
 def git(repo: Path, *args: str) -> str:
@@ -58,16 +61,17 @@ def test_resolve_fixed_sha_and_digest(repository: Path, tmp_path: Path) -> None:
     assert (project / "models" / "a.sql").read_text(encoding="utf-8") == "select 1 as value\n"
 
 
-def test_draft_resolves_exact_old_main_commit_without_published_digest(repository, tmp_path):
+def test_resolves_exact_old_commit_without_published_digest(repository, tmp_path):
     import dbt_metricflow_service.platform.bindings as platform_bindings
 
-    assert hasattr(platform_bindings, "resolve_commit"), "draft baseline resolver is not implemented"
+    assert hasattr(platform_bindings, "resolve_commit"), "fixed commit resolver is not implemented"
     old = git(repository, "rev-parse", "HEAD")
     expected = digest(repository, old)
     (repository / "models/a.sql").write_text("select 2\n", encoding="utf-8")
     git(repository, "commit", "-am", "newer unpublished source")
     project, actual = platform_bindings.resolve_commit(
-        ProjectBinding("sample", str(repository), ".", "postgres"), old, tmp_path / "draft")
+        ProjectBinding("sample", str(repository), ".", "postgres"), old, tmp_path / "validation"
+    )
     assert actual == expected
     assert (project / "models/a.sql").read_text("utf-8") == "select 1 as value\n"
 
@@ -97,41 +101,61 @@ def test_reject_unsafe_sha_subdir_symlink_and_digest(repository: Path, tmp_path:
 
 def test_remote_cannot_be_supplied_by_request() -> None:
     with pytest.raises(ValidationError):
-        FixedCommitRequest.model_validate({
-            "projectId": "sample", "commitSha": "a" * 40, "projectDigest": "b" * 64,
-            "profileBindingId": "postgres", "configVersion": "1", "idempotencyKey": "one",
-            "remote": "https://untrusted.invalid/repo.git",
-        })
+        FixedCommitRequest.model_validate(
+            {
+                "projectId": "sample",
+                "commitSha": "a" * 40,
+                "projectDigest": "b" * 64,
+                "profileBindingId": "postgres",
+                "configVersion": "1",
+                "idempotencyKey": "one",
+                "remote": "https://untrusted.invalid/repo.git",
+            }
+        )
 
 
-def test_fixed_schema_binding_is_controlled_by_service(tmp_path: Path) -> None:
+def test_fixed_schema_binding_is_controlled_by_service(tmp_path: Path, store) -> None:
     config = tmp_path / "bindings.json"
     config.write_text(
-        '[{"projectId":"sample","remote":"https://example.invalid/project.git",'
-        '"projectSubdir":".","profileBindingId":"starrocks","schemaName":"dbt_ecom"}]',
+        '[{"repository":"https://example.invalid/project.git","executionBinding":"sample",'
+        '"configVersion":"1","config":{"environments":["PREVIEW"],"profileBindingId":"starrocks","schemaName":"dbt_ecom"}}]',
         encoding="utf-8",
     )
 
-    binding = load_bindings(config)["sample"]
+    register_bindings(store.db, SimpleNamespace(max_artifact_file_bytes=4096, config_version="1"), config)
 
-    assert binding.schema_name == "dbt_ecom"
+    with store.db.transaction() as connection:
+        assert (
+            connection.exec_driver_sql(
+                "SELECT config_json FROM engine_execution_binding WHERE execution_binding=%s", ("sample",)
+            ).scalar_one()["schemaName"]
+            == "dbt_ecom"
+        )
     with pytest.raises(ValidationError):
-        FixedCommitRequest.model_validate({
-            "projectId": "sample", "commitSha": "a" * 40, "projectDigest": "b" * 64,
-            "profileBindingId": "starrocks", "configVersion": "2", "idempotencyKey": "one",
-            "schemaName": "attacker_db",
-        })
+        FixedCommitRequest.model_validate(
+            {
+                "projectId": "sample",
+                "commitSha": "a" * 40,
+                "projectDigest": "b" * 64,
+                "profileBindingId": "starrocks",
+                "configVersion": "2",
+                "idempotencyKey": "one",
+                "schemaName": "attacker_db",
+            }
+        )
 
 
 @pytest.mark.parametrize("schema", ["dbt-ecom", "", "a" * 257])
 def test_fixed_schema_binding_rejects_unsafe_name(tmp_path: Path, schema: str) -> None:
     config = tmp_path / "bindings.json"
     config.write_text(
-        '{"projectId":"sample","remote":"https://example.invalid/project.git",'
-        '"projectSubdir":".","profileBindingId":"starrocks","schemaName":"' + schema + '"}',
+        '{"repository":"https://example.invalid/project.git","executionBinding":"sample",'
+        '"configVersion":"1","config":{"environments":["PREVIEW"],"profileBindingId":"starrocks","schemaName":"'
+        + schema
+        + '"}}',
         encoding="utf-8",
     )
     config.write_text("[" + config.read_text(encoding="utf-8") + "]", encoding="utf-8")
 
     with pytest.raises(ValueError):
-        load_bindings(config)
+        register_bindings(None, SimpleNamespace(max_artifact_file_bytes=4096, config_version="1"), config)

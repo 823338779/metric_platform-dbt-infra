@@ -1,81 +1,66 @@
-"""服务拥有 Git 输入与候选受理，不依赖平台发布。"""
-
-from types import SimpleNamespace
+"""构建先受理，再由 worker 固定源码；配置版本不可变。"""
+from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
 import pytest
 
-from dbt_metricflow_service.publications.models import FixedCommitRequest
-from dbt_metricflow_service.publications.service import PublicationService
+from dbt_metricflow_service.application.builds import BuildService
+from dbt_metricflow_service.application.errors import ServiceError
+from dbt_metricflow_service.runtime.executor import RuntimeExecutor
+from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
+from dbt_metricflow_service.storage.builds import BuildStore
 from dbt_metricflow_service.storage.jobs import JobStore, StoreConflict
 from tests.test_platform_bindings import digest, git
 from tests.test_platform_bindings import repository as repository
 from tests.test_publication_storage import store as store
+from tests.test_v3_build_acceptance import request
 
 
-def test_submit_fixes_input_and_reserves_run_atomically(store, repository, tmp_path):
-    project = "publish-" + uuid4().hex
+def setup(store, repository):
+    builds = BuildStore(store.db)
+    builds.register_binding(str(repository), "warehouse", "1",
+        {"environments": ["PREVIEW"], "profileBindingId": "postgres"})
+    app = BuildService(builds, uuid4().hex, 60)
+    body = request(repository=str(repository), commitSha=git(repository, "rev-parse", "HEAD"))
+    return app, body
+
+
+async def test_submit_fixes_input_and_reserves_run_atomically(store, repository, tmp_path):
+    app, body = setup(store, repository)
+    first = app.submit(body, "test")
+    assert app.submit(body, "test").build_id == first.build_id
     jobs = JobStore(store.db)
-    jobs.register_project(project, binding_config={"projectId": project, "remote": str(repository),
-                                                  "projectSubdir": ".", "profileBindingId": "postgres"})
-    runtime = SimpleNamespace(db=store.db, jobs=jobs, artifacts=ArtifactStore(store.db), toolchain="publication-test",
-                              settings=SimpleNamespace(temp_root=tmp_path, command_timeout_seconds=60, config_version="1"))
-    service = PublicationService(runtime)
-    key = FixedCommitRequest(commitSha=git(repository, "rev-parse", "HEAD"), idempotencyKey=uuid4().hex)
-    first = service.submit(project, key)
-    second = service.submit(project, key)
-    assert first["release_id"] == second["release_id"]
-    run = jobs.get(first["run_id"])
-    assert run["request_json"]["commitSha"] == git(repository, "rev-parse", "HEAD")
-    assert run["request_json"]["projectDigest"] == digest(repository, git(repository, "rev-parse", "HEAD"))
-    assert run["request_json"]["releaseId"] == first["release_id"]
-    assert run["status"] == "QUEUED"
-    assert run["input_set_id"] is not None
-    assert runtime.artifacts.read_file(run["input_set_id"], "models/a.sql") == b"select 1 as value\n"
+    job = jobs.claim(uuid4().hex, toolchain_version=app.toolchain)
+    assert job["status"] == "RUNNING" and job["input_set_id"] is None
+    artifacts = ArtifactStore(store.db)
+    settings = Settings(tmp_path, 60, 1024, temp_root=tmp_path / "runtime")
+    fixed = await RuntimeExecutor(settings, jobs, artifacts)._prepare_build_source(job)
+    assert fixed["request_json"]["projectDigest"] == digest(repository, body.commit_sha)
+    assert fixed["request_json"]["buildId"] == str(first.build_id)
+    assert artifacts.read_file(fixed["input_set_id"], "models/a.sql") == b"select 1 as value\n"
     (repository / "models/a.sql").write_text("select 2 as value\n", encoding="utf-8")
     git(repository, "commit", "-am", "moved remote")
-    with pytest.raises(StoreConflict):
-        service.submit(project, key.model_copy(update={"commit_sha": git(repository, "rev-parse", "HEAD")}))
-    jobs.register_project(project, binding_config={"remote": "unavailable"}, config_version="2")
-    assert service.submit(project, key)["run_id"] == first["run_id"]
+    with pytest.raises(ServiceError):
+        app.submit(body.model_copy(update={"commit_sha": git(repository, "rev-parse", "HEAD")}), "test")
+    assert app.submit(body, "test").build_id == first.build_id
+    assert jobs.get(job["job_id"])["input_set_id"] == fixed["input_set_id"]
 
 
 def test_concurrent_fixed_commit_requests_create_one_run(store, repository, tmp_path):
-    from concurrent.futures import ThreadPoolExecutor
-
-    project = "concurrent-" + uuid4().hex
-    jobs = JobStore(store.db)
-    jobs.register_project(project, binding_config={"remote": str(repository), "projectSubdir": ".",
-                                                  "profileBindingId": "postgres"})
-    runtime = SimpleNamespace(db=store.db, jobs=jobs, artifacts=ArtifactStore(store.db), toolchain="test",
-                              settings=SimpleNamespace(temp_root=tmp_path, config_version="1", command_timeout_seconds=60))
-    service = PublicationService(runtime)
-    request = FixedCommitRequest(commitSha=git(repository, "rev-parse", "HEAD"), idempotencyKey=uuid4().hex)
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        results = list(executor.map(lambda _: service.submit(project, request), range(2)))
-    assert len({row["run_id"] for row in results}) == 1
-    assert len(service.releases(project)) == 1
+    app, body = setup(store, repository)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: app.submit(body, "test"), range(2)))
+    assert len({row.build_id for row in results}) == 1
+    assert len(app.list(str(repository)).items) == 1
 
 
-def test_binding_change_during_snapshot_rejects_candidate(store, repository, tmp_path, monkeypatch):
-    project = "binding-" + uuid4().hex
-    jobs = JobStore(store.db)
-    binding = {"remote": str(repository), "projectSubdir": ".", "profileBindingId": "postgres"}
-    jobs.register_project(project, binding_config=binding)
-    artifacts = ArtifactStore(store.db)
-    capture = artifacts.capture
-
-    def changed(*args, **kwargs):
-        snapshot = capture(*args, **kwargs)
-        jobs.register_project(project, {**binding, "profileBindingId": "other"})
-        return snapshot
-
-    monkeypatch.setattr(artifacts, "capture", changed)
-    runtime = SimpleNamespace(db=store.db, jobs=jobs, artifacts=artifacts, toolchain="test",
-                              settings=SimpleNamespace(temp_root=tmp_path, config_version="1", command_timeout_seconds=60))
-    service = PublicationService(runtime)
+def test_binding_change_during_snapshot_rejects_candidate(store, repository, tmp_path):
+    app, body = setup(store, repository)
+    first = app.submit(body, "test")
+    # 新协议从配置版本入口拒绝修改，无需等到慢 Git 读取结束才发现漂移。
     with pytest.raises(StoreConflict):
-        service.submit(project, FixedCommitRequest(commitSha=git(repository, "rev-parse", "HEAD"),
-                                                   idempotencyKey=uuid4().hex))
-    assert service.releases(project) == []
+        app.store.register_binding(str(repository), "warehouse", "1",
+            {"environments": ["PREVIEW"], "profileBindingId": "other"})
+    assert app.submit(body, "test").build_id == first.build_id
+    assert app.store.get(first.build_id)["config_snapshot"]["profileBindingId"] == "postgres"

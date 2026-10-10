@@ -5,7 +5,7 @@ from uuid import UUID
 
 import pytest
 
-from dbt_metricflow_service.publications.catalog import build_published_catalog, write_publication_catalog
+from dbt_metricflow_service.platform.sealed_catalog import build_published_catalog, write_publication_catalog
 
 PROJECT = "catalog-test"
 RELEASE = UUID("00000000-0000-0000-0000-000000000001")

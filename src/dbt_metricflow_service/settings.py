@@ -30,7 +30,7 @@ CONFIG_KEYS = frozenset({
     "MAX_OUTPUT_BYTES",   
     "SERVICE_DATABASE_URL", "SERVICE_TEMP_ROOT", "WORKER_CONCURRENCY", "JOB_LEASE_SECONDS",
     "JOB_HEARTBEAT_SECONDS", "SERVICE_CONFIG_VERSION", "SERVICE_TOOLCHAIN_VERSION", "MAX_RESULT_BYTES",
-    "MAX_ARTIFACT_FILE_BYTES", "MAX_ARTIFACT_BYTES", "SYNCHRONOUS_WAIT_SECONDS", "SERVICE_TOKEN", INLINE_PROFILES_KEY,
+    "MAX_ARTIFACT_FILE_BYTES", "MAX_ARTIFACT_BYTES", "SERVICE_TOKEN", INLINE_PROFILES_KEY,
      
       
 })
@@ -104,7 +104,6 @@ class Settings:
     max_artifact_file_bytes: int = 64 * 1024 * 1024
     max_artifact_bytes: int = 256 * 1024 * 1024
     # 同步选项/清理接口等待持久任务的最大秒数。
-    synchronous_wait_seconds: int = 30
     # HTTP 服务监听地址与端口，不影响管理命令的数据库连接。
     server_host: str = "0.0.0.0"
     server_port: int = 8000
@@ -181,7 +180,6 @@ class Settings:
             max_result_bytes=int(value("MAX_RESULT_BYTES", str(16 * 1024 * 1024))),
             max_artifact_file_bytes=int(value("MAX_ARTIFACT_FILE_BYTES", str(64 * 1024 * 1024))),
             max_artifact_bytes=int(value("MAX_ARTIFACT_BYTES", str(256 * 1024 * 1024))),
-            synchronous_wait_seconds=int(value("SYNCHRONOUS_WAIT_SECONDS", "30")),
             server_host=value("SERVICE_HOST", "0.0.0.0"),
             server_port=int(value("SERVICE_PORT", "8000")),
         )

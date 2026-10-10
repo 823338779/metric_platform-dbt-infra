@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
-import time
 from importlib.metadata import version
 from pathlib import Path
 from uuid import uuid4
@@ -24,14 +22,6 @@ CLEANED = "CLEANED"
 READ_ONLY = "READ_ONLY"
 PREPARATION_ONLY = "PREPARATION_ONLY"
 TOOLCHAIN_PACKAGES = ("dbt-core", "metricflow", "dbt-starrocks", "dbt-duckdb", "dbt-postgres")
-
-
-class RuntimeUnavailable(RuntimeError):
-    """受理容量、数据库或同步等待暂时不可用。"""
-
-
-class AdapterUnsupported(ValueError):
-    """通用 MetricFlow CLI 尚未支持请求的 adapter。"""
 
 
 def current_toolchain() -> str:
@@ -75,84 +65,5 @@ class Runtime:
         if self.worker is not None:
             await self.worker.close()
         await asyncio.to_thread(self.db.close)
-
-
-    def _run(self, run_id: str, *, ready: bool = False) -> dict:
-        row = self.jobs.get(run_id)
-        if row is None or row["kind"] != BUILD:
-            raise KeyError(run_id)
-        if ready and (row["status"] != SUCCEEDED or row["run_lifecycle"] != ACTIVE):
-            raise ValueError("run is not ready")
-        return row
-
-
-    def get_query(self, query_id: str):
-        row = self.jobs.get(query_id)
-        if row is None or row["kind"] != QUERY:
-            return None
-        payload = {"queryId": query_id, "state": "READY" if row["status"] == SUCCEEDED else row["status"]}
-        if row["status"] == SUCCEEDED:
-            result = self.jobs.result(query_id)
-            payload.update(result["payload_json"])
-        if row.get("error_code"):
-            payload["errorCode"] = row["error_code"]
-        return payload
-
-
-    def _submit_child(self, run_id: str, kind: str, payload: dict, key: str) -> dict:
-        parent = self._run(run_id, ready=True)
-        # 项目当前配置可能已升级；查询固定使用父 run 的配置与工具链。
-        retry_safe = parent["request_json"].get("binding", {}).get("queryRetrySafe") is True
-        return self.jobs.reserve(
-            kind, parent["project_id"], payload, idempotency_scope=kind, idempotency_key=key,
-            parent_run_id=run_id, input_set_id=parent["output_set_id"],
-            config_version=parent["config_version"], toolchain_version=parent["toolchain_version"],
-            profile_binding_id=parent["profile_binding_id"], schema_name=parent["schema_name"],
-            retry_policy=READ_ONLY if retry_safe else PREPARATION_ONLY,
-            timeout_seconds=self.settings.command_timeout_seconds,
-        )
-
-
-    def _wait(self, job_id: str) -> dict:
-        deadline = time.monotonic() + self.settings.synchronous_wait_seconds
-        while time.monotonic() < deadline:
-            row = self.jobs.get(job_id)
-            if row["status"] == SUCCEEDED:
-                return self.jobs.result(job_id)["payload_json"]
-            if row["status"] == FAILED:
-                if row.get("error_code") == "INVALID_QUERY":
-                    raise ValueError("invalid query options")
-                raise RuntimeUnavailable("persistent execution failed; retry after inspection")
-            time.sleep(0.2)
-        raise RuntimeUnavailable("persistent task has not finished; retry the request")
-
-
-    def options(self, run_id: str, metrics: tuple[str, ...]):
-        row = self.submit_options(run_id, metrics)
-        return self._wait(row["job_id"])
-
-
-    def submit_options(self, run_id: str, metrics: tuple[str, ...]):
-        """同步与异步入口共用受理身份；冷请求不等待 worker 完成。"""
-        if not metrics:
-            raise ValueError("metrics are required")
-        metrics = tuple(sorted(set(metrics)))
-        key = hashlib.sha256(json.dumps([run_id, metrics]).encode()).hexdigest()
-        row = self._submit_child(run_id, OPTIONS, {"mode": "OPTIONS", "metrics": list(metrics)}, key)
-        if row["status"] == FAILED:
-            self.jobs.requeue_options(row["job_id"])
-            row = self.jobs.get(row["job_id"])
-        return row
-
-
-    def cleanup(self, run_id: str):
-        parent = self._run(run_id)
-        if parent["run_lifecycle"] == CLEANED:
-            return
-        row = self.jobs.reserve_cleanup(run_id)
-        try:
-            self._wait(row["job_id"])
-        except ValueError as error:
-            raise RuntimeUnavailable("cleanup did not complete; retry after inspection") from error
 
 

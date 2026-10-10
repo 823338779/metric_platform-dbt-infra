@@ -1,6 +1,6 @@
 """短事务连接池；迁移仅由管理命令显式执行。"""
 
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
 
 from psycopg2.extensions import new_array_type, new_type, parse_dsn, register_type
@@ -12,6 +12,7 @@ MIGRATIONS = (MIGRATION_PATH, MIGRATION_PATH.with_name("002_publication.sql"),
               MIGRATION_PATH.with_name("004_branch_publications.sql"),
               MIGRATION_PATH.with_name("005_branch_baselines.sql"))
 CONNECTION_OPTIONS = "-c statement_timeout=10000 -c lock_timeout=5000"
+SQL_LOCK_FACTS = "SELECT value FROM engine_change_counter WHERE singleton FOR UPDATE"
 
 
 class Database:
@@ -29,6 +30,14 @@ class Database:
 
     def transaction(self) -> AbstractContextManager[Connection]:
         return self.engine.begin()
+
+    @contextmanager
+    def fact_transaction(self):
+        # 事实事务先锁变化序号，再锁业务行，避免触发器与目标/任务锁顺序反转。
+        # 只包含短数据库操作；Git、引擎执行和产物传输均在事务之外。
+        with self.transaction() as connection:
+            connection.exec_driver_sql(SQL_LOCK_FACTS)
+            yield connection
 
     def migrate(self):
         from .schema import migrate

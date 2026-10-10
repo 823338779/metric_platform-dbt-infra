@@ -4,7 +4,7 @@ import pytest
 
 import dbt_metricflow_service.runtime.service as runtime_service
 
-SOURCE_PATHS = ("publications/service.py", "storage/jobs.py", "__init__.py")
+SOURCE_PATHS = ("application/builds.py", "storage/jobs.py", "__init__.py")
 RUNTIME_PATH = "runtime/service.py"
 UTF8 = "utf-8"
 INITIAL_SOURCE = "VALUE = 1\n"

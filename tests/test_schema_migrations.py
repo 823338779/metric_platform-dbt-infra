@@ -32,7 +32,7 @@ def test_adopt_supported_versions(version):
         with db.transaction() as connection:
             assert connection.exec_driver_sql("SELECT to_regclass('alembic_version')").scalar_one() is not None
             assert connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalars().all() == [
-                "0001_runtime_adoption",
+                "0002_build_deployment_contract",
             ]
             assert connection.exec_driver_sql("SELECT version FROM runtime_schema_version").scalars().all() == [5]
             if version:
