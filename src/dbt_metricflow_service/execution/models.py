@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class JobStatus(StrEnum):
-    """Lifecycle states exposed while a subprocess job is retained."""
+    """SDK 或通用命令执行记录的生命周期状态。"""
 
     QUEUED = "queued"
     RUNNING = "running"
@@ -24,7 +24,7 @@ class JobStatus(StrEnum):
 
 
 class JobRecord(BaseModel):
-    """Immutable snapshot of one submitted CLI job."""
+    """一次 SDK 或通用命令执行的不可变快照。"""
 
     model_config = ConfigDict(frozen=True)
 
@@ -32,9 +32,9 @@ class JobRecord(BaseModel):
     project: str = Field(description="任务所属的安全项目标识。")
     status: JobStatus = Field(description="任务当前生命周期状态。")
     submitted_at: datetime = Field(description="任务进入内存队列的 UTC 时间。")
-    started_at: datetime | None = Field(default=None, description="子进程开始创建的 UTC 时间。")
-    finished_at: datetime | None = Field(default=None, description="子进程结束处理的 UTC 时间。")
-    exit_code: int | None = Field(default=None, description="子进程退出码；结束前或超时时为空。")
+    started_at: datetime | None = Field(default=None, description="开始执行的 UTC 时间。")
+    finished_at: datetime | None = Field(default=None, description="执行及清理结束的 UTC 时间。")
+    exit_code: int | None = Field(default=None, description="命令退出码或 SDK 结果映射码；结束前或超时时为空。")
     stdout: str = Field(default="", description="经过截断和凭据遮盖的标准输出尾部。")
     stderr: str = Field(default="", description="经过截断和凭据遮盖的标准错误尾部。")
     output_truncated: bool = Field(default=False, description="任一输出流是否超过保留上限。")

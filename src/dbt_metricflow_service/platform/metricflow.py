@@ -70,7 +70,7 @@ def _where_constraints(request: PlatformQueryRequest) -> list[str]:
 
 
 def execute_programmatic(project: Path, profiles: Path, input_data: dict[str, Any]) -> dict[str, Any]:
-    """在隔离 worker 内调用锁定版本 MetricFlow API，不解析 CLI 输出。"""
+    """在隔离或串行化的执行上下文中调用锁定版本 MetricFlow API。"""
 
     configuration = CLIConfiguration()
     configuration.setup(dbt_profiles_path=profiles, dbt_project_path=project, configure_file_logging=False)

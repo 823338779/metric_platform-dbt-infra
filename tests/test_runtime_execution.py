@@ -3,18 +3,22 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import logging
 import os
-import sys
 import threading
+import time
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
+from dbt.cli.main import dbtRunner
 from psycopg2 import sql
 from psycopg2.extensions import parse_dsn
 from psycopg2.extras import Json
 
 import dbt_metricflow_service.runtime.executor as runtime_execution
 from dbt_metricflow_service.execution.models import CommandSpec
+from dbt_metricflow_service.platform import metricflow
 from dbt_metricflow_service.runtime.executor import ExecutionError, RuntimeExecutor
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
@@ -22,7 +26,7 @@ from dbt_metricflow_service.storage.jobs import JobStore
 from dbt_metricflow_service.storage.postgres import Database
 from dbt_metricflow_service.storage.rows import row_dict
 
-# 测试使用真实存储与进程；仅把外部仓库命令替换为 Python 子进程。
+# 测试使用真实存储和执行线程，仅替换访问外部仓库的 SDK 调用。
 DATABASE_ENV = "SERVICE_TEST_DATABASE_URL"
 PROJECT_FILE = "dbt_project.yml"
 PROJECT_TEXT = "name: execution\nversion: '1.0'\n"
@@ -39,16 +43,21 @@ INSERT_JOB_SQL = """INSERT INTO runtime_job
     (job_id,kind,project_id,request_fingerprint,request_json,config_version,toolchain_version,
      deadline_at,input_set_id,profile_binding_id,schema_name)
     VALUES (%s,%s,%s,'fixture',%s,'1',%s,clock_timestamp()+interval '1 hour',%s,'fixture','run_fixture')"""
-PROGRAMMATIC_CODE = """
-import json, os, sys
-from pathlib import Path
-data = json.loads(Path(sys.argv[1]).read_text())
-assert Path(os.environ['DBT_PROJECT_DIR'], 'dbt_project.yml').exists()
-assert os.environ['DBT_PLATFORM_SCHEMA'] == 'run_fixture'
-assert os.environ['DBT_TARGET'] == 'fixture'
-result = {} if data['mode'] == 'CLEANUP' else {'observed': data}
-Path(sys.argv[2]).write_text(json.dumps(result))
-"""
+# SDK 替身与调用预算测试使用固定协议字段和诊断内容。
+SCHEMA_ENV = "DBT_PLATFORM_SCHEMA"
+TARGET_ENV = "DBT_TARGET"
+FIXTURE_SCHEMA = "run_fixture"
+FIXTURE_TARGET = "fixture"
+MODE_KEY = "mode"
+CLEANUP_MODE = "CLEANUP"
+OBSERVED_KEY = "observed"
+ENGINE_LOGGER = "metricflow"
+DIAGNOSTIC = "x" * 1000
+DBT = "dbt"
+BUILD = "build"
+QUERY_OPTIONS = "QUERY_OPTIONS"
+OPTIONS_PAYLOAD = {"mode": "OPTIONS", "metrics": ["orders"]}
+COMPLETED_FILE = "completed"
 BUILD_CODE = """
 import json, os, sys
 from pathlib import Path
@@ -100,15 +109,20 @@ def claimed(execution, kind, request):
     return executor.jobs.claim(str(uuid4()), toolchain_version=toolchain)
 
 
-def programmatic_child(monkeypatch, code=PROGRAMMATIC_CODE):
-    """保留实际环境与文件传参，仅替换需要仓库访问的子进程入口。"""
-    original = runtime_execution.build_programmatic_command
+def programmatic_engine(monkeypatch, execute=None):
+    """保留线程、租约和 JSON 文件边界，仅替换需要仓库访问的 SDK 函数。"""
 
-    def command(*args):
-        spec = original(*args)
-        return dataclasses.replace(spec, argv=(sys.executable, "-c", code, *spec.argv[-2:]))
+    def default_execute(project, profiles, data):
+        assert (project / PROJECT_FILE).exists()
+        assert os.environ[SCHEMA_ENV] == FIXTURE_SCHEMA
+        assert os.environ[TARGET_ENV] == FIXTURE_TARGET
+        return {} if data[MODE_KEY] == CLEANUP_MODE else {OBSERVED_KEY: data}
 
-    monkeypatch.setattr(runtime_execution, "build_programmatic_command", command)
+    def forbidden(*args, **kwargs):
+        raise AssertionError("runtime must execute the engine in process")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden)
+    monkeypatch.setattr(metricflow, "execute_programmatic", execute or default_execute)
 
 
 @pytest.fixture
@@ -151,7 +165,7 @@ async def test_programmatic_tasks_use_restored_input_and_return_json(execution, 
     job = claimed(execution, kind, payload)
     if kind == "RUN_CLEANUP":
         job["parent_run_id"] = str(uuid4())
-    programmatic_child(monkeypatch)
+    programmatic_engine(monkeypatch)
     result = await executor.execute(job)
     assert result.payload == expected
     assert result.output_set_id is None
@@ -162,7 +176,7 @@ async def test_oversized_programmatic_result_is_rejected_before_parsing(executio
     executor, _, _, _ = execution
     executor.settings = dataclasses.replace(executor.settings, max_result_bytes=32)
     job = claimed(execution, "QUERY_OPTIONS", {"mode": "OPTIONS", "metrics": ["orders"]})
-    programmatic_child(monkeypatch)
+    programmatic_engine(monkeypatch)
     with pytest.raises(ExecutionError) as error:
         await executor.execute(job)
     assert error.value.code == "RESULT_TOO_LARGE"
@@ -183,7 +197,7 @@ async def test_cleanup_before_source_attachment_has_no_external_work(execution):
         assert row_dict(sql_result)["execution_stage"] == "PREPARING"
 
 
-async def test_expired_lease_does_not_start_child(execution, monkeypatch, tmp_path):
+async def test_expired_lease_does_not_start_engine(execution, monkeypatch, tmp_path):
     executor, database, _, _ = execution
     marker = tmp_path / "must-not-exist"
     job = claimed(execution, "QUERY_OPTIONS", {"mode": "OPTIONS", "metrics": ["orders"]})
@@ -192,33 +206,62 @@ async def test_expired_lease_does_not_start_child(execution, monkeypatch, tmp_pa
             "UPDATE runtime_attempt SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE attempt_id=%s",
             (job["attempt_id"],),
         )
-    programmatic_child(monkeypatch, f"from pathlib import Path; Path({str(marker)!r}).touch()")
+    # 保留真实租约过期检查，SDK 的副作用绝不能出现。
+    def execute(project, profiles, data):
+        marker.touch()
+        return {}
+
+    programmatic_engine(monkeypatch, execute)
     with pytest.raises(ExecutionError) as error:
         await executor.execute(job)
     assert error.value.code == "LEASE_LOST"
     assert not marker.exists()
 
 
-async def test_cancellation_stops_process_before_workspace_removal(execution, monkeypatch, tmp_path):
+@pytest.mark.parametrize("cancel", [True, False])
+async def test_cancellation_or_timeout_waits_for_engine_before_workspace_removal(execution, monkeypatch, cancel):
     executor, _, _, _ = execution
-    started = tmp_path / "started"
-    escaped = tmp_path / "escaped"
-    code = (
-        "from pathlib import Path; import time; "
-        f"Path({str(started)!r}).touch(); time.sleep(1); Path({str(escaped)!r}).touch()"
+    started, release = threading.Event(), threading.Event()
+    finished = []
+    executor.settings = dataclasses.replace(
+        executor.settings, command_timeout_seconds=5 if cancel else 0.02,
     )
-    job = claimed(execution, "QUERY_OPTIONS", {"mode": "OPTIONS", "metrics": ["orders"]})
-    programmatic_child(monkeypatch, code)
+    job = claimed(execution, QUERY_OPTIONS, OPTIONS_PAYLOAD)
+    workspace = executor.settings.temp_root / str(job["job_id"]) / str(job["attempt_id"])
+
+    # 取消或超时后引擎仍可写工作目录；必须等待这次写入结束才能移除目录。
+    def execute(project, profiles, data):
+        started.set()
+        assert release.wait(5)
+        marker = project / COMPLETED_FILE
+        marker.touch()
+        finished.append(marker.exists())
+        return {}
+
+    programmatic_engine(monkeypatch, execute)
     task = asyncio.create_task(executor.execute(job))
-    async with asyncio.timeout(5):
-        while not started.exists():
-            await asyncio.sleep(0.01)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    assert not (executor.settings.temp_root / str(job["job_id"]) / str(job["attempt_id"])).exists()
-    await asyncio.sleep(1.1)
-    assert not escaped.exists()
+    try:
+        async with asyncio.timeout(5):
+            while not started.is_set():
+                await asyncio.sleep(0.01)
+        if cancel:
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+        await asyncio.sleep(0.07)
+        assert not task.done()
+        assert workspace.exists()
+    finally:
+        release.set()
+        result, = await asyncio.gather(task, return_exceptions=True)
+    if cancel:
+        assert isinstance(result, asyncio.CancelledError)
+    else:
+        assert isinstance(result, ExecutionError)
+        assert result.code == "COMMAND_TIMEOUT"
+        assert result.stopped is False
+    assert finished == [True]
+    assert not workspace.exists()
 
 
 
@@ -229,7 +272,13 @@ async def test_timeout_retains_bounded_diagnostics_and_unknown_stop(execution, m
     executor, _, project_id, _ = execution
     executor.settings = dataclasses.replace(executor.settings, command_timeout_seconds=0.2, max_output_bytes=32)
     job = claimed(execution, "QUERY_OPTIONS", {"mode": "OPTIONS", "metrics": ["orders"]})
-    programmatic_child(monkeypatch, "import time; print('x' * 1000, flush=True); time.sleep(10)")
+    # 诊断经过真实 SDK 日志收集器，超时仍需等线程返回后才能上报。
+    def execute(project, profiles, data):
+        logging.getLogger(ENGINE_LOGGER).warning(DIAGNOSTIC)
+        time.sleep(0.3)
+        return {}
+
+    programmatic_engine(monkeypatch, execute)
     with pytest.raises(ExecutionError) as error:
         await executor.execute(job)
     assert error.value.code == "COMMAND_TIMEOUT"
@@ -239,29 +288,28 @@ async def test_timeout_retains_bounded_diagnostics_and_unknown_stop(execution, m
     assert error.value.payload["output_truncated"] is True
 
 
-async def test_write_child_connection_loss_does_not_confirm_external_stop(execution, monkeypatch):
-    from dbt_metricflow_service.execution.runner import JobRunner
+async def test_write_engine_connection_loss_does_not_confirm_external_stop(execution, monkeypatch):
     executor, _, _, _ = execution
     job = claimed(execution, "BUILD_RUN", {})
-    spec = CommandSpec((sys.executable, "-c", "import sys; sys.exit(2)"),
+    spec = CommandSpec((DBT, BUILD),
                        executor.settings.temp_root, dict(os.environ), True)
     spec.cwd.mkdir(parents=True, exist_ok=True)
-    runner = JobRunner(30, 1024)
-    try:
-        with pytest.raises(ExecutionError) as error:
-            await executor._command(job, runner, spec, "BUILDING")
-        assert error.value.stopped is False
-    finally:
-        await runner.close()
+    # SDK 连接异常不能证明外部写入已经停止，保留未知结果保护。
+    monkeypatch.setattr(dbtRunner, "invoke", lambda *_: SimpleNamespace(success=False, exception=ConnectionError()))
+    with pytest.raises(ExecutionError) as error:
+        await executor._command(job, spec, "BUILDING")
+    assert error.value.stopped is False
 
 
 
 async def test_options_invalid_input_uses_structured_error_code(execution, monkeypatch):
     executor, _, _, _ = execution
     job = claimed(execution, "QUERY_OPTIONS", {"mode": "OPTIONS", "metrics": ["missing"]})
-    programmatic_child(monkeypatch,
-        "import sys; from pathlib import Path; "
-        "Path(sys.argv[2]).write_text('{\"errorCode\":\"INVALID_QUERY\"}'); sys.exit(2)")
+    # SDK 参数异常仍通过真实 JSON 错误文件转换为稳定公开错误码。
+    def execute(project, profiles, data):
+        raise metricflow.InvalidOptions()
+
+    programmatic_engine(monkeypatch, execute)
     with pytest.raises(ExecutionError) as error:
         await executor.execute(job)
     assert error.value.code == "INVALID_QUERY"

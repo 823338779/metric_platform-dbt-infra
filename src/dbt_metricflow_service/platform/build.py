@@ -11,7 +11,6 @@ from uuid import UUID
 import sqlglot
 from sqlglot import exp
 
-from dbt_metricflow_service.execution.runner import JobRunner
 from dbt_metricflow_service.models.payloads import JsonObject
 from dbt_metricflow_service.storage.records import LeasedJob
 
@@ -156,7 +155,7 @@ def requires_source_freshness(node: JsonObject) -> bool:
 
 
 async def execute_publication(
-    executor: RuntimeExecutor, job: LeasedJob, runner: JobRunner, attempt: Path, project: Path
+    executor: RuntimeExecutor, job: LeasedJob, attempt: Path, project: Path
 ) -> ExecutionResult:
     """逻辑解析、选择性构建和完整验证使用同一个受租约控制的命令执行器。"""
     from ..execution.models import CommandSpec
@@ -195,7 +194,7 @@ async def execute_publication(
         from .validation_summary import failure_summary
 
         try:
-            await executor._command(job, runner, spec, COMMAND_PHASES[args[0]])
+            await executor._command(job, spec, COMMAND_PHASES[args[0]])
         except ExecutionError as error:
             # 摘要与当前租约失败事务一起保存；不复制 stderr、SQL 或数据库异常。
             summary = failure_summary(target, args[0], settings.max_artifact_file_bytes)
@@ -242,7 +241,7 @@ async def execute_publication(
         raise ValueError("构建步骤证明超限")
     await command(DOCS, GENERATE)
     result_path.write_bytes(raw_results)
-    probe = await executor._programmatic(job, runner, project, attempt, {"mode": "PROBE"})
+    probe = await executor._programmatic(job, project, attempt, {"mode": "PROBE"})
     manifest = json.loads((target / MANIFEST_FILE).read_text(encoding=UTF8))
     physical_catalog = json.loads((target / CATALOG_FILE).read_text(encoding=UTF8))
     results = json.loads(raw_results)

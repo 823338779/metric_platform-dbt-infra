@@ -12,7 +12,7 @@
 | `storage` | PostgreSQL 短事务、任务/产物存储、变化流和历史迁移 |
 | `runtime` | 同进程 worker、租约恢复、完成事务、执行工作目录 |
 | `platform` | 固定 Git 读取、完整工程构建、原生目录与查询适配 |
-| `execution` / `adapters` | 子进程控制、脱敏及底层引擎适配 |
+| `execution` / `adapters` | 进程内引擎调用、通用命令控制、脱敏及底层引擎适配 |
 
 无额外 Repository/Port/Facade 镜像层。历史 SQL、历史模型和原始封存 schema 留在 storage/models 内，仅用于历史读取、迁移和物理引用保护。
 
@@ -30,6 +30,12 @@ uv run --frozen dbt-metricflow-service
 ```
 
 普通启动只检查数据库 schema，不自动执行迁移。API 和 worker 同进程运行；已受理任务在数据库中，不依赖 Agent 在线。配置读取顺序：环境变量 > `SERVICE_CONFIG_FILE` 指定文件（默认 `config/service.yaml`）> 默认值。文件内相对路径相对配置文件。
+
+dbt 命令通过 `dbtRunner.invoke()` 直接执行，MetricFlow 验证和查询调用 Python API，均不启动引擎 CLI 子进程。
+这些调用在线程中运行并共用进程级串行锁，避免 dbt 全局配置和连接相互影响；HTTP 和租约心跳保持异步。
+`WORKER_CONCURRENCY` 控制任务槽位，不能使同一进程中的引擎调用并行。Git 源码操作仍使用 Git 工具。
+取消或超过单次调用预算后，服务等待当前调用真正退出才释放锁和清理工作目录，不强制终止 Python 线程；
+若底层驱动长时间不返回，取消完成和服务关闭也会等待。外部写结果无法确认时仍保留 `OUTCOME_UNKNOWN` 保护。
 
 | 配置 | 用途 |
 | --- | --- |

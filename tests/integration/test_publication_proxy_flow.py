@@ -1,5 +1,6 @@
 """无外部业务系统参与的真实构建、历史读取和四种查询。"""
 
+import asyncio
 import os
 import shutil
 from decimal import Decimal
@@ -25,9 +26,14 @@ from dbt_metricflow_service.storage.deployments import DeploymentStore
 from tests.integration.helpers import FIXTURE, PROFILES, git
 
 
-async def test_build_history_and_all_query_modes(tmp_path):
+async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
     if os.getenv("PLATFORM_TEST_POSTGRES") != "1" or not os.getenv("SERVICE_TEST_DATABASE_URL"):
         pytest.skip("需要独立 PostgreSQL 与真实工具链环境")
+    # 真实构建、验证和查询必须调用 SDK，禁止重新引入引擎 CLI 子进程。
+    async def forbidden_child(*args, **kwargs):
+        raise AssertionError("engine execution must stay in process")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden_child)
     repo = tmp_path / "repo"
     shutil.copytree(FIXTURE, repo)
     # 原始工程声明非默认输出位置，执行副本和封存仍必须使用同一受控路径。

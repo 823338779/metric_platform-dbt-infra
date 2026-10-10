@@ -47,7 +47,7 @@ class Worker:
         self._tasks.append(asyncio.create_task(self._maintain()))
 
     async def close(self) -> None:
-        # 取消执行会先由执行器终止子进程树；数据库失联时等待租约恢复。
+        # 进程内引擎取消后等待调用退出；数据库失联时等待租约恢复。
         self._stopping = True
         for task in self._tasks:
             task.cancel()
