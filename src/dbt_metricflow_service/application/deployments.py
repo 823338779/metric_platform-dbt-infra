@@ -17,7 +17,6 @@ from ..models.deployments import DeploymentAttemptView, DeploymentKey, Deploymen
 from ..storage.builds import digest
 from ..storage.deployments import TERMINAL, attempt_view
 from ..storage.jobs import StoreConflict
-from ..storage.paging import page
 from .errors import ServiceError
 
 JSON_MODE = "json"
@@ -109,15 +108,15 @@ class DeploymentService:
         if status != "SUCCEEDED":
             return attempt_view(attempt)
         # 物理清理或历史工具链不可用不能通过独立部署入口绕过。
-        view = self.build_service.get(build["build_id"])
-        if not view.query_available:
+        reason = self.build_service.query_unavailable_reason(build)
+        if reason:
             return attempt_view(
                 cast(
-                    StoredDeploymentAttempt, self.store.settle(key, generation, "FAILED", view.query_unavailable_reason)
+                    StoredDeploymentAttempt, self.store.settle(key, generation, "FAILED", reason)
                 )
             )
         try:
-            self.catalogs.read(build["build_id"])
+            self.catalogs.read_build(build)
         except ServiceError as error:
             return attempt_view(
                 cast(StoredDeploymentAttempt, self.store.settle(key, generation, "FAILED", error.error.code))
@@ -163,27 +162,8 @@ class DeploymentService:
         cursor: str | None = None,
         limit: int = 50,
     ) -> Page[DeploymentAttemptView]:
-        rows = [
-            row
-            for row in self.store.list(repository)
-            if (environment is None or row["environment"] == environment)
-            and (branch_name is None or row["branch_name"] == branch_name)
-        ]
         try:
-            rows, next_cursor = page(
-                rows,
-                scope=[repository, environment, branch_name],
-                cursor=cursor,
-                limit=limit,
-                reverse=True,
-                identity=lambda row: str(row["created_at"]) + json_identity(row),
-            )
+            rows, next_cursor = self.store.list(repository, environment, branch_name, cursor, limit)
         except ValueError as error:
             raise ServiceError("INVALID_CURSOR", str(error)) from error
         return Page[DeploymentAttemptView](items=[attempt_view(row) for row in rows], next_cursor=next_cursor)
-
-
-def json_identity(row: StoredDeploymentAttempt) -> str:
-    import json
-
-    return json.dumps([row["repository"], row["environment"], row["branch_name"], row["generation"]])

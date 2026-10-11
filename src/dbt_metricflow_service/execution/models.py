@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -42,17 +42,11 @@ class JobRecord(BaseModel):
 
 @dataclass(frozen=True, slots=True)
 class CommandSpec:
-    """Literal subprocess invocation produced from one validated request."""
+    """一次进程内 dbt 调用所需的参数、目录和隔离环境。"""
 
-    # Executable and arguments passed directly to create_subprocess_exec.
+    # 首项标识 dbt，其余参数交给 dbtRunner.invoke。
     argv: tuple[str, ...]
-    # Project directory used as the child process working directory.
     cwd: Path
-    # Complete child environment, including the mounted profiles location.
     environment: Mapping[str, str]
-    # Whether the command must hold the per-project mutation lock.
+    # 是否需要持久化外部写入标记及保守的取消保护。
     write_operation: bool
-    # Optional private subprocess input; excluded from repr to avoid accidental disclosure.
-    stdin_data: bytes | None = field(default=None, repr=False)
-    # Whether the runner should create an isolated derived-artifact directory.
-    use_job_artifacts: bool = False

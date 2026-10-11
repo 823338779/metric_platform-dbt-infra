@@ -32,7 +32,7 @@ def query_service(store, tmp_path):
     record = builds.store.get(view.build_id)
     catalog = build().model_dump(mode="json", by_alias=True)
     catalogs = CatalogService(builds.store, artifacts)
-    catalogs.read = lambda version: (builds.store.get(version), deepcopy(catalog))
+    catalogs.read_build = lambda build: deepcopy(catalog)
     service = QueryService(builds, catalogs, jobs)
     request = QueryOptionsRequest(idempotencyKey=uuid4().hex, metricResourceIds=["metric.sample.orders"])
     task = service.submit_options(view.build_id, request, "platform")
@@ -107,14 +107,14 @@ def test_concurrent_same_key_admits_one_query(store, tmp_path):
         idempotencyKey=uuid4().hex, mode="QUERY", metricResourceIds=["metric.sample.orders"]
     )
     rendezvous = Barrier(2)
-    original = service.catalogs.read
+    original = service.catalogs.read_build
 
     def options(*args):
         result = original(*args)
         rendezvous.wait(timeout=5)
         return result
 
-    service.catalogs.read = options
+    service.catalogs.read_build = options
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [executor.submit(service.submit, release["build_id"], request, "platform") for _ in range(2)]
         results = [future.result(timeout=10) for future in futures]

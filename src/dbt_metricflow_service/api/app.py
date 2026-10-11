@@ -45,11 +45,10 @@ def create_app(settings: Settings) -> FastAPI:
                                            partial(is_ancestor, temp_root=settings.temp_root),
                                            builds=build_service, catalogs=catalog_service)
     query_service = QueryService(build_service, catalog_service, runtime.jobs)
-    runtime.deployments = deployment_service
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        await runtime.start()
+        await runtime.start(deployments=deployment_service)
         try:
             yield
         finally:

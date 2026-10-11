@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from datetime import datetime
 from typing import cast
 from uuid import UUID
 
@@ -16,6 +18,7 @@ from dbt_metricflow_service.storage.records import StoredBuild, StoredDeployment
 
 from .entities import Build, DeploymentAttempt, DeploymentTarget, RuntimeJob
 from .jobs import StoreConflict
+from .paging import HISTORY_CURSOR_VERSION, read_cursor, write_cursor
 from .rows import entity_dict
 
 BUILD_OPERATION = "BUILD"
@@ -94,15 +97,18 @@ class DeploymentStore:
         return cast(StoredDeploymentAttempt, entity_dict(attempt))
 
     def initial(self, build_id: UUID | str) -> StoredDeploymentAttempt | None:
+        return self.initials([str(build_id)]).get(str(build_id))
+
+    def initials(self, build_ids: list[str]) -> dict[str, StoredDeploymentAttempt]:
+        if not build_ids:
+            return {}
         with self.db.session() as session:
-            row = session.scalar(
-                select(DeploymentAttempt).where(
-                    DeploymentAttempt.build_id == str(build_id),
-                    DeploymentAttempt.operation == BUILD_OPERATION,
-                    DeploymentAttempt.idempotency_key == BUILD_KEY_PREFIX + str(build_id),
-                )
-            )
-            return cast(StoredDeploymentAttempt | None, entity_dict(row))
+            rows = session.scalars(select(DeploymentAttempt).where(
+                DeploymentAttempt.build_id.in_(build_ids),
+                DeploymentAttempt.operation == BUILD_OPERATION,
+                DeploymentAttempt.idempotency_key == func.concat(BUILD_KEY_PREFIX, DeploymentAttempt.build_id),
+            ))
+            return {row.build_id: cast(StoredDeploymentAttempt, entity_dict(row)) for row in rows}
 
     def current(self, key: DeploymentKey) -> StoredDeploymentTarget | None:
         with self.db.session() as session:
@@ -267,14 +273,43 @@ class DeploymentStore:
             rows = session.scalars(statement, execution_options={"synchronize_session": False})
             return cast(list[StoredDeploymentAttempt], [entity_dict(row) for row in rows])
 
-    def list(self, repository: str) -> list[StoredDeploymentAttempt]:
+    def list(
+        self, repository: str, environment: str | None = None, branch_name: str | None = None,
+        cursor: str | None = None, limit: int = 50,
+    ) -> tuple[list[StoredDeploymentAttempt], str | None]:
+        scope = [repository, environment, branch_name]
+        after = read_cursor(scope, cursor, limit, version=HISTORY_CURSOR_VERSION)
+        columns = (
+            DeploymentAttempt.created_at, DeploymentAttempt.repository.collate("C"),
+            DeploymentAttempt.environment.collate("C"), DeploymentAttempt.branch_name.collate("C"),
+            DeploymentAttempt.generation,
+        )
+        statement = select(DeploymentAttempt).where(DeploymentAttempt.repository == repository)
+        if environment is not None:
+            statement = statement.where(DeploymentAttempt.environment == environment)
+        if branch_name is not None:
+            statement = statement.where(DeploymentAttempt.branch_name == branch_name)
+        if after is not None:
+            try:
+                timestamp, separator, identity = after.partition("[")
+                created_at = datetime.fromisoformat(timestamp)
+                key = json.loads(separator + identity)
+                if (created_at.tzinfo is None or not isinstance(key, list) or len(key) != 4
+                        or not all(isinstance(part, str) for part in key[:3]) or type(key[3]) is not int):
+                    raise ValueError("invalid cursor identity")
+            except (ValueError, TypeError) as error:
+                raise ValueError("invalid cursor") from error
+            statement = statement.where(tuple_(*columns) < tuple_(created_at, *key))
         with self.db.session() as session:
-            rows = session.scalars(
-                select(DeploymentAttempt)
-                .where(DeploymentAttempt.repository == repository)
-                .order_by(DeploymentAttempt.created_at.desc(), DeploymentAttempt.generation.desc())
-            )
-            return cast(list[StoredDeploymentAttempt], [entity_dict(row) for row in rows])
+            rows = session.scalars(statement.order_by(*(column.desc() for column in columns)).limit(limit + 1))
+            records = cast(list[StoredDeploymentAttempt], [entity_dict(row) for row in rows])
+        selected = records[:limit]
+        next_cursor = None
+        if len(records) > limit:
+            last = selected[-1]
+            identity = json.dumps([last["repository"], last["environment"], last["branch_name"], last["generation"]])
+            next_cursor = write_cursor(scope, str(last["created_at"]) + identity, version=HISTORY_CURSOR_VERSION)
+        return selected, next_cursor
 
 
 def natural(key: DeploymentKey) -> tuple[str, str, str]:

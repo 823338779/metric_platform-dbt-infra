@@ -10,7 +10,7 @@
 | `jobs.py` | 任务受理、执行租约、完成与回收 |
 | `builds.py`、`deployments.py`、`changes.py` | 构建、部署意图与持久变化流 |
 | `artifacts.py` | 产物内容、封存、读取与引用保护 |
-| `branches.py`、`publications.py`、`queries.py` | 分支、发布与固定版本查询 |
+| `branches.py`、`publications.py` | 分支与发布事务 |
 | `schema.py`、`schema.sql` | 新库建表及启动前的表完整性检查 |
 
 普通读取直接使用 `Session.get/scalar/scalars`，新增实体使用 `add/flush`。需要数据库原子判断的租约、版本、抢占和批量写入使用显式条件 DML；这些条件不藏进通用 Repository。

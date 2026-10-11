@@ -43,9 +43,6 @@ def current_toolchain() -> str:
 
 
 class Runtime:
-    # HTTP 装配入口注入的部署协调器，纯 Runtime 使用时可能尚未绑定。
-    deployments: DeploymentService
-
     def __init__(self, settings: Settings) -> None:
         # 数据库 schema 必须预先通过管理命令安装，启动不得修改其他实例任务。
         self.settings = settings
@@ -61,11 +58,11 @@ class Runtime:
         self.worker = None
 
 
-    async def start(self) -> None:
+    async def start(self, *, deployments: DeploymentService | None = None) -> None:
         # 本地目录只保存当前执行，可由空目录启动。
         from dbt_metricflow_service.runtime.worker import Worker
         self.settings.temp_root.mkdir(parents=True, exist_ok=True)
-        self.worker = Worker(self)
+        self.worker = Worker(self, deployments=deployments)
         self.worker.start()
 
 

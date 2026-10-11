@@ -8,25 +8,24 @@ from uuid import UUID
 
 from dbt_metricflow_service.application.builds import BuildService
 from dbt_metricflow_service.application.catalog import CatalogService
-from dbt_metricflow_service.models.payloads import JsonObject, QueryOptions
+from dbt_metricflow_service.models.payloads import JsonObject, QueryOption, QueryOptions
 from dbt_metricflow_service.models.queries import OptionsRequest, QueryRequest
 from dbt_metricflow_service.storage.jobs import JobStore
 from dbt_metricflow_service.storage.records import StoredBuild, StoredJob
 
 from ..models.builds import BuildStatus, ErrorView
-from ..models.queries import OptionsTaskView, QueryMode, QueryView, ResultPage
-from ..platform.models import PlatformQueryRequest
+from ..models.queries import OptionsTaskView, QueryView, ResultPage
 from ..platform.options import map_options
 from ..platform.query_time import canonical_query, normalize_query_time, query_time_metadata
 from ..platform.results import result_page
 from ..storage.builds import digest
 from ..storage.jobs import CleanupBlocked, StoreConflict
 from .errors import ServiceError
+from .query_plan import compile_query
 
 OPTIONS = "QUERY_OPTIONS"
 QUERY = "METRIC_QUERY"
 JSON_MODE = "json"
-MAX_PAGE_BYTES = 8 * 1024 * 1024
 
 
 class QueryService:
@@ -39,18 +38,11 @@ class QueryService:
     def _scope(self, build: StoredBuild, caller: str, kind: str) -> str:
         return json.dumps([build["repository"], caller, kind], separators=(",", ":"))
 
-    def _build(self, build_id: UUID | str) -> StoredBuild:
-        row = self.builds.store.get(str(build_id))
-        if not row:
-            raise ServiceError("BUILD_NOT_FOUND", "build does not exist", 404)
-        return row
-
-    def _available(self, build_id: UUID | str) -> None:
-        view = self.builds.get(build_id)
-        if not view.query_available:
-            code = cast(str, view.query_unavailable_reason)
+    def _available(self, build: StoredBuild) -> None:
+        code = self.builds.query_unavailable_reason(build)
+        if code:
             status = 410 if code == "PHYSICAL_OBJECTS_REMOVED" else 409 if code == "BUILD_NOT_SUCCEEDED" else 503
-            raise ServiceError(code, "build is not available for new engine tasks", status, build_id=str(build_id))
+            raise ServiceError(code, "build is not available for new engine tasks", status, build_id=build["build_id"])
 
     def _prior(self, build: StoredBuild, body: JsonObject, caller: str, kind: str) -> tuple[StoredJob | None, str]:
         fingerprint = digest({"buildId": build["build_id"], **body})
@@ -86,14 +78,14 @@ class QueryService:
             raise ServiceError("PHYSICAL_OBJECTS_REMOVED", "build is being cleaned", 410) from error
 
     def submit_options(self, build_id: UUID | str, request: OptionsRequest, caller: str) -> OptionsTaskView:
-        build = self._build(build_id)
+        build = self.builds.load(build_id)
         body = request.model_dump(mode=JSON_MODE, by_alias=True)
         body["metricResourceIds"] = sorted(set(request.metric_resource_ids))
         prior, fingerprint = self._prior(build, body, caller, OPTIONS)
         if prior:
             return self.get_options(prior["job_id"])
-        self._available(build_id)
-        _, catalog = self.catalogs.read(build_id)
+        self._available(build)
+        catalog = self.catalogs.read_build(build)
         indexed = self._metrics(catalog, body["metricResourceIds"])
         payload = {
             "buildId": str(build_id),
@@ -119,7 +111,7 @@ class QueryService:
         row = self.jobs.get(str(task_id))
         if not row or row["kind"] != kind or not row["request_json"].get("buildId"):
             raise ServiceError("TASK_NOT_FOUND", "engine task does not exist", 404)
-        build = self._build(row["request_json"]["buildId"])
+        build = self.builds.load(row["request_json"]["buildId"])
         if row["parent_run_id"] != build["run_id"]:
             raise ServiceError("TASK_NOT_FOUND", "task does not belong to this build", 404)
         return row, build
@@ -154,7 +146,7 @@ class QueryService:
         metrics = row["request_json"]["publicRequest"]["metricResourceIds"]
         options = None
         if row["status"] == "SUCCEEDED":
-            _, catalog = self.catalogs.read(build["build_id"])
+            catalog = self.catalogs.read_build(build)
             result = self.jobs.result(row["job_id"])
             if not result:
                 raise ServiceError("RESULT_REMOVED", "options result was removed", 410)
@@ -183,73 +175,28 @@ class QueryService:
         raise ServiceError("OPTIONS_NOT_READY", "obtain query options for this build and metric set first", 409)
 
     def submit(self, build_id: UUID | str, request: QueryRequest, caller: str) -> QueryView:
-        build = self._build(build_id)
+        build = self.builds.load(build_id)
         timezone = build["config_snapshot"]["businessTimezone"]
         request = normalize_query_time(request, timezone)
-        body = canonical_query(request, timezone)
+        body = canonical_query(request)
         prior, fingerprint = self._prior(build, body, caller, QUERY)
         if prior:
             return self.status(prior["job_id"])
-        self._available(build_id)
-        _, catalog = self.catalogs.read(build_id)
+        self._available(build)
+        catalog = self.catalogs.read_build(build)
         indexed = self._metrics(catalog, body["metricResourceIds"])
-        if request.start_time and request.end_time and request.start_time > request.end_time:
-            raise ServiceError("INVALID_TIME_RANGE", "startTime must not exceed endTime")
-        if request.mode == QueryMode.PREVIEW:
-            # QueryRequest 的模式校验保证预览请求含有数据集身份。
-            resource = indexed.get(cast(str, request.dataset_resource_id))
-            if not resource or "PREVIEW" not in resource["capabilities"]:
-                raise ServiceError("INVALID_PREVIEW_RESOURCE", "resource cannot be previewed")
-        options, mapping = {"options": []}, {}
+        options: list[QueryOption] = []
+        mapping: dict[str, str] = {}
         if request.group_by or request.filters or request.dimension_option_id:
-            options, mapping = self._options(build, body["metricResourceIds"], catalog)
-        option_index = {item["optionId"]: item for item in options["options"]}
-        groups, filters = [], []
-        for selected in request.group_by:
-            option = option_index.get(selected.option_id)
-            if not option or selected.grain and selected.grain not in option["granularities"]:
-                raise ServiceError("INVALID_DIMENSION_OPTION", "option or grain belongs to another selection")
-            groups.append(mapping[selected.option_id])
-        for selected in request.filters:
-            option = option_index.get(selected.option_id)
-            if not option or selected.operator not in option["operators"]:
-                raise ServiceError("INVALID_FILTER_OPTION", "filter does not belong to this selection")
-            filters.append(
-                {"field": mapping[selected.option_id], "operator": selected.operator, "value": selected.value}
-            )
-        if request.dimension_option_id and request.dimension_option_id not in mapping:
-            raise ServiceError("INVALID_DIMENSION_OPTION", "dimension does not belong to this selection")
-        order_fields = {key: indexed[key]["name"] for key in body["metricResourceIds"]}
-        order_fields.update({selection.option_id: mapping[selection.option_id] for selection in request.group_by})
-        if any(order.field_id not in order_fields for order in request.order_by):
-            raise ServiceError("INVALID_ORDER_FIELD", "order field was not selected")
-        engine = PlatformQueryRequest.model_validate(
-            {
-                "run_id": build["run_id"],
-                "idempotency_key": request.idempotency_key,
-                "mode": request.mode,
-                "metrics": [indexed[key]["name"] for key in body["metricResourceIds"]],
-                "group_by": groups,
-                "filters": filters,
-                "start_time": request.start_time,
-                "end_time": request.end_time,
-                "limit": request.limit,
-                "dataset_resource_id": request.dataset_resource_id,
-                "dimension": mapping.get(request.dimension_option_id)
-                if request.dimension_option_id is not None
-                else None,
-                "order_by": [
-                    ("-" if order.direction == "DESC" else "") + order_fields[order.field_id]
-                    for order in request.order_by
-                ],
-            }
-        )
+            available, mapping = self._options(build, body["metricResourceIds"], catalog)
+            options = available["options"]
+        engine = compile_query(request, build["run_id"], indexed, options, mapping)
         payload = {
             "buildId": str(build_id),
             "publicRequest": body,
             "publicDigest": fingerprint,
             "engineRequest": engine.model_dump(mode=JSON_MODE, by_alias=True),
-            **query_time_metadata(request, timezone),
+            **query_time_metadata(body, timezone),
         }
         return self.status(self._reserve(build, body, caller, QUERY, payload)["job_id"])
 

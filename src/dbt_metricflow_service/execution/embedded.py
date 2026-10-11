@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import contextmanager
 from typing import TypeVar, cast
 
-from .runner import REDACTION_MARKER, SECRET_ENVIRONMENT_PREFIX, _RedactingTailBuffer
+from .output import REDACTION_MARKER, SECRET_ENVIRONMENT_PREFIX, _RedactingTailBuffer
 
 # 共享线程调度只保留调用方的返回类型，不解释引擎请求或结果。
 T = TypeVar("T")

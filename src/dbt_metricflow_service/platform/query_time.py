@@ -20,14 +20,14 @@ def normalize_query_time(request: QueryRequest, timezone: str) -> QueryRequest:
     return request.model_copy(update=values)
 
 
-def canonical_query(request: QueryRequest, timezone: str) -> JsonObject:
-    value = normalize_query_time(request, timezone).model_dump(mode="json", by_alias=True)
+def canonical_query(request: QueryRequest) -> JsonObject:
+    """序列化已按业务时区归一化的请求，并固定指标集合顺序。"""
+    value = request.model_dump(mode="json", by_alias=True)
     value["metricResourceIds"] = sorted(set(value["metricResourceIds"]))
     return value
 
 
-def query_time_metadata(request: QueryRequest, timezone: str) -> JsonObject:
-    normalized = canonical_query(request, timezone)
+def query_time_metadata(normalized: JsonObject, timezone: str) -> JsonObject:
     return {
         "businessTimezone": timezone,
         "normalizedTimeRange": {"startTime": normalized["startTime"], "endTime": normalized["endTime"]},

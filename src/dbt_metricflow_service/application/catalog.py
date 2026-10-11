@@ -30,6 +30,10 @@ class CatalogService:
         build = self.builds.get(str(build_id))
         if not build:
             raise ServiceError("BUILD_NOT_FOUND", "build does not exist", 404)
+        return build, self.read_build(build)
+
+    def read_build(self, build: StoredBuild) -> JsonObject:
+        """读取已有构建快照的封存目录，仍校验产物字节及摘要。"""
         if build["build_status"] != "SUCCEEDED":
             raise ServiceError("CATALOG_NOT_READY", "complete catalog is not available", 409)
         if not build["output_set_id"]:
@@ -43,7 +47,7 @@ class CatalogService:
                 raise ValueError("invalid catalog")
         except (ValueError, KeyError) as error:
             raise ServiceError("ARTIFACT_UNAVAILABLE", "sealed catalog cannot be read", 503) from error
-        return build, catalog
+        return catalog
 
     def list(
         self, build_id: UUID | str, q: str = "", kind: str | None = None, cursor: str | None = None, limit: int = 50

@@ -6,13 +6,12 @@ from uuid import UUID
 
 from dbt_metricflow_service.models.builds import BuildRequest, ChangePage
 from dbt_metricflow_service.storage.builds import BuildStore
-from dbt_metricflow_service.storage.records import StoredBuild
+from dbt_metricflow_service.storage.records import StoredBuild, StoredDeploymentAttempt
 
 from ..models.builds import BuildStatus, BuildView, ErrorView, LogPage, Page
 from ..storage.changes import ChangeStore
 from ..storage.deployments import DeploymentStore, attempt_view
 from ..storage.jobs import StoreConflict
-from ..storage.paging import page
 from .errors import ServiceError
 
 JSON_MODE = "json"
@@ -38,20 +37,22 @@ class BuildService:
             raise ServiceError("IDEMPOTENCY_CONFLICT", str(error), 409) from error
         except ValueError as error:
             raise ServiceError("INVALID_BINDING", str(error)) from error
-        return self.view(row)
+        return self.get(row["build_id"])
 
     def get(self, build_id: UUID | str) -> BuildView:
+        row = self.load(build_id)
+        initial = DeploymentStore(self.store.db).initial(row["build_id"])
+        return self.view(row, initial)
+
+    def load(self, build_id: UUID | str) -> StoredBuild:
         row = self.store.get(str(build_id))
         if row is None:
             raise ServiceError("BUILD_NOT_FOUND", "build does not exist", 404)
-        return self.view(row)
-
-    def pin_source(self, build_id: UUID | str, commit_sha: str, fencing_token: UUID | str) -> BuildView:
-        return self.view(self.store.pin_source(str(build_id), commit_sha, fencing_token))
+        return row
 
     def cancel(self, build_id: UUID | str, caller: str) -> tuple[BuildView, int]:
         # caller 已由入口验证；取消没有新的外部任务身份。
-        self.get(build_id)
+        self.load(build_id)
         try:
             status = self.store.cancel(str(build_id))
         except StoreConflict as error:
@@ -61,19 +62,14 @@ class BuildService:
     def list(
         self, repository: str, branch_name: str | None = None, cursor: str | None = None, limit: int = 50
     ) -> Page[BuildView]:
-        rows = [row for row in self.store.list(repository) if branch_name is None or row["branch_name"] == branch_name]
         try:
-            rows, next_cursor = page(
-                rows,
-                scope=[repository, branch_name],
-                cursor=cursor,
-                limit=limit,
-                reverse=True,
-                identity=lambda row: str(row["created_at"]) + row["build_id"],
-            )
+            rows, next_cursor = self.store.list(repository, branch_name, cursor, limit)
         except ValueError as error:
             raise ServiceError("INVALID_CURSOR", str(error)) from error
-        return Page[BuildView](items=[self.view(row) for row in rows], next_cursor=next_cursor)
+        initials = DeploymentStore(self.store.db).initials([row["build_id"] for row in rows])
+        return Page[BuildView](
+            items=[self.view(row, initials.get(row["build_id"])) for row in rows], next_cursor=next_cursor,
+        )
 
     def changes(self, cursor: str | None=None, limit: int=50) -> ChangePage:
         try:
@@ -82,7 +78,7 @@ class BuildService:
             raise ServiceError("INVALID_CURSOR", str(error)) from error
 
     def logs(self, build_id: UUID | str, cursor: str | None=None) -> LogPage:
-        self.get(build_id)
+        self.load(build_id)
         try:
             rows, next_cursor = self.store.logs(str(build_id), cursor)
         except ValueError as error:
@@ -98,25 +94,26 @@ class BuildService:
         ]
         return LogPage(items=items, next_cursor=next_cursor, truncated=False)
 
-    def view(self, row: StoredBuild) -> BuildView:
-        # 目录能力与物理执行能力独立；后续目录读取仍校验封存字节。
-        succeeded = row["build_status"] == BuildStatus.SUCCEEDED
-        catalog = succeeded and bool(row["output_set_id"])
-        reason = None
-        if not succeeded:
-            reason = NOT_SUCCEEDED
-        elif not catalog:
-            reason = MISSING
-        elif row.get("run_lifecycle") in {"CLEANED", "CLEANING"}:
-            reason = REMOVED
-        elif (
+    def query_unavailable_reason(self, row: StoredBuild) -> str | None:
+        if row["build_status"] != BuildStatus.SUCCEEDED:
+            return NOT_SUCCEEDED
+        if not row["output_set_id"]:
+            return MISSING
+        if row["run_lifecycle"] in {"CLEANED", "CLEANING"}:
+            return REMOVED
+        if (
             row["toolchain_version"] != self.toolchain
             or self.config_version is not None
             and row["config_version"] != self.config_version
         ):
-            reason = ENVIRONMENT_MISSING
+            return ENVIRONMENT_MISSING
+        return None
+
+    def view(self, row: StoredBuild, initial: StoredDeploymentAttempt | None) -> BuildView:
+        # 目录能力与物理执行能力独立；响应组装不再隐含数据库读取。
+        catalog = row["build_status"] == BuildStatus.SUCCEEDED and bool(row["output_set_id"])
+        reason = self.query_unavailable_reason(row)
         fields = {key: row[key] for key in BuildView.model_fields if key in row}
-        initial = DeploymentStore(self.store.db).initial(row["build_id"])
         fields.update(
             catalog_available=catalog,
             query_available=reason is None,

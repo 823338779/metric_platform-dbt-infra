@@ -165,7 +165,6 @@ class RuntimeExecutor:
         """受理之后获取固定源码；所有慢 I/O 均在短事务之外。"""
         import shutil
 
-        from ..application.builds import BuildService
         from ..platform.bindings import ProjectBinding, resolve_commit
         from ..platform.source import remote_head
         from ..storage.builds import BuildStore
@@ -174,14 +173,13 @@ class RuntimeExecutor:
         if job["input_set_id"]:
             return job
         builds = BuildStore(self.jobs.db)
-        service = BuildService(builds, job["toolchain_version"], self.settings.command_timeout_seconds)
         try:
             sha = body.get("commitSha")
             if not sha:
                 sha = await _thread(remote_head, body["repository"], body["branchName"], self.settings.temp_root)
                 if sha is None:
                     raise ValueError("source branch does not exist")
-            await _thread(service.pin_source, body["buildId"], sha, job["lease_token"])
+            await _thread(builds.pin_source, body["buildId"], sha, job["lease_token"])
             await _thread(self.jobs.phase, job["job_id"], job["lease_token"], "FETCHING_SOURCE")
             binding = ProjectBinding(job["project_id"], body["repository"], ".", cast(str, job["profile_binding_id"]))
             directory, digest = await _thread(resolve_commit, binding, sha, self.settings.temp_root)

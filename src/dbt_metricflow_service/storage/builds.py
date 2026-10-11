@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime
 from typing import cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, or_, select, tuple_, update
 
 from dbt_metricflow_service.models.builds import BuildRequest
 from dbt_metricflow_service.models.payloads import JsonObject
@@ -16,6 +17,7 @@ from dbt_metricflow_service.storage.records import DatabaseRow, StoredBuild
 
 from .entities import Build, Change, ExecutionBinding, RuntimeJob, RuntimeProject
 from .jobs import JobStore, StoreConflict
+from .paging import HISTORY_CURSOR_VERSION, read_cursor, write_cursor
 from .rows import entity_dict
 
 JSON_MODE = "json"
@@ -200,16 +202,36 @@ class BuildStore:
             rows = [dict(row) for row in session.execute(statement).mappings()]
         return rows, build_id + ":" + str(rows[-1]["sequence"] if rows else after)
 
-    def list(self, repository: str) -> list[StoredBuild]:
+    def list(
+        self, repository: str, branch_name: str | None = None, cursor: str | None = None, limit: int = 50,
+    ) -> tuple[list[StoredBuild], str | None]:
+        scope = [repository, branch_name]
+        after = read_cursor(scope, cursor, limit, version=HISTORY_CURSOR_VERSION)
+        statement = BUILD_VIEW.where(Build.repository == repository)
+        if branch_name is not None:
+            statement = statement.where(Build.branch_name == branch_name)
+        if after is not None:
+            try:
+                created_at, build_id = datetime.fromisoformat(after[:-36]), str(UUID(after[-36:]))
+                if created_at.tzinfo is None:
+                    raise ValueError("cursor timestamp requires an offset")
+            except ValueError as error:
+                raise ValueError("invalid cursor") from error
+            statement = statement.where(tuple_(Build.created_at, Build.build_id) < tuple_(created_at, build_id))
         with self.db.session() as session:
-            statement = BUILD_VIEW.where(Build.repository == repository).order_by(
-                Build.created_at.desc(),
-                Build.build_id.desc(),
-            )
-            return cast(
+            statement = statement.order_by(Build.created_at.desc(), Build.build_id.desc()).limit(limit + 1)
+            rows = cast(
                 list[StoredBuild],
                 [{**entity_dict(build), "run_lifecycle": lifecycle} for build, lifecycle in session.execute(statement)],
             )
+        selected = rows[:limit]
+        next_cursor = (
+            write_cursor(
+                scope, str(selected[-1]["created_at"]) + selected[-1]["build_id"], version=HISTORY_CURSOR_VERSION,
+            )
+            if len(rows) > limit else None
+        )
+        return selected, next_cursor
 
     def pin_source(self, build_id: UUID | str, commit_sha: str, token: UUID | str) -> StoredBuild:
         row = self.get(build_id)

@@ -17,6 +17,7 @@ from dbt_metricflow_service.runtime.executor import ERROR_COMMAND_FAILED, Execut
 from dbt_metricflow_service.storage.records import LeasedJob, StoredBuild
 
 if TYPE_CHECKING:
+    from dbt_metricflow_service.application.deployments import DeploymentService
     from dbt_metricflow_service.runtime.executor import ExecutionResult
     from dbt_metricflow_service.runtime.service import Runtime
 
@@ -35,9 +36,10 @@ EXTERNAL_OUTCOME_UNKNOWN = "externalOutcomeUnknown"
 class Worker:
     """每个槽位仅持有一个 attempt；故障后由共享恢复扫描处理过期租约。"""
 
-    def __init__(self, runtime: Runtime) -> None:
+    def __init__(self, runtime: Runtime, *, deployments: DeploymentService | None = None) -> None:
         # 引用运行时依赖；内存仅记录本机进程，不承载公开任务状态。
         self.runtime = runtime
+        self.deployments = deployments
         self.executor = RuntimeExecutor(runtime.settings, runtime.jobs, runtime.artifacts)
         self._tasks: list[asyncio.Task] = []
         self._stopping = False
@@ -58,9 +60,8 @@ class Worker:
         while not self._stopping:
             try:
                 await asyncio.to_thread(self.runtime.jobs.recover)
-                deployments = getattr(self.runtime, "deployments", None)
-                if deployments is not None:
-                    await asyncio.to_thread(deployments.reconcile_pending)
+                if self.deployments is not None:
+                    await asyncio.to_thread(self.deployments.reconcile_pending)
             except (DatabaseError, PoolTimeout, RuntimeError) as error:
                 logger.warning(FAILURE_LOG, type(error).__name__)
             await asyncio.sleep(self.runtime.settings.heartbeat_seconds)

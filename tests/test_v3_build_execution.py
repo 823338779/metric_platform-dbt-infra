@@ -35,12 +35,12 @@ def test_pinned_sha_survives_remote_advance(store):
     while job and job["job_id"] != app.store.get(build.build_id)["run_id"]:
         jobs.fail(job["job_id"], job["lease_token"], "TEST_FINISHED")
         job = jobs.claim(str(uuid4()), toolchain_version=TOOLCHAIN)
-    assert app.pin_source(build.build_id, "a" * 40, job["lease_token"]).commit_sha == "a" * 40
+    assert app.store.pin_source(build.build_id, "a" * 40, job["lease_token"])["commit_sha"] == "a" * 40
     # 固定 SHA 只合并对应 JSONB 字段，原始执行请求必须完整保留。
     pinned_request = jobs.get(job["job_id"])["request_json"]
     assert pinned_request == {**job["request_json"], "commitSha": "a" * 40}
     with pytest.raises(ValueError):
-        app.pin_source(build.build_id, "b" * 40, job["lease_token"])
+        app.store.pin_source(build.build_id, "b" * 40, job["lease_token"])
 
 
 def test_cancel_queued_is_idempotent(store):

@@ -30,7 +30,8 @@ def application(monkeypatch, tmp_path):
         closed=False,
     )
 
-    async def start():
+    async def start(*, deployments):
+        assert deployments is not None
         runtime.started = True
 
     async def close():

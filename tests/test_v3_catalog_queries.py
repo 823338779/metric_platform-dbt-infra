@@ -116,6 +116,24 @@ def test_catalog_survives_physical_removal(store, tmp_path):
     assert not app.get(build.build_id).query_available
 
 
+@pytest.mark.parametrize("lifecycle", ["CLEANING", "CLEANED"])
+def test_build_retry_preserves_physical_availability(store, tmp_path, lifecycle):
+    from dbt_metricflow_service.models.builds import BuildRequest
+
+    app, build, jobs, artifacts = ready_build(store, tmp_path)
+    row = app.store.get(build.build_id)
+    with store.db.transaction() as connection:
+        connection.exec_driver_sql(
+            "UPDATE runtime_job SET run_lifecycle=%s WHERE job_id=%s", (lifecycle, row["run_id"]),
+        )
+    retry = app.submit(BuildRequest.model_validate(row["request_json"]), CALLER)
+    assert retry.build_id == build.build_id
+    assert retry.catalog_available
+    assert not retry.query_available
+    assert retry.query_unavailable_reason == "PHYSICAL_OBJECTS_REMOVED"
+    assert retry == app.get(build.build_id)
+
+
 def test_cleanup_completion_preserves_catalog_and_source(store, tmp_path):
     from dbt_metricflow_service.application.catalog import CatalogService
 
