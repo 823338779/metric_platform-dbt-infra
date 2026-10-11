@@ -8,8 +8,8 @@ JsonObject: TypeAlias = dict[str, Any]
 JsonValue: TypeAlias = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 
 
-class QueryOption(TypedDict):
-    """绑定构建和指标集合的公开查询选项。"""
+class DimensionOption(TypedDict):
+    """绑定构建和指标集合的公开维度选项。"""
 
     optionId: str  # 构建、指标集合和原生路径共同确定的选项身份。
     resourceId: str | None  # 可唯一对应的目录维度，无法唯一对应时为空。
@@ -25,7 +25,7 @@ class AvailableDimensions(TypedDict):
 
     buildId: str  # 选项所属构建。
     metricResourceIds: list[str]  # 排序去重后的指标资源集合。
-    dimensions: list[QueryOption]  # 该指标集合可用的维度。
+    dimensions: list[DimensionOption]  # 该指标集合可用的维度。
 
 
 class ValidationCheck(TypedDict):

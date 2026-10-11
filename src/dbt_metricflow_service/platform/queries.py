@@ -13,7 +13,7 @@ from dbt_metricflow_service.platform.models import PlatformQueryRequest, QueryMo
 ALLOWED_OPERATORS = frozenset({"=", "!=", ">", ">=", "<", "<=", "IN"})
 
 
-def query_options(engine: Any, metrics: tuple[str, ...]) -> dict[str, Any]:
+def available_dimensions(engine: Any, metrics: tuple[str, ...]) -> dict[str, Any]:
     """按 MetricFlow 原生语义返回多指标可组合维度与经 explain 核实的时间 token。"""
 
     available = {metric.name for metric in engine.list_metrics(include_dimensions=False)}
@@ -39,12 +39,12 @@ def query_options(engine: Any, metrics: tuple[str, ...]) -> dict[str, Any]:
     }
 
 
-def validate_query(request: PlatformQueryRequest, options: dict[str, Any]) -> None:
+def validate_query(request: PlatformQueryRequest, available: dict[str, Any]) -> None:
     """所有查询字段先与该固定 run 的原生可用项比对。"""
 
-    metrics = {item["name"] for item in options["metrics"]}
-    dimensions = {item["token"] for item in options["dimensions"]}
-    time_dimensions = {item["token"] for item in options["timeDimensions"]}
+    metrics = {item["name"] for item in available["metrics"]}
+    dimensions = {item["token"] for item in available["dimensions"]}
+    time_dimensions = {item["token"] for item in available["timeDimensions"]}
     if not request.metrics or not set(request.metrics) <= metrics:
         raise ValueError("指标不可查询")
     if not set(request.group_by) <= dimensions | time_dimensions:

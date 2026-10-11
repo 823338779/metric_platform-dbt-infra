@@ -30,7 +30,6 @@ EPHEMERAL = "ephemeral"
 OPERATION = "operation"
 HOOK_KEYS = ("pre-hook", "post-hook", "pre_hook", "post_hook")
 SAFE_MATERIALIZATIONS = frozenset({"table", "view", EPHEMERAL})
-EVIDENCE_FILE = "publication_evidence.json"
 TARGET = "target"
 CATALOG_FILE = "catalog.json"
 RESULTS_FILE = "run_results.json"
@@ -61,7 +60,6 @@ COMMAND_PHASES = {
     DOCS: "PACKAGING",
 }
 EXECUTION = "EXECUTION"
-PASSED = "PASSED"
 ROOT_CONFIGS = ("dbt_project.yml", "packages.yml", "dependencies.yml", "package-lock.yml")
 # dbt 测试默认配置 dbt_test__audit，即使 store_failures=false 也会传入此值。
 # 测试统一解析到受控 schema；validate_bound_manifest 会在执行前拒绝写入失败结果表。
@@ -157,11 +155,10 @@ def requires_source_freshness(node: JsonObject) -> bool:
 async def execute_publication(
     executor: RuntimeExecutor, job: LeasedJob, attempt: Path, project: Path
 ) -> ExecutionResult:
-    """逻辑解析、选择性构建和完整验证使用同一个受租约控制的命令执行器。"""
+    """全量构建和完整验证使用同一个受租约控制的命令执行器。"""
     from ..execution.models import CommandSpec
     from ..platform.catalog import catalog_from_artifacts
     from ..runtime.executor import ExecutionResult, build_engine_environment
-    from .build_plan import full_build_plan, validate_publication_evidence
     from .sealed_catalog import write_publication_catalog
 
     target = project / TARGET
@@ -198,14 +195,11 @@ async def execute_publication(
             summary = failure_summary(target, args[0], settings.max_artifact_file_bytes)
             raise ExecutionError(error.code, {"validationSummary": summary}, stopped=error.stopped) from error
 
-    # 依赖安装后先做无版本前缀的逻辑解析，保存比较输入而非整个易变 manifest。
+    # 验证源码和已安装依赖后，为全部模型应用本次构建的受控前缀。
     await asyncio.to_thread(validate_templates, project)
     if any((project / name).exists() for name in ROOT_CONFIGS[1:3]):
         await command(DEPS)
         await asyncio.to_thread(validate_templates, project)
-    await command(PARSE, NO_PARTIAL_PARSE)
-    logical = json.loads((target / MANIFEST_FILE).read_text(encoding=UTF8))
-    plan = full_build_plan(logical)
     prefix = await asyncio.to_thread(
         prepare_publication_project, project, UUID(job["job_id"]), cast(str, job["schema_name"])
     )
@@ -231,14 +225,13 @@ async def execute_publication(
         if not fresh_sources <= passed:
             raise ValueError("source freshness 证明不完整或未通过")
 
-    # 所有测试每次执行；只有被选中的物理模型可进入写入选择器。
+    # 每次执行全部模型和测试，并在封存前核对完整覆盖。
     await command(BUILD)
     result_path = target / RESULTS_FILE
     raw_results = result_path.read_bytes()
     if len(raw_results) > settings.max_artifact_file_bytes:
         raise ValueError("构建步骤证明超限")
     await command(DOCS, GENERATE)
-    result_path.write_bytes(raw_results)
     probe = await executor._metricflow(job, project, {"mode": "PROBE"})
     manifest = json.loads((target / MANIFEST_FILE).read_text(encoding=UTF8))
     physical_catalog = json.loads((target / CATALOG_FILE).read_text(encoding=UTF8))
@@ -248,52 +241,36 @@ async def execute_publication(
         raise ValueError("构建或测试证明失败")
     completed = {row["unique_id"] for row in records}
     tests = {key for key, node in manifest["nodes"].items() if node.get("resource_type") == TEST}
-    if not (tests | set(plan.selected_native_ids)) <= completed:
+    physical_ids = {
+        key for key, node in manifest["nodes"].items()
+        if node.get("resource_type") == MODEL and node.get("config", {}).get("materialized") != EPHEMERAL
+    }
+    if not (tests | physical_ids) <= completed:
         raise ValueError("模型或必需测试执行不完整")
     await asyncio.to_thread(validate_bound_manifest, target, cast(str, job["schema_name"]), prefix)
-    physical_ids = set(plan.selected_native_ids + plan.reuse_native_ids)
     if not physical_ids <= physical_catalog.get("nodes", {}).keys():
-        raise ValueError("物理对象缺失，不能复用发布")
+        raise ValueError("物理对象缺失，不能发布")
     empty = not manifest["nodes"] and not manifest.get("sources") and not manifest.get("metrics")
     if probe.get("queryCapability") is not True and not empty:
         raise ValueError("缺少查询证明")
-    evidence = validate_publication_evidence(
-        plan,
-        {
-            "build": PASSED,
-            "tests": PASSED,
-            "semanticValidation": PASSED,
-            "relationVerification": PASSED,
-            "queryProbe": PASSED,
-            "coveredNativeIds": sorted(physical_ids),
-        },
-    )
     native = await asyncio.to_thread(catalog_from_artifacts, target, query_capability=not empty)
     native["ephemeralDependencies"] = {
         key: node.get("depends_on", {}).get("nodes", [])
         for key, node in manifest["nodes"].items()
         if node.get("resource_type") == MODEL and node.get("config", {}).get("materialized") == EPHEMERAL
     }
-    catalog = await asyncio.to_thread(
+    await asyncio.to_thread(
         write_publication_catalog,
         target,
         project_id=job["project_id"],
-        release_id=UUID(request.get("buildId") or request["releaseId"]),
+        release_id=UUID(request["buildId"]),
         run_id=UUID(job["job_id"]),
         native_catalog=native,
     )
-    (target / EVIDENCE_FILE).write_text(json.dumps(evidence, sort_keys=True), encoding=UTF8)
     validation = {
         "allTestsPassed": True,
         "representativeQueryPassed": True,
         "relationsVerified": True,
-        "queryCapability": not empty,
-        "publicationValidated": True,
-        "buildMode": plan.build_mode,
-        "schemaName": cast(str, job["schema_name"]),
-        "toolchainVersion": job["toolchain_version"],
-        "evidence": evidence,
-        "plan": plan.model_dump(mode="json", by_alias=True),
     }
     output = await asyncio.to_thread(
         executor.artifacts.capture,
@@ -301,6 +278,6 @@ async def execute_publication(
         project,
         producer_attempt_id=job["attempt_id"],
         kind=EXECUTION,
-        metadata={**executor._metadata(job), "validation_json": validation, "catalog_json": catalog},
+        metadata={**executor._metadata(job), "validation_json": validation},
     )
-    return ExecutionResult(validation, output)
+    return ExecutionResult(output_set_id=output)

@@ -4,17 +4,100 @@ import json
 import os
 import subprocess
 import sys
-from uuid import uuid4
+from types import SimpleNamespace
+from uuid import UUID, uuid4
 
 import pytest
 import yaml
 from resource_helpers import make_resource_project
 
 from dbt_metricflow_service.platform.build import (
+    execute_publication,
     prepare_publication_project,
     validate_bound_manifest,
     validate_readonly_sql,
 )
+
+
+@pytest.fixture
+def publication_executor(tmp_path):
+    """工具链边界提供原生产物，发布验证和目录封存仍执行真实代码。"""
+    from dbt_metricflow_service.platform.catalog import CATALOG_SCHEMA, MANIFEST_SCHEMA
+    from dbt_metricflow_service.platform.namespace import run_prefix
+    from dbt_metricflow_service.runtime.executor import RuntimeExecutor
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "dbt_project.yml").write_text("name: sample\nversion: '1.0'\n", encoding="utf-8")
+    target = project / "target"
+    target.mkdir()
+    job = {"job_id": str(uuid4()), "attempt_id": str(uuid4()), "project_id": "sample",
+           "request_json": {"buildId": str(uuid4())}, "schema_name": "candidate",
+           "profile_binding_id": "test", "config_version": "1", "toolchain_version": "1"}
+    alias = run_prefix(UUID(job["job_id"])) + "orders"
+    manifest = {"metadata": {"dbt_schema_version": MANIFEST_SCHEMA, "adapter_type": "postgres"},
+                "nodes": {"model.sample.orders": {"resource_type": "model", "name": "orders",
+                          "config": {"materialized": "table"}, "database": "db", "schema": "candidate",
+                          "alias": alias, "relation_name": f'"candidate"."{alias}"', "compiled_code": "select 1"},
+                          "test.sample.orders": {"resource_type": "test", "config": {},
+                                                 "compiled_code": "select 1 where false"}}}
+    results = [{"unique_id": key, "status": "success"} for key in manifest["nodes"]]
+    physical = {"metadata": {"dbt_schema_version": CATALOG_SCHEMA},
+                "nodes": {"model.sample.orders": {"columns": {}}}}
+    captured = {}
+
+    async def dbt(_job, spec, _phase):
+        if spec.argv[1] in ("parse", "compile", "build"):
+            (target / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            (target / "semantic_manifest.json").write_text('{"semantic_models": [], "metrics": []}')
+        if spec.argv[1] == "build":
+            (target / "run_results.json").write_text(json.dumps({"results": results}))
+        if spec.argv[1] == "docs":
+            (target / "catalog.json").write_text(json.dumps(physical))
+            (target / "run_results.json").write_text('{"results": []}')
+
+    async def metricflow(*_args):
+        return {"queryCapability": True}
+
+    def capture(_project_id, _project, **kwargs):
+        captured.update(kwargs)
+        return "sealed-output"
+
+    executor = SimpleNamespace(settings=SimpleNamespace(profiles_dir=tmp_path, max_artifact_file_bytes=1024 * 1024),
+                               _dbt=dbt, _metricflow=metricflow, _metadata=RuntimeExecutor._metadata,
+                               artifacts=SimpleNamespace(capture=capture))
+    return executor, job, project, results, physical, captured
+
+
+async def test_publication_persists_catalog_file_and_minimum_validation_flags(publication_executor):
+    executor, job, project, _results, _physical, captured = publication_executor
+    await execute_publication(executor, job, project.parent, project)
+
+    catalog = json.loads((project / "target/published_catalog.json").read_text(encoding="utf-8"))
+    assert catalog["releaseId"] == job["request_json"]["buildId"]
+    assert catalog["relationBindings"][0]["mode"] == "BUILT"
+    assert not (project / "target/publication_evidence.json").exists()
+    assert captured["metadata"]["validation_json"] == {
+        "allTestsPassed": True, "representativeQueryPassed": True, "relationsVerified": True,
+    }
+    assert "catalog_json" not in captured["metadata"]
+
+
+@pytest.mark.parametrize("missing", ["model.sample.orders", "test.sample.orders"])
+async def test_full_build_rejects_missing_model_or_test_execution(publication_executor, missing):
+    executor, job, project, results, _physical, captured = publication_executor
+    results[:] = [row for row in results if row["unique_id"] != missing]
+    with pytest.raises(ValueError, match="模型或必需测试执行不完整"):
+        await execute_publication(executor, job, project.parent, project)
+    assert not captured
+
+
+async def test_full_build_rejects_missing_physical_relation(publication_executor):
+    executor, job, project, _results, physical, captured = publication_executor
+    physical["nodes"] = {}
+    with pytest.raises(ValueError, match="物理对象缺失"):
+        await execute_publication(executor, job, project.parent, project)
+    assert not captured
 
 
 @pytest.mark.parametrize(("freshness", "expected"), [

@@ -42,14 +42,14 @@ async def run_metricflow(
 ) -> MetricFlowResult:
     """在共享串行保护下执行 MetricFlow；超时结果不发布业务数据。"""
     result, timed_out = await run_serialized(
-        lambda: _invoke_metricflow(project, request, max_output_bytes), timeout_seconds, before_start,
+        lambda: invoke_metricflow(project, request, max_output_bytes), timeout_seconds, before_start,
     )
     if timed_out:
         return replace(result, record=result.record.model_copy(update={"status": JobStatus.TIMED_OUT}), payload=None)
     return result
 
 
-def _invoke_metricflow(project: str, request: MetricFlowRequest, max_output_bytes: int) -> MetricFlowResult:
+def invoke_metricflow(project: str, request: MetricFlowRequest, max_output_bytes: int) -> MetricFlowResult:
     started = datetime.now(UTC)
     output = create_output(max_output_bytes)
     status = JobStatus.FAILED
@@ -58,15 +58,15 @@ def _invoke_metricflow(project: str, request: MetricFlowRequest, max_output_byte
     error_type = ""
     try:
         with engine_environment(request.environment, output):
-            from ..platform.metricflow import INVALID_OPTIONS_CODE, InvalidOptions, execute_programmatic
+            from ..platform.metricflow import INVALID_DIMENSIONS_CODE, InvalidDimensionsRequest, execute_programmatic
 
             # 业务错误在 MetricFlow 边界识别，成功结果保持原始内存对象。
             try:
                 payload = execute_programmatic(
                     Path(request.environment[PROJECT_ENV]), Path(request.environment[PROFILES_ENV]), request.payload,
                 )
-            except InvalidOptions:
-                error_code = INVALID_OPTIONS_CODE
+            except InvalidDimensionsRequest:
+                error_code = INVALID_DIMENSIONS_CODE
             else:
                 status = JobStatus.SUCCEEDED
     except Exception as error:

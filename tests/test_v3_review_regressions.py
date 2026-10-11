@@ -1,7 +1,7 @@
 """真实 PostgreSQL 验证观察快照、调度公平性和事实事务的锁顺序。"""
 
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier, Event, current_thread
+from threading import Event, current_thread
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -11,7 +11,6 @@ from sqlalchemy import event
 from dbt_metricflow_service.models.deployments import DeploymentKey
 from dbt_metricflow_service.storage.deployments import DeploymentStore
 from tests.schema_helpers import isolated_database
-from tests.synchronous_queries import inline_executor
 from tests.test_publication_storage import store as store
 from tests.test_v3_build_acceptance import CALLER, request, service
 from tests.test_v3_deployments import deployment_service
@@ -95,58 +94,37 @@ def test_build_acceptance_and_observation_have_consistent_lock_order(store, monk
         event.remove(store.db.engine, "after_cursor_execute", after_statement)
 
 
-def test_query_and_cleanup_acceptance_are_atomic(store, tmp_path, monkeypatch):
-    from dbt_metricflow_service.application.catalog import CatalogService
-    from dbt_metricflow_service.application.errors import ServiceError
-    from dbt_metricflow_service.application.queries import QueryService
-    from dbt_metricflow_service.models.queries import QueryRequest
+def test_realtime_query_lock_blocks_cleanup_and_releases_without_records(store, tmp_path):
     from dbt_metricflow_service.storage.jobs import CleanupBlocked
     from tests.test_v3_catalog_queries import ready_build
 
     app, build, jobs, artifacts = ready_build(store, tmp_path)
-    queries = QueryService(app, CatalogService(app.store, artifacts), jobs, inline_executor(jobs, app.toolchain))
     run = app.store.get(build.build_id)["run_id"]
-    barrier = Barrier(2)
-    original = queries._reserve
-    cleanup_finished = Event()
-    execute = queries.execute
+    with jobs.query_run(run) as parent:
+        assert parent["job_id"] == run
+        with pytest.raises(CleanupBlocked):
+            jobs.reserve_cleanup(run)
+        # 同一构建可有多个实时读取者，不需要插入子任务。
+        with jobs.query_run(run):
+            with store.db.transaction() as connection:
+                assert connection.exec_driver_sql(
+                    "SELECT count(*) FROM runtime_job WHERE parent_run_id=%s", (run,),
+                ).scalar_one() == 0
+    jobs.reserve_cleanup(run)
+    with pytest.raises(CleanupBlocked):
+        with jobs.query_run(run):
+            pytest.fail("cleaning build reached execution")
 
-    def execute_after_cleanup_check(job_id):
-        # 同步请求保留执行中的引用，直到并发清理完成受理检查。
-        assert cleanup_finished.wait(timeout=5)
-        execute(job_id)
 
-    queries.execute = execute_after_cleanup_check
+def test_realtime_query_lock_releases_after_failure(store, tmp_path):
+    from tests.test_v3_catalog_queries import ready_build
 
-    def reserve(*args):
-        barrier.wait(timeout=5)
-        return original(*args)
-
-    def query():
-        try:
-            return queries.submit(
-                build.build_id, QueryRequest(idempotencyKey=uuid4().hex, mode="EXPLAIN",
-                                            metricResourceIds=["metric.revenue"]), CALLER,
-            )
-        except ServiceError as error:
-            assert error.status == 410
-            return None
-
-    def cleanup():
-        barrier.wait(timeout=5)
-        try:
-            return jobs.reserve_cleanup(run)
-        except CleanupBlocked:
-            return None
-        finally:
-            cleanup_finished.set()
-
-    monkeypatch.setattr(queries, "_reserve", reserve)
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        query_future, cleanup_future = pool.submit(query), pool.submit(cleanup)
-        accepted_query, accepted_cleanup = query_future.result(), cleanup_future.result()
-    assert (accepted_query is None) != (accepted_cleanup is None)
-    assert jobs.get(run)["run_lifecycle"] == ("CLEANING" if accepted_cleanup else "ACTIVE")
+    app, build, jobs, artifacts = ready_build(store, tmp_path)
+    run = app.store.get(build.build_id)["run_id"]
+    with pytest.raises(RuntimeError):
+        with jobs.query_run(run):
+            raise RuntimeError("engine failed")
+    assert jobs.reserve_cleanup(run)["kind"] == "RUN_CLEANUP"
 
 
 def test_failed_new_intent_fences_inflight_old_switch(store, tmp_path, monkeypatch):

@@ -55,8 +55,8 @@ ENGINE_LOGGER = "metricflow"
 DIAGNOSTIC = "x" * 1000
 DBT = "dbt"
 BUILD = "build"
-QUERY_OPTIONS = "QUERY_OPTIONS"
-OPTIONS_PAYLOAD = {"mode": "OPTIONS", "metrics": ["orders"]}
+CLEANUP_JOB = "RUN_CLEANUP"
+CLEANUP_PAYLOAD = {}
 COMPLETED_FILE = "completed"
 BUILD_CODE = """
 import json, os, sys
@@ -106,7 +106,10 @@ def claimed(execution, kind, request):
     toolchain = str(uuid4())
     with database.transaction() as connection:
         connection.exec_driver_sql(INSERT_JOB_SQL, (str(uuid4()), kind, project_id, Json(request), toolchain, set_id))
-    return executor.jobs.claim(str(uuid4()), toolchain_version=toolchain)
+    job = executor.jobs.claim(str(uuid4()), toolchain_version=toolchain)
+    if kind == "RUN_CLEANUP":
+        job["parent_run_id"] = str(uuid4())
+    return job
 
 
 def programmatic_engine(monkeypatch, execute=None):
@@ -152,34 +155,19 @@ def execution(tmp_path):
 
 
 
-@pytest.mark.parametrize("kind,payload,expected", [
-    ("QUERY_OPTIONS", {"mode": "OPTIONS", "metrics": ["orders"]},
-     {"observed": {"mode": "OPTIONS", "metrics": ["orders"]}}),
-    ("RUN_CLEANUP", {"mode": "CLEANUP", "schema": "run_fixture"}, {}),
-    ("RUN_CLEANUP", {}, {}),
-    ("METRIC_QUERY", {"engineRequest": {"mode": "EXPLAIN", "metrics": ["orders"]}},
-     {"observed": {"mode": "QUERY", "request": {"mode": "EXPLAIN", "metrics": ["orders"]}}}),
+@pytest.mark.parametrize("kind,payload", [
+    ("RUN_CLEANUP", {"mode": "CLEANUP", "schema": "run_fixture"}),
+    ("RUN_CLEANUP", {}),
 ])
-async def test_programmatic_tasks_use_restored_input_and_return_json(execution, monkeypatch, kind, payload, expected):
+async def test_cleanup_uses_restored_input_without_result_payload(execution, monkeypatch, kind, payload):
     executor, _, _, _ = execution
     job = claimed(execution, kind, payload)
     if kind == "RUN_CLEANUP":
         job["parent_run_id"] = str(uuid4())
     programmatic_engine(monkeypatch)
     result = await executor.execute(job)
-    assert result.payload == expected
     assert result.output_set_id is None
     assert not (executor.settings.temp_root / str(job["job_id"]) / str(job["attempt_id"])).exists()
-
-
-async def test_oversized_programmatic_result_is_rejected(execution, monkeypatch):
-    executor, _, _, _ = execution
-    executor.settings = dataclasses.replace(executor.settings, max_result_bytes=32)
-    job = claimed(execution, "QUERY_OPTIONS", {"mode": "OPTIONS", "metrics": ["orders"]})
-    programmatic_engine(monkeypatch)
-    with pytest.raises(ExecutionError) as error:
-        await executor.execute(job)
-    assert error.value.code == "RESULT_TOO_LARGE"
 
 
 async def test_cleanup_before_source_attachment_has_no_external_work(execution):
@@ -191,7 +179,7 @@ async def test_cleanup_before_source_attachment_has_no_external_work(execution):
         )
     job["input_set_id"] = None
     result = await executor.execute(job)
-    assert result.payload == {}
+    assert result.output_set_id is None
     with database.transaction() as connection:
         sql_result = connection.exec_driver_sql(GET_ATTEMPT_SQL, (job["attempt_id"],))
         assert row_dict(sql_result)["execution_stage"] == "PREPARING"
@@ -200,7 +188,7 @@ async def test_cleanup_before_source_attachment_has_no_external_work(execution):
 async def test_expired_lease_does_not_start_engine(execution, monkeypatch, tmp_path):
     executor, database, _, _ = execution
     marker = tmp_path / "must-not-exist"
-    job = claimed(execution, "QUERY_OPTIONS", {"mode": "OPTIONS", "metrics": ["orders"]})
+    job = claimed(execution, "RUN_CLEANUP", {})
     with database.transaction() as connection:
         connection.exec_driver_sql(
             "UPDATE runtime_attempt SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE attempt_id=%s",
@@ -226,7 +214,7 @@ async def test_cancellation_or_timeout_waits_for_engine_before_workspace_removal
     executor.settings = dataclasses.replace(
         executor.settings, command_timeout_seconds=5 if cancel else 0.02,
     )
-    job = claimed(execution, QUERY_OPTIONS, OPTIONS_PAYLOAD)
+    job = claimed(execution, CLEANUP_JOB, CLEANUP_PAYLOAD)
     workspace = executor.settings.temp_root / str(job["job_id"]) / str(job["attempt_id"])
 
     # 取消或超时后引擎仍可写工作目录；必须等待这次写入结束才能移除目录。
@@ -271,7 +259,7 @@ async def test_cancellation_or_timeout_waits_for_engine_before_workspace_removal
 async def test_timeout_retains_bounded_diagnostics_and_unknown_stop(execution, monkeypatch):
     executor, _, project_id, _ = execution
     executor.settings = dataclasses.replace(executor.settings, command_timeout_seconds=0.2, max_output_bytes=32)
-    job = claimed(execution, "QUERY_OPTIONS", {"mode": "OPTIONS", "metrics": ["orders"]})
+    job = claimed(execution, "RUN_CLEANUP", {})
     # 诊断经过真实 SDK 日志收集器，超时仍需等线程返回后才能上报。
     def execute(project, profiles, data):
         logging.getLogger(ENGINE_LOGGER).warning(DIAGNOSTIC)
@@ -300,20 +288,6 @@ async def test_write_engine_connection_loss_does_not_confirm_external_stop(execu
         await executor._dbt(job, spec, "BUILDING")
     assert error.value.stopped is False
 
-
-
-async def test_options_invalid_input_uses_structured_error_code(execution, monkeypatch):
-    executor, _, _, _ = execution
-    job = claimed(execution, "QUERY_OPTIONS", {"mode": "OPTIONS", "metrics": ["missing"]})
-    # SDK 参数异常通过内存错误码转换为稳定公开错误码。
-    def execute(project, profiles, data):
-        raise metricflow.InvalidOptions()
-
-    programmatic_engine(monkeypatch, execute)
-    with pytest.raises(ExecutionError) as error:
-        await executor.execute(job)
-    assert error.value.code == "INVALID_QUERY"
-    assert error.value.stopped is True
 
 
 async def test_repeated_cancellation_waits_for_filesystem_thread(tmp_path):
@@ -373,7 +347,7 @@ async def test_source_only_cleanup_drops_schema_without_semantic_manifest(execut
     executor.settings = dataclasses.replace(executor.settings, command_timeout_seconds=30)
     try:
         result = await executor.execute(job)
-        assert result.payload == {"cleaned": True}
+        assert result.output_set_id is None
         with database.transaction() as connection:
             sql_result = connection.exec_driver_sql("SELECT 1 FROM pg_namespace WHERE nspname=%s", (schema,))
             assert row_dict(sql_result) is None

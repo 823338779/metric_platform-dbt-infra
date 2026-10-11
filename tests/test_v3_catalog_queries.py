@@ -5,7 +5,6 @@ from uuid import uuid4
 
 import pytest
 
-from dbt_metricflow_service.runtime.completion import complete_job
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.jobs import JobStore
 from tests.synchronous_queries import inline_executor
@@ -36,7 +35,7 @@ def ready_build(store, tmp_path, before_finish=None):
     }
     source = artifacts.capture(job["project_id"], directory, metadata=evidence)
     assert jobs.attach_input(run, job["lease_token"], source, project_digest=evidence["project_digest"])
-    for name in ("manifest.json", "semantic_manifest.json", "catalog.json", "run_results.json"):
+    for name in ("manifest.json", "semantic_manifest.json", "catalog.json"):
         (target / name).write_text("{}", encoding="utf-8")
     catalog = {
         "schemaVersion": 1,
@@ -73,12 +72,11 @@ def ready_build(store, tmp_path, before_finish=None):
             **evidence,
             "source_set_id": source,
             "validation_json": {"allTestsPassed": True, "representativeQueryPassed": True, "relationsVerified": True},
-            "catalog_json": catalog,
         },
     )
     if before_finish:
         before_finish(app, build, job, output)
-    assert complete_job(jobs, run, job["lease_token"], output_set_id=output)
+    assert jobs.finish(run, job["lease_token"], output_set_id=output)
     return app, build, jobs, artifacts
 
 
@@ -142,7 +140,7 @@ def test_cleanup_completion_preserves_catalog_and_source(store, tmp_path):
     run = app.store.get(build.build_id)["run_id"]
     jobs.reserve_cleanup(run)
     cleanup = jobs.claim(str(uuid4()), toolchain_version=app.toolchain, kinds=["RUN_CLEANUP"])
-    assert complete_job(jobs, cleanup["job_id"], cleanup["lease_token"], {})
+    assert jobs.finish(cleanup["job_id"], cleanup["lease_token"])
     assert CatalogService(app.store, artifacts).list(build.build_id).items
     assert app.get(build.build_id).catalog_available
     assert app.get(build.build_id).query_unavailable_reason == "PHYSICAL_OBJECTS_REMOVED"
@@ -154,7 +152,7 @@ def test_option_scope_includes_build_and_metric_set(store, tmp_path):
     from dbt_metricflow_service.models.queries import AvailableDimensionsRequest
 
     app, build, jobs, artifacts = ready_build(store, tmp_path)
-    queries = QueryService(app, CatalogService(app.store, artifacts), jobs, inline_executor(jobs, app.toolchain))
+    queries = QueryService(app, CatalogService(app.store, artifacts), inline_executor())
     body = AvailableDimensionsRequest(metricResourceIds=["metric.revenue"])
     first = queries.available_dimensions(build.build_id, body, CALLER)
     assert first.dimensions == queries.available_dimensions(build.build_id, body, CALLER).dimensions
@@ -170,7 +168,7 @@ def test_historical_environment_missing_is_503(store, tmp_path):
 
     app, build, jobs, artifacts = ready_build(store, tmp_path)
     app.toolchain = "different"
-    query = QueryService(app, CatalogService(app.store, artifacts), jobs, inline_executor(jobs, app.toolchain))
+    query = QueryService(app, CatalogService(app.store, artifacts), inline_executor())
     with pytest.raises(ServiceError) as failure:
         query.available_dimensions(
             build.build_id, AvailableDimensionsRequest(metricResourceIds=["metric.revenue"]), CALLER
@@ -178,23 +176,14 @@ def test_historical_environment_missing_is_503(store, tmp_path):
     assert failure.value.status == 503
 
 
-def test_result_metadata_and_explain_survive_without_loading_status_payload(store, tmp_path, monkeypatch):
+def test_explain_returns_in_memory_without_result_store(store, tmp_path, monkeypatch):
     from dbt_metricflow_service.application.catalog import CatalogService
     from dbt_metricflow_service.application.queries import QueryService
     from dbt_metricflow_service.models.queries import QueryRequest
 
     app, build, jobs, artifacts = ready_build(store, tmp_path)
-    queries = QueryService(app, CatalogService(app.store, artifacts), jobs, inline_executor(jobs, app.toolchain))
-    view = queries.submit(
-        build.build_id,
-        QueryRequest(idempotencyKey=uuid4().hex, mode="EXPLAIN", metricResourceIds=["metric.revenue"]),
-        CALLER,
-    )
-    assert view.state == "SUCCEEDED"
-    assert view.sql == "select 1"
-    assert queries.results(view.query_id).sql == "select 1"
-    monkeypatch.setattr(jobs, "result", lambda *_: pytest.fail("status loaded result body"))
-    assert queries.status(view.query_id).result_available
-    with store.db.transaction() as connection:
-        connection.exec_driver_sql("DELETE FROM runtime_job_result WHERE job_id=%s", (str(view.query_id),))
-    assert not queries.status(view.query_id).result_available
+    monkeypatch.setattr(jobs, "reserve", lambda *_: pytest.fail("query created a task"))
+    queries = QueryService(app, CatalogService(app.store, artifacts), inline_executor())
+    result = queries.submit(build.build_id, QueryRequest(mode="EXPLAIN", metricResourceIds=["metric.revenue"]), CALLER)
+    assert result.sql == "select 1"
+    assert not hasattr(result, "query_id")

@@ -114,7 +114,6 @@
       "name": "query",
       "model": "QueryRequest",
       "value": {
-        "idempotencyKey": "query-QUERY",
         "mode": "QUERY",
         "metricResourceIds": [
           "metric.revenue"
@@ -133,7 +132,6 @@
       "name": "explain",
       "model": "QueryRequest",
       "value": {
-        "idempotencyKey": "query-EXPLAIN",
         "mode": "EXPLAIN",
         "metricResourceIds": [
           "metric.revenue"
@@ -152,7 +150,6 @@
       "name": "preview",
       "model": "QueryRequest",
       "value": {
-        "idempotencyKey": "query-PREVIEW",
         "mode": "PREVIEW",
         "metricResourceIds": [],
         "groupBy": [],
@@ -169,7 +166,6 @@
       "name": "dimension_values",
       "model": "QueryRequest",
       "value": {
-        "idempotencyKey": "query-DIMENSION_VALUES",
         "mode": "DIMENSION_VALUES",
         "metricResourceIds": [
           "metric.revenue"
@@ -186,11 +182,9 @@
     },
     {
       "name": "query-result",
-      "model": "ResultPage",
+      "model": "QueryResult",
       "value": {
-        "queryId": "12345678-1234-4234-8234-123456789abc",
         "buildId": "12345678-1234-4234-8234-123456789abc",
-        "state": "SUCCEEDED",
         "mode": "QUERY",
         "commitSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "businessTimezone": "Asia/Shanghai",
@@ -199,25 +193,17 @@
           "endTime": null
         },
         "boundaryPolicy": "metricflow_granularity_alignment",
-        "resultAvailable": true,
-        "error": null,
         "sql": null,
         "columns": [],
         "rows": [],
-        "offset": 0,
-        "returnedRows": 0,
-        "nextOffset": null,
-        "availableRows": 0,
         "resultTruncated": false
       }
     },
     {
       "name": "precision-result",
-      "model": "ResultPage",
+      "model": "QueryResult",
       "value": {
-        "queryId": "12345678-1234-4234-8234-123456789abc",
         "buildId": "12345678-1234-4234-8234-123456789abc",
-        "state": "SUCCEEDED",
         "mode": "QUERY",
         "commitSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "businessTimezone": "Asia/Shanghai",
@@ -226,8 +212,6 @@
           "endTime": null
         },
         "boundaryPolicy": "metricflow_granularity_alignment",
-        "resultAvailable": true,
-        "error": null,
         "sql": null,
         "columns": [
           {
@@ -241,10 +225,6 @@
             null
           ]
         ],
-        "offset": 0,
-        "returnedRows": 1,
-        "nextOffset": null,
-        "availableRows": 1,
         "resultTruncated": false
       }
     },

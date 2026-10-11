@@ -69,7 +69,7 @@ def test_invalid_build_inputs(changes):
 def test_query_modes_are_strict_and_build_is_outside_body():
     from dbt_metricflow_service.models.queries import QueryRequest
 
-    query = {"mode": "QUERY", "metricResourceIds": ["metric.revenue"], "idempotencyKey": "q"}
+    query = {"mode": "QUERY", "metricResourceIds": ["metric.revenue"]}
     assert QueryRequest.model_validate(query).limit == 1000
     for changed in (
         {"limit": 10001},
@@ -85,7 +85,7 @@ def test_query_modes_are_strict_and_build_is_outside_body():
         QueryRequest.model_validate({**query, "mode": "PREVIEW", "datasetResourceId": "table.a"})
 
 
-def test_options_require_nonempty_metrics_without_task_key():
+def test_available_dimensions_require_nonempty_metrics_without_task_key():
     from dbt_metricflow_service.models.queries import AvailableDimensionsRequest
 
     with pytest.raises(ValidationError):

@@ -11,9 +11,7 @@ from dbt_metricflow_service.storage.postgres import Database
 
 DSN_ENV = "SERVICE_TEST_DATABASE_URL"
 PROJECT_PREFIX = "storage-test-"
-DBT = "DBT_COMMAND"
 BUILD = "BUILD_RUN"
-QUERY = "METRIC_QUERY"
 VERSION = "storage-test"
 
 
@@ -41,7 +39,7 @@ def project(store):
 
 
 def reserve(store, name, **kwargs):
-    return store.reserve(DBT, name, {}, toolchain_version=VERSION, **kwargs)
+    return store.reserve(BUILD, name, {}, toolchain_version=VERSION, **kwargs)
 
 
 def claim(store):
@@ -62,12 +60,13 @@ def test_concurrent_idempotency_and_claim(store):
     with ThreadPoolExecutor(max_workers=8) as pool:
         rows = list(
             pool.map(
-                lambda _: reserve(store, name, fingerprint="one", idempotency_scope=DBT, idempotency_key=key), range(16)
+                lambda _: reserve(store, name, fingerprint="one", idempotency_scope=BUILD, idempotency_key=key),
+                range(16),
             )
         )
     assert len({row["job_id"] for row in rows}) == 1
     with pytest.raises(StoreConflict):
-        reserve(store, name, fingerprint="two", idempotency_scope=DBT, idempotency_key=key)
+        reserve(store, name, fingerprint="two", idempotency_scope=BUILD, idempotency_key=key)
     with ThreadPoolExecutor(max_workers=8) as pool:
         claims = list(pool.map(lambda _: claim(store), range(8)))
     assert sum(row is not None for row in claims) == 1
@@ -80,7 +79,7 @@ def test_expired_write_cannot_renew_or_publish_or_release_lock(store):
     assert store.phase(job["job_id"], job["lease_token"], "BUILDING", external=True)
     expire(store, job)
     assert not store.heartbeat(job["job_id"], job["lease_token"])
-    assert not store.finish(job["job_id"], job["lease_token"], {"wrong": True})
+    assert not store.finish(job["job_id"], job["lease_token"])
     store.recover()
     assert store.get(row["job_id"])["error_code"] == "EXECUTION_OUTCOME_UNKNOWN"
     with pytest.raises(ProjectBusy):
@@ -89,58 +88,41 @@ def test_expired_write_cannot_renew_or_publish_or_release_lock(store):
     assert reserve(store, name, write=True)["status"] == "QUEUED"
 
 
-def test_queued_volatile_input_expires_without_claim(store):
+
+def test_preparation_retry_keeps_stale_attempt_fenced(store):
     name = project(store)
-    row = reserve(store, name, input_mode="VOLATILE", pinned_instance_id=str(uuid4()), write=True)
-    with store.db.transaction() as connection:
-        connection.exec_driver_sql(
-            "UPDATE runtime_job SET input_lease_expires_at=clock_timestamp()-interval '1 second' WHERE job_id=%s",
-            (row["job_id"],),
-        )
+    row = reserve(store, name)
+    first = claim(store)
+    expire(store, first)
     store.recover()
-    assert store.get(row["job_id"])["error_code"] == "INPUT_LOST"
-    assert store.project(name)["busy_job_id"] is None
+    assert store.get(row["job_id"])["status"] == "QUEUED"
+    with store.db.transaction() as connection:
+        connection.exec_driver_sql(
+            "UPDATE runtime_job SET available_at=clock_timestamp() WHERE job_id=%s", (row["job_id"],)
+        )
+    second = claim(store)
+    assert second["attempt_id"] != first["attempt_id"]
+    assert not store.finish(row["job_id"], first["lease_token"], succeeded=False)
+    assert store.finish(row["job_id"], second["lease_token"], succeeded=False, error_code="BUILD_FAILED")
+    assert store.get(row["job_id"])["error_code"] == "BUILD_FAILED"
 
 
-def test_readonly_retry_retains_unconfirmed_attempt_and_cleanup_gate(store):
+def test_unconfirmed_external_attempt_blocks_cleanup_until_stop_confirmed(store, tmp_path):
+    from dbt_metricflow_service.storage.artifacts import ArtifactStore
+
     name = project(store)
-    parent = store.reserve(BUILD, name, {}, toolchain_version=VERSION)
-    run = claim(store)
-    # 引用保护测试直接提供已发布父任务；发布证据在单独测试验证。
-    with store.db.transaction() as connection:
-        connection.exec_driver_sql("UPDATE runtime_job SET status='SUCCEEDED' WHERE job_id=%s", (run["job_id"],))
-    # 测试夹具只提供空封存集合；产物完整性由独立产物测试验证。
-    set_id = str(uuid4())
-    with store.db.transaction() as connection:
-        connection.exec_driver_sql(
-            "INSERT INTO runtime_artifact_set(set_id,project_id,kind,state) VALUES(%s,%s,'EXECUTION','SEALED')",
-            (set_id, name),
-        )
-        connection.exec_driver_sql(
-            "UPDATE runtime_job SET output_set_id=%s WHERE job_id=%s", (set_id, parent["job_id"])
-        )
-    query = store.reserve(
-        QUERY, name, {}, parent_run_id=parent["job_id"], retry_policy="READ_ONLY", toolchain_version=VERSION
-    )
-    with pytest.raises(CleanupBlocked):
-        store.reserve_cleanup(parent["job_id"])
+    (tmp_path / "dbt_project.yml").write_text("name: cleanup_guard\n", encoding="utf-8")
+    source = ArtifactStore(store.db).capture(name, tmp_path)
+    parent = reserve(store, name, input_set_id=source)
     attempt = claim(store)
     store.phase(attempt["job_id"], attempt["lease_token"], "BUILDING", external=True)
     expire(store, attempt)
     store.recover()
-    assert store.get(query["job_id"])["status"] == "QUEUED"
-    with store.db.transaction() as connection:
-        connection.exec_driver_sql(
-            "UPDATE runtime_job SET available_at=clock_timestamp() WHERE job_id=%s", (query["job_id"],)
-        )
-    next_attempt = claim(store)
-    assert store.finish(next_attempt["job_id"], next_attempt["lease_token"], {"rows": [["123456789.00001"]]})
+    assert store.get(parent["job_id"])["error_code"] == "EXECUTION_OUTCOME_UNKNOWN"
     with pytest.raises(CleanupBlocked):
         store.reserve_cleanup(parent["job_id"])
     store.confirm_stopped(attempt["attempt_id"], attempt["lease_token"])
-    cleanup = store.reserve_cleanup(parent["job_id"])
-    assert cleanup["kind"] == "RUN_CLEANUP"
-    assert store.result(query["job_id"])["payload_json"]["rows"] == [["123456789.00001"]]
+    assert store.reserve_cleanup(parent["job_id"])["kind"] == "RUN_CLEANUP"
 
 
 def test_build_without_output_cannot_be_published(store):
@@ -150,49 +132,79 @@ def test_build_without_output_cannot_be_published(store):
     with pytest.raises(ValueError, match="output"):
         store.finish(row["job_id"], attempt["lease_token"])
     assert store.get(row["job_id"])["status"] == "RUNNING"
-    assert store.result(row["job_id"]) is None
 
 
-def test_deadline_expires_queued_job_and_inputs_cannot_revive(store):
+def test_deadline_expires_queued_build_before_claim(store):
     name = project(store)
     worker = str(uuid4())
-    row = reserve(store, name, input_mode="VOLATILE", pinned_instance_id=worker, timeout_seconds=-1)
-    assert store.heartbeat_inputs(worker, [row["job_id"]]) == 0
+    row = reserve(store, name, timeout_seconds=-1)
     assert store.claim(worker, toolchain_version=VERSION) is None
     store.recover()
     assert store.get(row["job_id"])["error_code"] == "TASK_TIMEOUT"
 
 
-def test_renew_only_inputs_present_in_memory(store):
-    name = project(store)
-    worker = str(uuid4())
-    first = reserve(store, name, input_mode="VOLATILE", pinned_instance_id=worker)
-    reserve(store, name, input_mode="VOLATILE", pinned_instance_id=worker)
-    assert store.heartbeat_inputs(worker, [first["job_id"]]) == 1
-    assert store.heartbeat_inputs(worker, []) == 0
 
-
-def test_finish_rechecks_lease_after_artifact_sealing(store, tmp_path):
+@pytest.mark.parametrize("failure", ["lease_lost", "seal_error", "wrong_attempt", "missing_catalog"])
+def test_finish_rolls_back_artifacts_and_job_on_failure(store, tmp_path, failure):
     from dbt_metricflow_service.storage.artifacts import ArtifactStore
 
     name = project(store)
     row = reserve(store, name)
+    from dbt_metricflow_service.storage.entities import ArtifactSet, Build
+    build_id = str(uuid4())
+    with store.db.fact_session() as session:
+        session.add(Build(
+            build_id=build_id, run_id=row["job_id"], repository="https://example.test/project.git",
+            environment="PREVIEW", execution_binding="test", config_version="1",
+            toolchain_version=VERSION, caller="test", idempotency_key=str(uuid4()),
+            request_digest="test", request_json={}, config_snapshot={},
+        ))
     attempt = claim(store)
     (tmp_path / "dbt_project.yml").write_text("name: lease_test\n", encoding="utf-8")
     artifacts = ArtifactStore(store.db)
-    output = artifacts.capture(name, tmp_path, producer_attempt_id=attempt["attempt_id"], kind="EXECUTION")
+    target = tmp_path / "target"
+    target.mkdir()
+    for filename in ("manifest.json", "semantic_manifest.json", "catalog.json"):
+        (target / filename).write_text("{}", encoding="utf-8")
+    if failure != "missing_catalog":
+        (target / "published_catalog.json").write_text("{}", encoding="utf-8")
+    output = artifacts.capture(
+        name, tmp_path, producer_attempt_id=attempt["attempt_id"], kind="EXECUTION",
+        metadata={"validation_json": {"allTestsPassed": True, "representativeQueryPassed": True,
+                                      "relationsVerified": True}},
+    )
 
-    def seal_then_expire(set_id, connection):
+    def broken_seal(set_id, connection):
         artifacts.seal(set_id, connection)
+        if failure == "seal_error":
+            raise ValueError("injected after sealing")
         connection.connection().exec_driver_sql(
             "UPDATE runtime_attempt SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE attempt_id=%s",
             (attempt["attempt_id"],),
         )
 
-    assert not store.finish(row["job_id"], attempt["lease_token"], output_set_id=output, seal=seal_then_expire)
+    if failure == "lease_lost":
+        assert not store.finish(row["job_id"], attempt["lease_token"], output_set_id=output, seal=broken_seal)
+    elif failure == "seal_error":
+        with pytest.raises(ValueError, match="injected"):
+            store.finish(row["job_id"], attempt["lease_token"], output_set_id=output, seal=broken_seal)
+    elif failure == "missing_catalog":
+        with pytest.raises(ValueError, match="missing required native artifacts"):
+            store.finish(row["job_id"], attempt["lease_token"], output_set_id=output)
+    else:
+        reserve(store, name)
+        other = claim(store)
+        with pytest.raises(ValueError, match="authorized attempt"):
+            store.finish(other["job_id"], other["lease_token"], output_set_id=output)
+        assert store.get(other["job_id"])["output_set_id"] is None
     assert store.get(row["job_id"])["status"] == "RUNNING"
-    assert store.result(row["job_id"]) is None
-    assert artifacts.metadata(output)["state"] == "STAGING"
+    assert store.get(row["job_id"])["output_set_id"] is None
+    with store.db.session() as session:
+        assert session.get(ArtifactSet, output).state == "STAGING"
+        build = session.get(Build, build_id)
+        assert build.build_status == "RUNNING"
+        assert build.output_set_id is None
+        assert build.catalog_digest is None
 
 
 def test_cleanup_uses_parent_versions_and_can_clean_failed_build(store):
@@ -214,7 +226,7 @@ def test_sealed_set_cannot_be_demoted_or_rewritten(store, tmp_path):
     (tmp_path / "model.sql").write_text("select 1", encoding="utf-8")
     (tmp_path / "dbt_project.yml").write_text("name: immutable_test\n", encoding="utf-8")
     set_id = ArtifactStore(store.db).capture(name, tmp_path)
-    for change in ("state='STAGING'", "metadata='{\"changed\":true}'::jsonb"):
+    for change in ("state='STAGING'", "validation_json='{\"changed\":true}'::jsonb"):
         with pytest.raises(IntegrityError), store.db.transaction() as connection:
             connection.exec_driver_sql("UPDATE runtime_artifact_set SET " + change + " WHERE set_id=%s", (set_id,))
 
@@ -222,51 +234,18 @@ def test_sealed_set_cannot_be_demoted_or_rewritten(store, tmp_path):
 def test_idempotency_cannot_reuse_another_project(store):
     first, second = project(store), project(store)
     key = str(uuid4())
-    reserve(store, first, idempotency_scope=DBT, idempotency_key=key, fingerprint="same-body")
+    reserve(store, first, idempotency_scope=BUILD, idempotency_key=key, fingerprint="same-body")
     with pytest.raises(StoreConflict):
-        reserve(store, second, idempotency_scope=DBT, idempotency_key=key, fingerprint="same-body")
+        reserve(store, second, idempotency_scope=BUILD, idempotency_key=key, fingerprint="same-body")
 
 
-def test_cli_admission_rejects_project_import_after_manifest_validation(store):
+def test_build_admission_rejects_project_import_after_input_validation(store):
     name = project(store)
     checked = store.project(name)
     store.register_project(name, {"binding": "updated"})
     with pytest.raises(StoreConflict, match="changed"):
         reserve(store, name, expected_revision=checked["revision"])
     assert store.project(name)["busy_job_id"] is None
-
-
-def test_options_retry_is_bounded_and_preserves_deadline(store):
-    name = project(store)
-    row = store.reserve("QUERY_OPTIONS", name, {}, toolchain_version=VERSION)
-    deadline = row["deadline_at"]
-    for attempt_number in range(1, 4):
-        attempt = claim(store)
-        assert attempt["attempt_no"] == attempt_number
-        store.fail(row["job_id"], attempt["lease_token"], "TRANSIENT_FAILURE")
-        assert store.requeue_options(row["job_id"]) is (attempt_number < 3)
-        assert store.get(row["job_id"])["deadline_at"] == deadline
-
-
-def test_options_retry_rejects_unconfirmed_external_execution(store):
-    name = project(store)
-    row = store.reserve("QUERY_OPTIONS", name, {}, toolchain_version=VERSION)
-    attempt = claim(store)
-    store.phase(row["job_id"], attempt["lease_token"], "VALIDATING", external=True)
-    store.fail(row["job_id"], attempt["lease_token"], "EXECUTION_OUTCOME_UNKNOWN", stopped=False)
-    assert not store.requeue_options(row["job_id"])
-
-
-def test_options_retry_rejects_elapsed_deadline(store):
-    name = project(store)
-    row = store.reserve("QUERY_OPTIONS", name, {}, toolchain_version=VERSION)
-    attempt = claim(store)
-    store.fail(row["job_id"], attempt["lease_token"], "TRANSIENT_FAILURE")
-    with store.db.transaction() as connection:
-        connection.exec_driver_sql(
-            "UPDATE runtime_job SET deadline_at=clock_timestamp()-interval '1 second' WHERE job_id=%s", (row["job_id"],)
-        )
-    assert not store.requeue_options(row["job_id"])
 
 
 def test_cleanup_releases_artifact_references_but_preserves_tombstone(store, tmp_path):
@@ -282,7 +261,7 @@ def test_cleanup_releases_artifact_references_but_preserves_tombstone(store, tmp
     cleanup = store.reserve_cleanup(parent["job_id"])
     execution = claim(store)
     assert execution["job_id"] == cleanup["job_id"]
-    assert store.finish(execution["job_id"], execution["lease_token"], {"cleaned": True})
+    assert store.finish(execution["job_id"], execution["lease_token"])
     assert store.get(parent["job_id"])["run_lifecycle"] == "CLEANED"
     assert artifacts.delete_unreferenced(source)
 

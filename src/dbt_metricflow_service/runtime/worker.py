@@ -3,17 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 
 from sqlalchemy.exc import DBAPIError as DatabaseError
 from sqlalchemy.exc import TimeoutError as PoolTimeout
 
 from dbt_metricflow_service.models.payloads import JsonObject
-from dbt_metricflow_service.runtime.completion import complete_job
 from dbt_metricflow_service.runtime.executor import ERROR_COMMAND_FAILED, ExecutionError, RuntimeExecutor
 from dbt_metricflow_service.storage.records import LeasedJob, StoredBuild
 
@@ -27,13 +24,9 @@ logger = logging.getLogger(__name__)
 POLL_SECONDS = 0.25
 INPUT_LOST = "INPUT_LOST"
 INTERRUPTED = "EXECUTION_OUTCOME_UNKNOWN"
-RESULT_TOO_LARGE = "RESULT_TOO_LARGE"
 WORKER_FAILED = "WORKER_FAILED"
-VOLATILE = "VOLATILE"
 FAILURE_LOG = "Runtime worker operation failed: %s"
 EXTERNAL_OUTCOME_UNKNOWN = "externalOutcomeUnknown"
-SYNCHRONOUS_KINDS = ("METRIC_QUERY", "QUERY_OPTIONS")
-TERMINAL_STATES = frozenset({"SUCCEEDED", "FAILED"})
 
 
 class Worker:
@@ -86,42 +79,15 @@ class Worker:
                 logger.warning(FAILURE_LOG, type(error).__name__)
             await asyncio.sleep(POLL_SECONDS)
 
-    async def execute_now(self, job_id: str) -> None:
-        """在请求内执行指定查询；并发幂等调用等待同一记录的终态。"""
-        while True:
-            row = await asyncio.to_thread(self.runtime.jobs.get, job_id)
-            if row is None or row["kind"] not in SYNCHRONOUS_KINDS:
-                raise ValueError("synchronous query record is unavailable")
-            if row["status"] in TERMINAL_STATES:
-                return
-            if row["deadline_at"] <= datetime.now(UTC):
-                raise TimeoutError("synchronous query deadline exceeded")
-            job = await asyncio.to_thread(
-                self.runtime.jobs.claim, str(self.runtime.instance_id),
-                toolchain_version=self.runtime.toolchain,
-                config_versions=[self.runtime.settings.config_version],
-                kinds=list(SYNCHRONOUS_KINDS), job_id=job_id,
-            )
-            if job is not None:
-                # 复用租约心跳、受控执行和完成事务；不启动后台槽位。
-                await self._execute(job)
-            else:
-                await asyncio.sleep(POLL_SECONDS)
-
     async def _execute(self, job: LeasedJob) -> None:
         execution = asyncio.create_task(self.executor.execute(job))
         heartbeat = asyncio.create_task(self._heartbeat(job, execution))
         try:
             result = await execution
-            if len(json.dumps(result.payload, ensure_ascii=False).encode()) > self.runtime.settings.max_result_bytes:
-                raise ExecutionError(RESULT_TOO_LARGE)
-            # 输出、产物封存和任务成功在同一持久事务内发布。
+            # 只封存产物并提交任务状态，不保存通用结果或成功诊断副本。
             await asyncio.to_thread(
-                complete_job, self.runtime.jobs, job["job_id"], job["lease_token"], result.payload,
+                self.runtime.jobs.finish, job["job_id"], job["lease_token"],
                 output_set_id=result.output_set_id, seal=self.runtime.artifacts.seal,
-                stdout_tail=result.payload.get("stdout", ""), stderr_tail=result.payload.get("stderr", ""),
-                exit_code=result.payload.get("exit_code", 0),
-                output_truncated=result.payload.get("output_truncated", False),
             )
         except asyncio.CancelledError:
             execution.cancel()

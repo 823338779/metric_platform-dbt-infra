@@ -11,7 +11,7 @@ RESOURCES = {
     "metric.revenue": {"name": "revenue"},
     "dataset.orders": {"capabilities": ["PREVIEW"]},
 }
-OPTIONS = [{
+DIMENSIONS = [{
     "optionId": "region", "resourceId": None, "displayName": "Region",
     "dimensionType": "categorical", "valueType": "string", "granularities": [], "operators": ["IN"],
 }]
@@ -21,15 +21,15 @@ MAPPING = {"region": "order__region"}
 @pytest.mark.parametrize("mode", ["QUERY", "EXPLAIN"])
 def test_query_maps_selected_ids_filters_and_order(mode):
     request = QueryRequest(
-        idempotencyKey="query", mode=mode, metricResourceIds=["metric.revenue", "metric.revenue"],
+        mode=mode, metricResourceIds=["metric.revenue", "metric.revenue"],
         groupBy=[{"optionId": "region"}],
         filters=[{"optionId": "region", "operator": "IN", "value": ["east", None]}],
         orderBy=[{"fieldId": "metric.revenue", "direction": "DESC"}, {"fieldId": "region", "direction": "ASC"}],
         startTime="2026-10-01T00:00:00", limit=12,
     )
-    plan = compile_query(request, RUN, RESOURCES, OPTIONS, MAPPING).model_dump(mode="json", by_alias=True)
+    plan = compile_query(request, RUN, RESOURCES, DIMENSIONS, MAPPING).model_dump(mode="json", by_alias=True)
     assert plan == {
-        "runId": RUN, "idempotencyKey": "query", "mode": mode, "metrics": ["revenue"],
+        "runId": RUN, "mode": mode, "metrics": ["revenue"],
         "groupBy": ["order__region"],
         "filters": [{"field": "order__region", "operator": "IN", "value": ["east", None]}],
         "orderBy": ["-revenue", "order__region"], "startTime": "2026-10-01T00:00:00", "endTime": None,
@@ -38,15 +38,15 @@ def test_query_maps_selected_ids_filters_and_order(mode):
 
 
 def test_preview_and_dimension_values_keep_their_fixed_selection():
-    preview = QueryRequest(idempotencyKey="preview", mode="PREVIEW", datasetResourceId="dataset.orders")
+    preview = QueryRequest(mode="PREVIEW", datasetResourceId="dataset.orders")
     plan = compile_query(preview, RUN, RESOURCES, [], {})
     assert plan.dataset_resource_id == "dataset.orders"
     assert plan.metrics == []
     values = QueryRequest(
-        idempotencyKey="values", mode="DIMENSION_VALUES",
+        mode="DIMENSION_VALUES",
         metricResourceIds=["metric.revenue"], dimensionOptionId="region",
     )
-    assert compile_query(values, RUN, RESOURCES, OPTIONS, MAPPING).dimension == "order__region"
+    assert compile_query(values, RUN, RESOURCES, DIMENSIONS, MAPPING).dimension == "order__region"
 
 
 @pytest.mark.parametrize(("extra", "code"), [
@@ -56,7 +56,7 @@ def test_preview_and_dimension_values_keep_their_fixed_selection():
     ({"startTime": "2026-10-02", "endTime": "2026-10-01"}, "INVALID_TIME_RANGE"),
 ])
 def test_unavailable_selections_keep_public_errors(extra, code):
-    request = QueryRequest(idempotencyKey="invalid", mode="QUERY", metricResourceIds=["metric.revenue"], **extra)
+    request = QueryRequest(mode="QUERY", metricResourceIds=["metric.revenue"], **extra)
     with pytest.raises(ServiceError) as failure:
-        compile_query(request, RUN, RESOURCES, OPTIONS, MAPPING)
+        compile_query(request, RUN, RESOURCES, DIMENSIONS, MAPPING)
     assert failure.value.error.code == code

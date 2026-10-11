@@ -51,13 +51,12 @@ def test_entity_defaults_and_string_uuid_survive_session_close():
             session.add(RuntimeProject(project_id="orm-project", config_version="1", binding_config={}))
             session.flush()
             session.add(ArtifactSet(set_id=identifier, project_id="orm-project", kind="SOURCE",
-                                    metadata_json={"source": "memory"}))
+                                    validation_json={"relationsVerified": True}))
         with db.session() as session:
             record = entity_dict(session.scalars(select(ArtifactSet).where(ArtifactSet.set_id == identifier)).one())
         assert record["set_id"] == identifier
         assert record["state"] == "STAGING"
-        assert record["metadata"] == {"source": "memory"}
-        assert record["catalog_json"] == {}
+        assert record["validation_json"] == {"relationsVerified": True}
         assert record["sealed_at"] is None
 
 

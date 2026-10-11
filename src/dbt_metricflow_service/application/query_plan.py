@@ -2,7 +2,7 @@
 
 from typing import cast
 
-from ..models.payloads import JsonObject, QueryOption
+from ..models.payloads import DimensionOption, JsonObject
 from ..models.queries import QueryMode, QueryRequest
 from ..platform.models import PlatformQueryRequest
 from .errors import ServiceError
@@ -12,7 +12,7 @@ def compile_query(
     request: QueryRequest,
     run_id: str,
     indexed: dict[str, JsonObject],
-    options: list[QueryOption],
+    dimensions: list[DimensionOption],
     mapping: dict[str, str],
 ) -> PlatformQueryRequest:
     if request.start_time and request.end_time and request.start_time > request.end_time:
@@ -22,7 +22,7 @@ def compile_query(
         resource = indexed.get(cast(str, request.dataset_resource_id))
         if not resource or "PREVIEW" not in resource["capabilities"]:
             raise ServiceError("INVALID_PREVIEW_RESOURCE", "resource cannot be previewed")
-    option_index = {item["optionId"]: item for item in options}
+    option_index = {item["optionId"]: item for item in dimensions}
     groups, filters = [], []
     for selected in request.group_by:
         option = option_index.get(selected.option_id)
@@ -46,7 +46,6 @@ def compile_query(
     return PlatformQueryRequest.model_validate(
         {
             "run_id": run_id,
-            "idempotency_key": request.idempotency_key,
             "mode": request.mode,
             "metrics": [indexed[key]["name"] for key in metrics],
             "group_by": groups,

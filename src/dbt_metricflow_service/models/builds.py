@@ -51,7 +51,6 @@ class ConfigSnapshot(Contract):
     environments: list[Environment] = Field(min_length=1, description="允许使用的执行环境")
     business_timezone: str = Field(default="UTC", description="构建固定的业务时区")
     schema_name: str | None = Field(default=None, description="可选固定 schema；物理表仍按构建隔离")
-    query_retry_safe: bool = Field(default=False, strict=True, description="执行端明确允许只读任务重试")
 
     @field_validator("schema_name")
     @classmethod

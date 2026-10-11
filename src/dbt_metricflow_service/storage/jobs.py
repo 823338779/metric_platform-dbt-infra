@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import timedelta
 from typing import cast, overload
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, func, literal, or_, select, true, update
+from sqlalchemy import func, or_, select, true, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -17,16 +18,11 @@ from dbt_metricflow_service.models.payloads import JsonObject, JsonValue
 from dbt_metricflow_service.storage.records import DatabaseRow, LeasedJob, StoredJob
 from dbt_metricflow_service.storage.rows import entity_dict
 
-from .branches import BranchStore
 from .entities import (
     ArtifactFile,
     ArtifactSet,
-    Branch,
     Build,
     DeploymentTarget,
-    JobResult,
-    Release,
-    ReleaseRelation,
     RuntimeAttempt,
     RuntimeJob,
     RuntimeProject,
@@ -35,29 +31,16 @@ from .postgres import Database
 
 # ORM 表达式显式保留条件更新和行锁，时间边界由数据库判断。
 EXECUTING = "EXECUTING"
-PRODUCTION = "PRODUCTION"
 PREPARATION_ONLY = "PREPARATION_ONLY"
-QUERY_OPTIONS = "QUERY_OPTIONS"
-INVALID_QUERY = "INVALID_QUERY"
 PREPARING = "PREPARING"
-BUILDING = "BUILDING"
-VALIDATING = "VALIDATING"
-PUBLISHED = "PUBLISHED"
-SUPERSEDED = "SUPERSEDED"
 QUEUED = "QUEUED"
 RUNNING = "RUNNING"
 SUCCEEDED = "SUCCEEDED"
 FAILED = "FAILED"
 BUILD_RUN = "BUILD_RUN"
 RUN_CLEANUP = "RUN_CLEANUP"
-DBT_COMMAND = "DBT_COMMAND"
-MF_COMMAND = "MF_COMMAND"
-VOLATILE = "VOLATILE"
-DURABLE = "DURABLE"
-READ_ONLY = "READ_ONLY"
 NEVER = "NEVER"
 EXTERNAL = "EXTERNAL"
-INPUT_LOST = "INPUT_LOST"
 OUTCOME_UNKNOWN = "EXECUTION_OUTCOME_UNKNOWN"
 TIMEOUT = "TASK_TIMEOUT"
 LEASE_EXPIRED = "LEASE_EXPIRED"
@@ -71,15 +54,13 @@ EXPIRED_UNCONFIRMED = "EXPIRED_UNCONFIRMED"
 STOPPED = "STOPPED"
 CLEANUP_SCOPE = "RUN_CLEANUP"
 REQUIRED_BUILD_FILES = frozenset(
-    {"target/manifest.json", "target/semantic_manifest.json", "target/run_results.json", "target/catalog.json"}
+    {"target/manifest.json", "target/semantic_manifest.json", "target/catalog.json", "target/published_catalog.json"}
 )
 REQUIRED_VALIDATION_FLAGS = ("allTestsPassed", "representativeQueryPassed", "relationsVerified")
 MAX_DIAGNOSTIC = 1024 * 1024
-MAX_RESULT = 16 * 1024 * 1024
 
 
 FORBIDDEN_REQUEST_KEYS = frozenset({"resources", "credentials", "password", "token", "secret", "environment", "env"})
-RELEASE_FIELD = "releaseId"
 
 
 class _FinishLeaseLost(Exception):
@@ -107,7 +88,7 @@ def _safe_request(value: JsonValue) -> JsonValue: ...
 
 
 def _safe_request(value: JsonValue) -> JsonValue:
-    # resources 和凭据不进入持久请求；调用者必须另外在内存保留 VOLATILE 输入。
+    # resources 和凭据不进入持久请求。
     if isinstance(value, dict):
         return {key: _safe_request(item) for key, item in value.items() if key.lower() not in FORBIDDEN_REQUEST_KEYS}
     if isinstance(value, list):
@@ -121,14 +102,12 @@ class JobStore:
         db: Database,
         lease_seconds: int = 90,
         *,
-        max_result_bytes: int = MAX_RESULT,
         max_diagnostic_bytes: int = MAX_DIAGNOSTIC,
     ) -> None:
         # 数据库共享控制状态；租约长度只决定后续新租约的有效期。
         self.db = db
         self.lease_seconds = lease_seconds
-        # 序列化后的结果和诊断分别设限，避免单条记录撑满内容存储。
-        self.max_result_bytes = max_result_bytes
+        # 错误诊断设限，避免单条记录撑满内容存储。
         self.max_diagnostic_bytes = max_diagnostic_bytes
 
     def register_project(
@@ -137,9 +116,8 @@ class JobStore:
         binding_config: JsonObject | None = None,
         config_version: str = "1",
         source_set_id: str | None = None,
-        preview_profile: str | None = None,
     ) -> DatabaseRow:
-        # 项目导入与普通任务受理锁同一项目行，换源时立即移除旧输出指针。
+        # 项目导入与任务受理锁同一项目行，保持固定输入归属。
         with self.db.session() as session:
             session.execute(
                 pg_insert(RuntimeProject)
@@ -151,9 +129,6 @@ class JobStore:
                 source = session.get(ArtifactSet, source_set_id)
                 if not source or source.state != SEALED or source.kind != SOURCE or source.project_id != project_id:
                     raise ValueError("Project source must be a sealed source of the same project")
-            changed = source_set_id is not None and project.source_set_id != str(source_set_id)
-            if changed or project.config_version != config_version:
-                project.current_output_set_id = None
             if binding_config is not None:
                 project.binding_config = binding_config
             if source_set_id is not None:
@@ -161,56 +136,40 @@ class JobStore:
             project.config_version = config_version
             project.revision += 1
             session.flush()
-            BranchStore.ensure_production(session, project_id, preview_profile)
             return entity_dict(project)
 
     def project(self, project_id: str) -> DatabaseRow | None:
         with self.db.session() as session:
-            row = session.execute(
-                select(
-                    RuntimeProject,
-                    func.coalesce(Branch.publication_sequence, 0),
-                    Branch.active_release_id,
-                )
-                .outerjoin(Branch, and_(Branch.project_id == RuntimeProject.project_id, Branch.mode == PRODUCTION))
-                .where(RuntimeProject.project_id == project_id)
-            ).one_or_none()
-            if row is None:
-                return None
-            # 发布序号和活动指针只从生产分支派生，不在项目表重复保存。
-            result = entity_dict(row[0])
-            result.update(publication_sequence=row[1], active_published_release_id=row[2])
-            return result
+            return entity_dict(session.get(RuntimeProject, project_id))
 
     def get(self, job_id: UUID | str) -> StoredJob | None:
         with self.db.session() as session:
             return cast(StoredJob | None, entity_dict(session.get(RuntimeJob, str(job_id))))
 
-    def by_key(self, scope: str, key: str) -> StoredJob | None:
-        with self.db.session() as session:
-            job = session.scalar(
-                select(RuntimeJob).where(RuntimeJob.idempotency_scope == scope, RuntimeJob.idempotency_key == key)
-            )
-            return cast(StoredJob | None, entity_dict(job))
-
-    def result_exists(self, job_id: UUID | str) -> bool:
-        # 状态读取仅检查结果引用，不加载结果正文。
-        with self.db.session() as session:
-            return session.scalar(select(select(JobResult.job_id).where(JobResult.job_id == str(job_id)).exists()))
-
-    def options_for(self, run_id: UUID | str) -> list[StoredJob]:
-        # 查询只消费同一固定构建的已完成选项任务。
-        with self.db.session() as session:
-            jobs = session.scalars(
-                select(RuntimeJob)
-                .where(
-                    RuntimeJob.parent_run_id == str(run_id),
-                    RuntimeJob.kind == QUERY_OPTIONS,
-                    RuntimeJob.status == SUCCEEDED,
-                )
-                .order_by(RuntimeJob.created_at.desc())
-            )
-            return [cast(StoredJob, entity_dict(job)) for job in jobs]
+    @contextmanager
+    def query_run(self, run_id: UUID | str) -> Iterator[StoredJob]:
+        """只持有会话锁保护实时查询，不创建任务、租约或结果记录。"""
+        key = func.hashtextextended("query:" + str(run_id), 0)
+        # 会话锁覆盖引擎执行；autocommit 避免持有长事务和行锁。
+        with self.db.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+            connection.execute(select(func.pg_advisory_lock_shared(key)))
+            try:
+                row = connection.execute(
+                    select(RuntimeJob).where(RuntimeJob.job_id == str(run_id))
+                ).mappings().one_or_none()
+                parent = cast(StoredJob, dict(row)) if row is not None else None
+                if not parent or parent["kind"] != BUILD_RUN or parent["status"] != SUCCEEDED or (
+                    parent["run_lifecycle"] != ACTIVE
+                ):
+                    raise CleanupBlocked("Run is not ready and active")
+                yield parent
+            finally:
+                try:
+                    connection.execute(select(func.pg_advisory_unlock_shared(key)))
+                except Exception:
+                    # 不能把仍可能持有会话锁的连接归还连接池。
+                    connection.invalidate()
+                    raise
 
     def external_started(self, attempt_id: UUID | str) -> bool:
         # 取消时以持久 attempt 为准；无记录时不能证明外部执行已经停止。
@@ -221,10 +180,6 @@ class JobStore:
                 )
                 != PREPARING
             )
-
-    def result(self, job_id: UUID | str) -> DatabaseRow | None:
-        with self.db.session() as session:
-            return entity_dict(session.get(JobResult, str(job_id)))
 
     def reserve(
         self,
@@ -238,8 +193,6 @@ class JobStore:
         idempotency_key: str | None = None,
         parent_run_id: UUID | str | None = None,
         input_set_id: str | None = None,
-        input_mode: str = DURABLE,
-        pinned_instance_id: str | None = None,
         config_version: str = "1",
         toolchain_version: str = "default",
         schema_name: str | None = None,
@@ -249,8 +202,9 @@ class JobStore:
         timeout_seconds: int = 600,
         write: bool = False,
         expected_revision: int | None = None,
-        branch_id: str | None = None,
     ) -> StoredJob:
+        if kind not in (BUILD_RUN, RUN_CLEANUP):
+            raise ValueError(f"Unsupported job kind: {kind}")
         # 幂等作用域先串行化；parent 锁统一先于项目行和子任务，避免清理受理穿透。
         with self.db.fact_session() as session:
             return cast(
@@ -266,8 +220,6 @@ class JobStore:
                     idempotency_key=idempotency_key,
                     parent_run_id=parent_run_id,
                     input_set_id=input_set_id,
-                    input_mode=input_mode,
-                    pinned_instance_id=pinned_instance_id,
                     config_version=config_version,
                     toolchain_version=toolchain_version,
                     schema_name=schema_name,
@@ -277,7 +229,6 @@ class JobStore:
                     timeout_seconds=timeout_seconds,
                     write=write,
                     expected_revision=expected_revision,
-                    branch_id=branch_id,
                 ),
             )
 
@@ -294,8 +245,6 @@ class JobStore:
         idempotency_key: str | None = None,
         parent_run_id: UUID | str | None = None,
         input_set_id: str | None = None,
-        input_mode: str = DURABLE,
-        pinned_instance_id: str | None = None,
         config_version: str = "1",
         toolchain_version: str = "default",
         schema_name: str | None = None,
@@ -305,8 +254,9 @@ class JobStore:
         timeout_seconds: int = 600,
         write: bool = False,
         expected_revision: int | None = None,
-        branch_id: str | None = None,
     ) -> StoredJob:
+        if kind not in (BUILD_RUN, RUN_CLEANUP):
+            raise ValueError(f"Unsupported job kind: {kind}")
         # 幂等作用域先串行化；parent 锁统一先于项目行和子任务，避免清理受理穿透。
         session = connection
         if idempotency_key is not None:
@@ -327,22 +277,16 @@ class JobStore:
             project.revision != expected_revision or project.config_version != config_version
         ):
             raise StoreConflict("Project changed during request validation; retry")
-        if input_set_id is None:
-            if parent:
-                input_set_id = parent.output_set_id
-            elif kind in (DBT_COMMAND, MF_COMMAND):
-                input_set_id = project.current_output_set_id or project.source_set_id
+        if input_set_id is None and parent:
+            input_set_id = parent.output_set_id
         safe_request = _safe_request(request_json)
         encoded = json.dumps(
             [
-                {"input": fingerprint or safe_request, "branchId": branch_id}
-                if branch_id
-                else fingerprint or safe_request,
+                fingerprint or safe_request,
                 kind,
                 project_id,
                 str(parent_run_id) if parent_run_id else None,
                 input_set_id,
-                input_mode,
                 profile_binding_id,
                 config_version,
                 toolchain_version,
@@ -372,34 +316,15 @@ class JobStore:
             raise ValueError("Parent has no published artifact set")
         if write and project.busy_job_id is not None:
             raise ProjectBusy("project_busy")
-        # 发布类任务继承固定候选或父 run 的分支，普通任务保持无分支。
-        if parent and branch_id is not None and parent.branch_id != branch_id:
-            raise ValueError("父任务与分支归属不匹配")
-        branch_id = parent.branch_id if parent else branch_id
-        if safe_request.get(RELEASE_FIELD):
-            release = session.scalar(
-                select(Release).where(
-                    Release.project_id == project_id, Release.release_id == safe_request[RELEASE_FIELD]
-                )
-            )
-            if not release or branch_id is not None and branch_id != release.branch_id:
-                raise ValueError("任务与发布分支归属不匹配")
-            branch_id = release.branch_id
         job = RuntimeJob(
             job_id=str(job_id or uuid4()),
             kind=kind,
             project_id=project_id,
-            branch_id=branch_id,
             parent_run_id=str(parent_run_id) if parent_run_id is not None else None,
             idempotency_scope=idempotency_scope,
             idempotency_key=idempotency_key,
             request_fingerprint=fingerprint,
             request_json=safe_request,
-            input_mode=input_mode,
-            pinned_instance_id=pinned_instance_id,
-            input_lease_expires_at=func.clock_timestamp() + timedelta(seconds=self.lease_seconds)
-            if input_mode == VOLATILE
-            else None,
             input_set_id=input_set_id,
             config_version=config_version,
             toolchain_version=toolchain_version,
@@ -418,42 +343,6 @@ class JobStore:
             session.flush()
         return cast(StoredJob, entity_dict(job))
 
-    def requeue_options(self, job_id: UUID | str) -> bool:
-        # 同步选项的明确终止失败可重试，沿用原截止时间和总尝试上限。
-        with self.db.fact_session() as session:
-            job = session.get(RuntimeJob, str(job_id))
-            if job and job.parent_run_id:
-                parent = session.get(RuntimeJob, job.parent_run_id, with_for_update=True, populate_existing=True)
-                if parent.run_lifecycle != ACTIVE:
-                    return False
-            result = session.execute(
-                update(RuntimeJob)
-                .where(
-                    RuntimeJob.job_id == str(job_id),
-                    RuntimeJob.kind == QUERY_OPTIONS,
-                    RuntimeJob.status == FAILED,
-                    RuntimeJob.attempt_no < RuntimeJob.max_attempts,
-                    RuntimeJob.deadline_at > func.clock_timestamp(),
-                    RuntimeJob.error_code != INVALID_QUERY,
-                    ~select(RuntimeAttempt.attempt_id)
-                    .where(
-                        RuntimeAttempt.job_id == RuntimeJob.job_id,
-                        RuntimeAttempt.execution_stage == EXTERNAL,
-                        RuntimeAttempt.stop_confirmed_at.is_(None),
-                    )
-                    .exists(),
-                )
-                .values(
-                    status=QUEUED,
-                    current_attempt_id=None,
-                    available_at=func.clock_timestamp(),
-                    finished_at=None,
-                    error_code=None,
-                    error_detail=None,
-                )
-            )
-            return result.rowcount == 1
-
     def claim(
         self,
         worker_id: UUID | str,
@@ -464,7 +353,7 @@ class JobStore:
         kinds: list[str] | None = None,
         job_id: UUID | str | None = None,
     ) -> LeasedJob | None:
-        # 短事务领取一个任务，跳过其他 worker 已锁住的任务；VOLATILE 输入必须仍有效。
+        # 短事务领取一个任务，跳过其他 worker 已锁住的任务。
         with self.db.fact_session() as session:
             versions = config_versions if config_versions is not None else [config_version]
             job = session.scalar(
@@ -476,15 +365,8 @@ class JobStore:
                     RuntimeJob.config_version.in_(versions),
                     RuntimeJob.toolchain_version == toolchain_version,
                     true() if kinds is None else RuntimeJob.kind.in_(kinds),
-                    # 同步请求只认领自己的记录，不能执行另一个请求的查询。
+                    # 指定任务时只认领该记录。
                     true() if job_id is None else RuntimeJob.job_id == str(job_id),
-                    or_(
-                        RuntimeJob.input_mode == DURABLE,
-                        and_(
-                            RuntimeJob.pinned_instance_id == str(worker_id),
-                            RuntimeJob.input_lease_expires_at > func.clock_timestamp(),
-                        ),
-                    ),
                 )
                 .order_by(RuntimeJob.available_at, RuntimeJob.created_at)
                 .limit(1)
@@ -530,7 +412,6 @@ class JobStore:
                 RuntimeAttempt.lease_token == str(token),
                 RuntimeAttempt.lease_expires_at > func.clock_timestamp(),
                 RuntimeJob.deadline_at > func.clock_timestamp(),
-                or_(RuntimeJob.input_mode == DURABLE, RuntimeJob.input_lease_expires_at > func.clock_timestamp()),
             )
             .with_for_update(of=(RuntimeJob, RuntimeAttempt))
             .execution_options(populate_existing=True)
@@ -559,23 +440,6 @@ class JobStore:
             )
             return True
 
-    def heartbeat_inputs(self, worker_id: UUID | str, job_ids: list[str] | None = None) -> int:
-        # 排队等待期也需要输入续租；已经过期的输入租约不能通过迟到心跳复活。
-        with self.db.session() as session:
-            result = session.execute(
-                update(RuntimeJob)
-                .where(
-                    RuntimeJob.input_mode == VOLATILE,
-                    RuntimeJob.pinned_instance_id == str(worker_id),
-                    RuntimeJob.status.in_((QUEUED, RUNNING)),
-                    RuntimeJob.input_lease_expires_at > func.clock_timestamp(),
-                    RuntimeJob.deadline_at > func.clock_timestamp(),
-                    true() if job_ids is None else RuntimeJob.job_id.in_(job_ids),
-                )
-                .values(input_lease_expires_at=func.clock_timestamp() + timedelta(seconds=self.lease_seconds))
-            )
-            return result.rowcount
-
     def phase(
         self,
         job_id: UUID | str,
@@ -590,12 +454,6 @@ class JobStore:
             if not job:
                 return False
             session.execute(update(RuntimeJob).where(RuntimeJob.job_id == str(job_id)).values(phase=phase))
-            if job["request_json"].get("releaseId"):
-                session.execute(
-                    update(Release)
-                    .where(Release.run_id == str(job_id), Release.state.in_((PREPARING, BUILDING, VALIDATING)))
-                    .values(state=phase)
-                )
             if external:
                 session.execute(
                     update(RuntimeAttempt)
@@ -647,20 +505,15 @@ class JobStore:
         self,
         job_id: UUID | str,
         token: UUID | str,
-        payload: JsonObject | None = None,
         *,
+        succeeded: bool = True,
+        error_code: str | None = None,
         output_set_id: str | None = None,
-        stdout_tail: str = "",
-        stderr_tail: str = "",
-        exit_code: int = 0,
-        output_truncated: bool = False,
         seal: Callable[[str, Session], None] | None = None,
-        publish: Callable[[Session, StoredJob, str], None] | None = None,
     ) -> bool:
-        # 发布产物、结果和终态共用一个事务；过期 worker 无权发布任何内容。
-        encoded = json.dumps(payload or {}, ensure_ascii=False, separators=(",", ":"))
-        if len(encoded.encode()) > self.max_result_bytes:
-            raise ValueError("Job result exceeds configured size limit")
+        # 产物封存和终态共用一个事务；过期 worker 无权提交。
+        if not succeeded:
+            return self.fail(job_id, token, error_code or "EXECUTION_FAILED")
         try:
             with self.db.fact_session() as session:
                 job = self._authorized(session, job_id, token)
@@ -690,8 +543,6 @@ class JobStore:
                     self._release_project(session, job_id)
                     return True
                 if output_set_id is not None:
-                    if job["input_mode"] == VOLATILE:
-                        raise ValueError("Volatile resources cannot publish durable project artifacts")
                     output = session.get(ArtifactSet, output_set_id, with_for_update=True, populate_existing=True)
                     if not output or output.producer_attempt_id != job["attempt_id"] or output.kind != EXECUTION:
                         raise ValueError("Output must belong to the authorized attempt")
@@ -723,25 +574,6 @@ class JobStore:
 
                         seal = ArtifactStore(self.db).seal
                     seal(output_set_id, session)
-                session.add(
-                    JobResult(
-                        job_id=str(job_id),
-                        attempt_id=job["attempt_id"],
-                        payload_json=payload or {},
-                        stdout_tail=stdout_tail.encode()[-self.max_diagnostic_bytes :].decode(errors="ignore"),
-                        stderr_tail=stderr_tail.encode()[-self.max_diagnostic_bytes :].decode(errors="ignore"),
-                        exit_code=exit_code,
-                        output_truncated=output_truncated
-                        or len(stdout_tail.encode()) > self.max_diagnostic_bytes
-                        or len(stderr_tail.encode()) > self.max_diagnostic_bytes,
-                    )
-                )
-                session.flush()
-                # releaseId 候选在封存事务内发布；buildId 构建由任务终态触发器更新构建记录。
-                if job["kind"] == BUILD_RUN and job["request_json"].get("releaseId"):
-                    if publish is None:
-                        raise ValueError("Publication completion requires its transaction coordinator")
-                    publish(session, job, cast(str, output_set_id))
                 # 封存校验可能耗时；提交前重新 fencing，失效时连同已封存文件状态一起回滚。
                 if not self._authorized(session, job_id, token):
                     raise _FinishLeaseLost
@@ -769,7 +601,7 @@ class JobStore:
                         .where(RuntimeJob.job_id == job["parent_run_id"])
                         .values(run_lifecycle=CLEANED)
                     )
-                    # schema 删除已经确认；保留任务/结果与幂等墓碑，将无引用文件交给 GC。
+                    # schema 删除已经确认；保留任务与幂等墓碑，将无引用文件交给 GC。
                     session.execute(
                         update(RuntimeJob)
                         .where(
@@ -781,24 +613,6 @@ class JobStore:
                             ~select(Build.build_id).where(Build.run_id == RuntimeJob.parent_run_id).exists(),
                         )
                         .values(input_set_id=None, output_set_id=None)
-                    )
-                if job["kind"] == DBT_COMMAND and output_set_id is not None:
-                    # 保留 SQL NULL 等值比较语义；没有输入集合不代表匹配无源码的项目。
-                    session.execute(
-                        update(RuntimeProject)
-                        .where(
-                            RuntimeProject.project_id == job["project_id"],
-                            RuntimeProject.config_version == job["config_version"],
-                            or_(
-                                RuntimeProject.source_set_id
-                                == literal(job["input_set_id"], type_=RuntimeProject.source_set_id.type),
-                                RuntimeProject.source_set_id
-                                == select(ArtifactSet.source_set_id)
-                                .where(ArtifactSet.set_id == job["input_set_id"])
-                                .scalar_subquery(),
-                            ),
-                        )
-                        .values(current_output_set_id=output_set_id, revision=RuntimeProject.revision + 1)
                     )
                 self._release_project(session, job_id)
                 return True
@@ -838,11 +652,6 @@ class JobStore:
                 )
             )
 
-            session.execute(
-                update(Release)
-                .where(Release.run_id == str(job_id), Release.state.not_in((PUBLISHED, SUPERSEDED)))
-                .values(state=FAILED, error_code=error_code)
-            )
             self._release_project(session, job_id)
             return True
 
@@ -855,10 +664,6 @@ class JobStore:
                     RuntimeJob.status.in_((QUEUED, RUNNING)),
                     or_(
                         RuntimeJob.deadline_at <= func.clock_timestamp(),
-                        and_(
-                            RuntimeJob.input_mode == VOLATILE,
-                            RuntimeJob.input_lease_expires_at <= func.clock_timestamp(),
-                        ),
                         select(RuntimeAttempt.attempt_id)
                         .where(
                             RuntimeAttempt.attempt_id == RuntimeJob.current_attempt_id,
@@ -878,7 +683,6 @@ class JobStore:
                     else None
                 )
                 external = bool(attempt and attempt.execution_stage == EXTERNAL)
-                lost = job.input_mode == VOLATILE and job.input_lease_expires_at <= now
                 timed_out = job.deadline_at <= now
                 if attempt:
                     attempt.state = EXPIRED_UNCONFIRMED if external else STOPPED
@@ -886,12 +690,10 @@ class JobStore:
                     attempt.stop_confirmed_at = None if external else func.clock_timestamp()
                     session.flush()
                 retry = (
-                    not lost
-                    and not timed_out
-                    and job.input_mode == DURABLE
+                    not timed_out
                     and job.attempt_no < job.max_attempts
                     and job.retry_policy != NEVER
-                    and (not external or job.retry_policy == READ_ONLY)
+                    and not external
                 )
                 if retry:
                     job.status = QUEUED
@@ -900,23 +702,13 @@ class JobStore:
                     job.available_at = func.clock_timestamp() + timedelta(seconds=delay)
                     session.flush()
                 else:
-                    code = (
-                        INPUT_LOST if lost else TIMEOUT if timed_out else OUTCOME_UNKNOWN if external else LEASE_EXPIRED
-                    )
+                    code = TIMEOUT if timed_out else OUTCOME_UNKNOWN if external else LEASE_EXPIRED
                     job.status = FAILED
                     job.error_code = code
                     job.error_detail = {"externalOutcomeUnknown": external}
                     job.finished_at = func.clock_timestamp()
-                    # 先提交任务/attempt 修改到事务，再让发布状态和项目解锁读取最新状态。
+                    # 先提交任务/attempt 修改到事务，再让项目解锁读取最新状态。
                     session.flush()
-                    session.execute(
-                        update(Release)
-                        .where(
-                            Release.run_id == job.job_id,
-                            Release.state.not_in((PUBLISHED, SUPERSEDED)),
-                        )
-                        .values(state=FAILED, error_code=code)
-                    )
                     self._release_project(session, job.job_id)
             return len(jobs)
 
@@ -941,28 +733,23 @@ class JobStore:
             return True
 
     def reserve_cleanup(self, parent_run_id: UUID | str, toolchain_version: str = "default") -> StoredJob:
-        # 与查询受理锁同一 parent；阻止所有排队/执行任务和任何未确认停止的历史 attempt。
+        # 先与实时查询的会话锁互斥，再检查持久任务及未确认停止的历史 attempt。
         parent_run_id = str(parent_run_id)
         with self.db.fact_session() as session:
+            if not session.scalar(select(func.pg_try_advisory_xact_lock(
+                func.hashtextextended("query:" + parent_run_id, 0)
+            ))):
+                raise CleanupBlocked("run_cleanup_blocked")
             parent = session.get(RuntimeJob, parent_run_id, with_for_update=True)
             if not parent or parent.kind != BUILD_RUN:
                 raise ValueError("Run does not exist")
-            # 发布历史、复用关系和 v3 当前部署共同保护物理 run。
+            # 当前部署保护物理 run。
             protected = session.scalar(
                 select(
-                    or_(
-                        select(Release.release_id).where(Release.run_id == parent_run_id).exists(),
-                        select(ReleaseRelation.release_id)
-                        .where(ReleaseRelation.creator_run_id == parent_run_id)
-                        .exists(),
-                        select(DeploymentTarget.active_build_id)
-                        .join(
-                            Build,
-                            Build.build_id == DeploymentTarget.active_build_id,
-                        )
-                        .where(Build.run_id == parent_run_id)
-                        .exists(),
-                    )
+                    select(DeploymentTarget.active_build_id)
+                    .join(Build, Build.build_id == DeploymentTarget.active_build_id)
+                    .where(Build.run_id == parent_run_id)
+                    .exists()
                 )
             )
             if protected:

@@ -12,6 +12,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError, TimeoutError
 
 from dbt_metricflow_service.api.app import create_app
 from dbt_metricflow_service.runtime.worker import Worker
+from dbt_metricflow_service.storage.entities import ArtifactSet
 from tests.test_runtime_api import runtime_pair as runtime_pair
 
 
@@ -31,7 +32,7 @@ async def test_database_errors_return_503(runtime_pair, monkeypatch, error):
                                     base_url="http://test") as client:
             response = await client.post(
                 "/v3/query", params={"build_id": str(uuid4())}, headers={"Authorization": "Bearer test"},
-                json={"idempotencyKey": "query", "mode": "QUERY", "metricResourceIds": ["metric.orders"]},
+                json={"mode": "QUERY", "metricResourceIds": ["metric.orders"]},
             )
         assert response.status_code == 503
         assert response.json()["error"]["code"] == "STORAGE_UNAVAILABLE"
@@ -96,12 +97,14 @@ def test_gc_only_swallows_foreign_key_violation(runtime_pair):
     event.listen(runtime.db.engine, "before_cursor_execute", inject_failure, retval=True)
     try:
         assert runtime.artifacts.delete_unreferenced(source_id) is False
-        assert runtime.artifacts.metadata(source_id)["state"] == "SEALED"
+        with runtime.db.session() as session:
+            assert session.get(ArtifactSet, source_id).state == "SEALED"
         # 无关的唯一键冲突仍必须向外传播，且整个删除事务应回滚。
         unique_violation = True
         with pytest.raises(IntegrityError) as failure:
             runtime.artifacts.delete_unreferenced(source_id)
         assert failure.value.orig.pgcode == "23505"
-        assert runtime.artifacts.metadata(source_id)["state"] == "SEALED"
+        with runtime.db.session() as session:
+            assert session.get(ArtifactSet, source_id).state == "SEALED"
     finally:
         event.remove(runtime.db.engine, "before_cursor_execute", inject_failure)

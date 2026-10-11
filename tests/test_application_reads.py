@@ -70,17 +70,17 @@ def test_history_cursor_filters_and_concurrent_insert(store, deployments):
 
 def test_query_submission_does_not_read_deployments(store, tmp_path):
     app, build, jobs, artifacts = ready_build(store, tmp_path)
-    queries = QueryService(app, CatalogService(app.store, artifacts), jobs, inline_executor(jobs, app.toolchain))
+    queries = QueryService(app, CatalogService(app.store, artifacts), inline_executor())
     with reads(store.db) as statements:
         view = queries.submit(
             build.build_id,
-            QueryRequest(idempotencyKey=uuid4().hex, mode="EXPLAIN", metricResourceIds=["metric.revenue"]),
+            QueryRequest(mode="EXPLAIN", metricResourceIds=["metric.revenue"]),
             CALLER,
         )
-    assert view.state == "SUCCEEDED"
+    assert view.sql == "select 1"
     assert not any("engine_deployment_attempt" in statement for statement in statements)
-    # 受理、同步完成事务和结果元数据各读一次构建；可用性及目录校验复用快照。
-    assert sum("FROM engine_build" in statement for statement in statements) == 3
+    # 请求只加载一次构建；可用性、目录校验和响应元数据复用快照。
+    assert sum("FROM engine_build" in statement for statement in statements) == 1
 
 
 @pytest.mark.parametrize("deployments", [False, True])

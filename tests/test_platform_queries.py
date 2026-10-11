@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from dbt_metricflow_service.platform.models import PlatformQueryRequest
-from dbt_metricflow_service.platform.queries import query_options, serialize_rows, validate_query
+from dbt_metricflow_service.platform.queries import available_dimensions, serialize_rows, validate_query
 
 
 class FakeEngine:
@@ -25,10 +25,10 @@ class FakeEngine:
         return object()
 
 
-def test_multi_metric_options_return_common_dimensions_and_time_tokens() -> None:
-    options = query_options(FakeEngine(), ("revenue", "orders"))
-    assert options["dimensions"][0]["token"] == "customer__region"
-    assert {item["token"] for item in options["timeDimensions"]} == {
+def test_multi_metric_available_dimensions_return_common_dimensions_and_time_tokens() -> None:
+    available = available_dimensions(FakeEngine(), ("revenue", "orders"))
+    assert available["dimensions"][0]["token"] == "customer__region"
+    assert {item["token"] for item in available["timeDimensions"]} == {
         "metric_time__day", "metric_time__month",
     }
 
@@ -45,14 +45,14 @@ def test_dimension_values_are_bounded_and_typed() -> None:
 
 def test_query_rejects_unlisted_filter_operator_and_foreign_run() -> None:
     request = PlatformQueryRequest.model_validate({
-        "runId": "a" * 32, "idempotencyKey": "key", "mode": "QUERY", "metrics": ["revenue"],
+        "runId": "a" * 32, "mode": "QUERY", "metrics": ["revenue"],
         "groupBy": [], "filters": [{"field": "region", "operator": "DROP", "value": "A"}],
     })
     with pytest.raises(ValueError):
         validate_query(request, {"metrics": [{"name": "revenue"}], "dimensions": [], "timeDimensions": []})
     with pytest.raises(ValidationError):
         PlatformQueryRequest.model_validate({
-            "runId": "a" * 32, "idempotencyKey": "key", "mode": "QUERY", "metrics": ["revenue"],
+            "runId": "a" * 32, "mode": "QUERY", "metrics": ["revenue"],
             "remote": "untrusted",
         })
 

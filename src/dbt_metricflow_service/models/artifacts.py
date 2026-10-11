@@ -28,14 +28,7 @@ class ResourceKind(StrEnum):
 
 class BindingMode(StrEnum):
     BUILT = "BUILT"
-    REUSED = "REUSED"
     EXTERNAL = "EXTERNAL"
-
-
-class BuildMode(StrEnum):
-    SEMANTIC_ONLY = "SEMANTIC_ONLY"
-    SELECTIVE_BUILD = "SELECTIVE_BUILD"
-    FULL_BUILD = "FULL_BUILD"
 
 
 class RelationName(Contract):
@@ -53,15 +46,6 @@ class RelationBinding(Contract):
     mode: BindingMode
     definition_digest: str = Field(pattern="^[a-f0-9]{64}$")
     verified_at: datetime
-
-
-class BuildPlan(Contract):
-    # 选择集合与复用集合分区覆盖本次所有物理模型；理由用于发布审计。
-    build_mode: BuildMode
-    selected_native_ids: list[str]
-    reuse_native_ids: list[str]
-    reasons: list[str]
-    relation_bindings: list[RelationBinding] = Field(default_factory=list)
 
 
 class MetricAttributes(Contract):

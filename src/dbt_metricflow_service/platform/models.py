@@ -32,7 +32,6 @@ class PlatformQueryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     run_id: UUID = Field(alias="runId")
-    idempotency_key: str = Field(alias="idempotencyKey")
     mode: QueryMode
     metrics: list[str] = Field(default_factory=list)
     group_by: list[str] = Field(default_factory=list, alias="groupBy")

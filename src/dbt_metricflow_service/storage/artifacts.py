@@ -18,8 +18,6 @@ from dbt_metricflow_service.models.payloads import JsonObject
 from dbt_metricflow_service.storage.entities import (
     ArtifactFile,
     ArtifactSet,
-    Branch,
-    Release,
     RuntimeAttempt,
     RuntimeJob,
     RuntimeProject,
@@ -52,11 +50,8 @@ EXCLUDED_PARTS = frozenset({
     "partial_parse.msgpack", "request.json", "project-path.json", ".env",
 })
 TARGET_FILES = frozenset({
-    "manifest.json", "semantic_manifest.json", "run_results.json", "catalog.json",
-    "published_catalog.json", "publication_evidence.json", "publication_state.json",
-    "sources.json",
+    "manifest.json", "semantic_manifest.json", "catalog.json", "published_catalog.json",
 })
-TARGET_SUBDIRECTORIES = frozenset({"compiled", "run"})
 DELETING = "DELETING"
 LIVE_ATTEMPT_STATES = ("EXECUTING", "EXPIRED_UNCONFIRMED")
 
@@ -136,7 +131,7 @@ def _files(directory: Path, kind: str, max_file_bytes: int) -> list[tuple[str, P
     log_path = _relative(config.get("log-path", "logs")).as_posix()
     inputs.add(packages)
     if kind == EXECUTION:
-        inputs.update(f"{target}/{name}" for name in TARGET_FILES | TARGET_SUBDIRECTORIES)
+        inputs.update(f"{target}/{name}" for name in TARGET_FILES)
     result: dict[str, Path] = {}
 
     def visit(path: Path, ancestry: frozenset[Path]) -> None:
@@ -228,7 +223,6 @@ class ArtifactStore:
                 toolchain_version=metadata.get("toolchain_version", "1"),
                 format_version=metadata.get("format_version", "1"), content_digest="", file_count=len(files),
                 raw_bytes=total, validation_json=metadata.get("validation_json", {}),
-                catalog_json=metadata.get("catalog_json", {}), metadata_json=metadata,
             )
             session.add(artifact_set)
             # 先写父集合，随后逐文件 flush，保持外键顺序与有界内存。
@@ -252,13 +246,6 @@ class ArtifactStore:
             if producer_attempt_id is None:
                 self.seal(set_id, session)
         return set_id
-
-    def metadata(self, set_id: str) -> JsonObject:
-        with self.database.session() as session:
-            row = entity_dict(session.get(ArtifactSet, set_id))
-            if row is None:
-                raise ValueError("artifact set does not exist")
-            return {**row["metadata"], **row}
 
     def seal(self, set_id: str, session: Session) -> None:
         # 调用方负责租约校验；同一事务锁定集合并核对完整内容后才能发布。
@@ -326,11 +313,8 @@ class ArtifactStore:
                     return False
                 referenced = or_(
                     exists().where(or_(RuntimeJob.input_set_id == set_id, RuntimeJob.output_set_id == set_id)),
-                    exists().where(or_(RuntimeProject.source_set_id == set_id,
-                                       RuntimeProject.current_output_set_id == set_id)),
+                    exists().where(RuntimeProject.source_set_id == set_id),
                     exists().where(ArtifactSet.source_set_id == set_id),
-                    exists().where(Release.artifact_set_id == set_id),
-                    exists().where(Branch.base_input_set_id == set_id),
                     exists().where(RuntimeAttempt.attempt_id == ArtifactSet.producer_attempt_id,
                                    ArtifactSet.set_id == set_id, RuntimeAttempt.state.in_(LIVE_ATTEMPT_STATES)),
                 )

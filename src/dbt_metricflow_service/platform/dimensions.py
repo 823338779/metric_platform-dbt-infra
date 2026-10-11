@@ -1,10 +1,10 @@
-"""由原生选项生成固定构建和指标集合的公开选项身份。"""
+"""由原生可用维度生成固定构建和指标集合的公开维度选项身份。"""
 
 import hashlib
 import json
 
 from ..models.artifacts import ResourceKind
-from ..models.payloads import AvailableDimensions, JsonObject, QueryOption
+from ..models.payloads import AvailableDimensions, DimensionOption, JsonObject
 
 UTF8 = "utf-8"
 PATH_SEPARATOR = "__"
@@ -21,12 +21,12 @@ GRAIN_LABELS = {
 }
 
 
-def map_options(
+def map_available_dimensions(
     build_id: str, metric_ids: list[str], catalog: JsonObject, native: JsonObject
 ) -> tuple[AvailableDimensions, dict[str, str]]:
     indexed = {item["resourceId"]: item for item in catalog["resources"]}
     selected = sorted(set(metric_ids))
-    output: list[QueryOption] = []
+    output: list[DimensionOption] = []
     mapping: dict[str, str] = {}
     # 原生路径只保存在服务映射内；每个 join 路径保持独立选项身份。
     for entry in [*native["dimensions"], *native["timeDimensions"]]:

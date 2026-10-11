@@ -1,13 +1,11 @@
-"""资源身份映射、选项约束与固定版本幂等。"""
+"""资源身份映射、选项约束与固定版本实时查询。"""
 
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from threading import Barrier
-from uuid import uuid4
 
 import pytest
 
-from dbt_metricflow_service.application.errors import ServiceError
 from dbt_metricflow_service.application.queries import QueryService
 from dbt_metricflow_service.models.queries import AvailableDimensionsRequest
 from dbt_metricflow_service.models.queries import QueryRequest as PublishedQueryRequest
@@ -33,20 +31,20 @@ def query_service(store, tmp_path):
     catalog = build().model_dump(mode="json", by_alias=True)
     catalogs = CatalogService(builds.store, artifacts)
     catalogs.read_build = lambda build: deepcopy(catalog)
-    service = QueryService(builds, catalogs, jobs, inline_executor(jobs, builds.toolchain))
+    service = QueryService(builds, catalogs, inline_executor())
     request = AvailableDimensionsRequest(metricResourceIds=["metric.sample.orders"])
-    service.fixture_options = service.available_dimensions(view.build_id, request, "platform")
+    service.fixture_available_dimensions = service.available_dimensions(view.build_id, request, "platform")
     return service, jobs.get(record["run_id"]), {"build_id": str(view.build_id)}
 
 
-def test_options_are_versioned_and_do_not_merge_paths(store, tmp_path):
+def test_available_dimensions_are_versioned_and_do_not_merge_paths(store, tmp_path):
     service, job, release = query_service(store, tmp_path)
-    options = service.fixture_options.dimensions
-    assert len({item["optionId"] for item in options}) == 3
-    assert all("token" not in item for item in options)
-    assert next(item for item in options if item["granularities"])["resourceId"] is None
-    assert next(item for item in options if item["granularities"])["operators"] == []
-    assert len({item["displayName"] for item in options}) == 3
+    dimensions = service.fixture_available_dimensions.dimensions
+    assert len({item["optionId"] for item in dimensions}) == 3
+    assert all("token" not in item for item in dimensions)
+    assert next(item for item in dimensions if item["granularities"])["resourceId"] is None
+    assert next(item for item in dimensions if item["granularities"])["operators"] == []
+    assert len({item["displayName"] for item in dimensions}) == 3
 
 
 @pytest.mark.parametrize(
@@ -60,65 +58,40 @@ def test_query_rejects_parameters_from_another_mode(store, tmp_path, extra):
     service, job, release = query_service(store, tmp_path)
     with pytest.raises(ValueError):
         PublishedQueryRequest(
-            idempotencyKey=uuid4().hex, mode="QUERY", metricResourceIds=["metric.sample.orders"], **extra
+            mode="QUERY", metricResourceIds=["metric.sample.orders"], **extra
         )
 
 
-def test_query_pins_run_and_retry_survives_replacement(store, tmp_path):
+def test_query_pins_run_and_reexecutes_after_replacement(store, tmp_path):
     service, job, release = query_service(store, tmp_path)
-    request = PublishedQueryRequest(
-        idempotencyKey=uuid4().hex, mode="QUERY", metricResourceIds=["metric.sample.orders"]
-    )
-    accepted = service.submit(release["build_id"], request, "platform")
-    saved = service.jobs.get(accepted.query_id)
-    assert saved["parent_run_id"] == job["job_id"]
-    assert saved["request_json"]["engineRequest"]["metrics"] == ["orders"]
+    request = PublishedQueryRequest(mode="QUERY", metricResourceIds=["metric.sample.orders"])
+    first = service.submit(release["build_id"], request, "platform")
+    assert service.execute.calls[-1][0]["run_id"] == job["job_id"]
+    assert service.execute.calls[-1][1]["request"]["metrics"] == ["orders"]
+    count = len(service.execute.calls)
     ready_build(store, tmp_path)
-    assert service.submit(release["build_id"], request, "platform") == accepted
-    assert (
-        service.submit(
-            release["build_id"], request.model_copy(update={"idempotency_key": uuid4().hex}), "platform"
-        ).build_id
-        == accepted.build_id
-    )
-    with pytest.raises(ServiceError):
-        service.submit(release["build_id"], request.model_copy(update={"limit": 5}), "platform")
+    second = service.submit(release["build_id"], request, "platform")
+    assert second.build_id == first.build_id
+    assert len(service.execute.calls) == count + 1
+    service.submit(release["build_id"], request.model_copy(update={"limit": 5}), "platform")
+    assert service.execute.calls[-1][1]["request"]["limit"] == 5
 
 
-def test_concurrent_same_key_admits_one_query(store, tmp_path):
+def test_concurrent_identical_requests_both_execute(store, tmp_path):
     service, job, release = query_service(store, tmp_path)
-    request = PublishedQueryRequest(
-        idempotencyKey=uuid4().hex, mode="QUERY", metricResourceIds=["metric.sample.orders"]
-    )
+    request = PublishedQueryRequest(mode="QUERY", metricResourceIds=["metric.sample.orders"])
     rendezvous = Barrier(2)
     original = service.catalogs.read_build
 
-    def options(*args):
+    def read_catalog(*args):
         result = original(*args)
         rendezvous.wait(timeout=5)
         return result
 
-    service.catalogs.read_build = options
+    service.catalogs.read_build = read_catalog
+    count = len(service.execute.calls)
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [executor.submit(service.submit, release["build_id"], request, "platform") for _ in range(2)]
         results = [future.result(timeout=10) for future in futures]
-    assert results[0] == results[1]
-
-
-def test_retry_recovers_admission_committed_between_initial_lookup_and_version_check(store, tmp_path, monkeypatch):
-    service, job, release = query_service(store, tmp_path)
-    request = PublishedQueryRequest(
-        idempotencyKey=uuid4().hex, mode="QUERY", metricResourceIds=["metric.sample.orders"]
-    )
-    accepted = service.submit(release["build_id"], request, "platform")
-    ready_build(store, tmp_path)
-    original = service.jobs.by_key
-    lookups = 0
-
-    def first_lookup_preceded_commit(*args):
-        nonlocal lookups
-        lookups += 1
-        return None if lookups == 1 else original(*args)
-
-    monkeypatch.setattr(service.jobs, "by_key", first_lookup_preceded_commit)
-    assert service.submit(release["build_id"], request, "platform") == accepted
+    assert all(result.build_id == results[0].build_id for result in results)
+    assert len(service.execute.calls) == count + 2

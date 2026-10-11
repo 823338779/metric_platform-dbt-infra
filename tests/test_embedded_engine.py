@@ -250,11 +250,11 @@ async def test_metricflow_success_does_not_use_command_exit_codes(tmp_path, monk
     assert result.payload == {"queryCapability": True}
 
 
-async def test_metricflow_invalid_options_returns_business_error_without_exit_code(tmp_path, monkeypatch):
+async def test_metricflow_invalid_available_dimensions_returns_business_error_without_exit_code(tmp_path, monkeypatch):
     import dbt_metricflow_service.platform.metricflow as module
 
     def execute(project, profiles, data):
-        raise module.InvalidOptions(SECRET)
+        raise module.InvalidDimensionsRequest(SECRET)
 
     monkeypatch.setattr(module, "execute_programmatic", execute)
     request = MetricFlowRequest(
@@ -288,7 +288,7 @@ async def test_programmatic_request_and_result_stay_in_memory(tmp_path, monkeypa
     )
     executor = RuntimeExecutor(settings, SimpleNamespace(phase=lambda *args, **kwargs: True), None)
     job = {
-        "job_id": PROJECT, "lease_token": PROJECT, "kind": "QUERY_OPTIONS", "project_id": PROJECT,
+        "job_id": PROJECT, "lease_token": PROJECT, "kind": "BUILD_RUN", "project_id": PROJECT,
         "schema_name": SCHEMA, "profile_binding_id": PROJECT,
     }
 
@@ -303,8 +303,8 @@ async def test_programmatic_request_and_result_stay_in_memory(tmp_path, monkeypa
     assert list(tmp_path.iterdir()) == []
 
 
-@pytest.mark.parametrize("invalid_options", [True, False])
-async def test_programmatic_errors_do_not_write_control_files(tmp_path, monkeypatch, invalid_options):
+@pytest.mark.parametrize("invalid_dimensions", [True, False])
+async def test_programmatic_errors_do_not_write_control_files(tmp_path, monkeypatch, invalid_dimensions):
     import dbt_metricflow_service.platform.metricflow as module
 
     settings = SimpleNamespace(
@@ -312,17 +312,17 @@ async def test_programmatic_errors_do_not_write_control_files(tmp_path, monkeypa
     )
     executor = RuntimeExecutor(settings, SimpleNamespace(phase=lambda *args, **kwargs: True), None)
     job = {
-        "job_id": PROJECT, "lease_token": PROJECT, "kind": "QUERY_OPTIONS", "project_id": PROJECT,
+        "job_id": PROJECT, "lease_token": PROJECT, "kind": "BUILD_RUN", "project_id": PROJECT,
         "schema_name": SCHEMA, "profile_binding_id": PROJECT,
     }
 
     def execute(project, profiles, data):
-        raise module.InvalidOptions(SECRET) if invalid_options else ConnectionError(SECRET)
+        raise module.InvalidDimensionsRequest(SECRET) if invalid_dimensions else ConnectionError(SECRET)
 
     monkeypatch.setattr(module, "execute_programmatic", execute)
     with pytest.raises(ExecutionError) as error:
         await executor._metricflow(job, tmp_path, {"mode": "OPTIONS", "metrics": ["missing"]})
-    assert error.value.code == ("INVALID_QUERY" if invalid_options else "COMMAND_FAILED")
+    assert error.value.code == ("INVALID_QUERY" if invalid_dimensions else "COMMAND_FAILED")
     assert SECRET not in str(error.value.payload)
     assert list(tmp_path.iterdir()) == []
 
@@ -343,7 +343,7 @@ async def test_memory_result_preserves_shape_and_utf8_size_limits(tmp_path, monk
     )
     executor = RuntimeExecutor(settings, SimpleNamespace(phase=lambda *args, **kwargs: True), None)
     job = {
-        "job_id": PROJECT, "lease_token": PROJECT, "kind": "QUERY_OPTIONS", "project_id": PROJECT,
+        "job_id": PROJECT, "lease_token": PROJECT, "kind": "BUILD_RUN", "project_id": PROJECT,
         "schema_name": SCHEMA, "profile_binding_id": PROJECT,
     }
     monkeypatch.setattr(module, "execute_programmatic", lambda *args: value)

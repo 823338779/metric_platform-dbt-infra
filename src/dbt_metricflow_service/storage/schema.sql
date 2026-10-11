@@ -332,11 +332,9 @@ CREATE TABLE runtime_artifact_set (
     file_count integer DEFAULT 0 NOT NULL,
     raw_bytes bigint DEFAULT 0 NOT NULL,
     validation_json jsonb DEFAULT '{}'::jsonb NOT NULL,
-    catalog_json jsonb DEFAULT '{}'::jsonb NOT NULL,
-    metadata jsonb DEFAULT '{}'::jsonb NOT NULL,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     sealed_at timestamp with time zone,
-    CONSTRAINT runtime_artifact_set_kind_check CHECK ((kind = ANY (ARRAY['SOURCE'::text, 'EXECUTION'::text, 'VALIDATION_INPUT'::text]))),
+    CONSTRAINT runtime_artifact_set_kind_check CHECK ((kind = ANY (ARRAY['SOURCE'::text, 'EXECUTION'::text]))),
     CONSTRAINT runtime_artifact_set_state_check CHECK ((state = ANY (ARRAY['STAGING'::text, 'SEALED'::text, 'DELETING'::text])))
 );
 
@@ -346,7 +344,7 @@ COMMENT ON COLUMN runtime_artifact_set.project_id IS '所属逻辑项目';
 
 COMMENT ON COLUMN runtime_artifact_set.producer_attempt_id IS '创建该集合的 attempt，管理导入为空';
 
-COMMENT ON COLUMN runtime_artifact_set.kind IS 'SOURCE 项目源、EXECUTION 执行产物、VALIDATION_INPUT 封存的有界 YAML 操作正文';
+COMMENT ON COLUMN runtime_artifact_set.kind IS 'SOURCE 项目源、EXECUTION 执行产物';
 
 COMMENT ON COLUMN runtime_artifact_set.state IS '暂存、封存或删除中状态';
 
@@ -369,10 +367,6 @@ COMMENT ON COLUMN runtime_artifact_set.file_count IS '集合文件数量';
 COMMENT ON COLUMN runtime_artifact_set.raw_bytes IS '集合原始文件总字节数';
 
 COMMENT ON COLUMN runtime_artifact_set.validation_json IS '发布验证证据';
-
-COMMENT ON COLUMN runtime_artifact_set.catalog_json IS '从原生产物派生的可读取目录';
-
-COMMENT ON COLUMN runtime_artifact_set.metadata IS '不含本地路径和凭据的附加产物元数据';
 
 COMMENT ON COLUMN runtime_artifact_set.created_at IS '集合创建时间';
 
@@ -422,98 +416,6 @@ COMMENT ON COLUMN runtime_attempt.started_at IS '执行开始时间';
 
 COMMENT ON COLUMN runtime_attempt.finished_at IS '执行终结或被判定失联的时间';
 
-CREATE TABLE runtime_branch (
-    branch_id uuid NOT NULL,
-    project_id text NOT NULL,
-    git_ref text NOT NULL,
-    mode text NOT NULL,
-    status text NOT NULL,
-    base_commit_sha text,
-    base_release_id uuid,
-    observed_head_sha text,
-    active_release_id uuid,
-    latest_release_id uuid,
-    publication_sequence bigint DEFAULT 0 NOT NULL,
-    version bigint DEFAULT 1 NOT NULL,
-    binding_config jsonb DEFAULT '{}'::jsonb NOT NULL,
-    config_version text NOT NULL,
-    operation_key text,
-    operation_json jsonb,
-    signal_version bigint DEFAULT 0 NOT NULL,
-    processed_signal_version bigint DEFAULT 0 NOT NULL,
-    scan_token uuid,
-    scan_expires_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    base_input_set_id uuid,
-    production_base_release_id uuid,
-    CONSTRAINT runtime_branch_check CHECK (((mode <> 'PRODUCTION'::text) OR ((git_ref = 'refs/heads/main'::text) AND (status = 'ACTIVE'::text)))),
-    CONSTRAINT runtime_branch_git_ref_check CHECK ((git_ref ~~ 'refs/heads/%'::text)),
-    CONSTRAINT runtime_branch_mode_check CHECK ((mode = ANY (ARRAY['PRODUCTION'::text, 'PREVIEW'::text]))),
-    CONSTRAINT runtime_branch_status_check CHECK ((status = ANY (ARRAY['PROVISIONING'::text, 'ACTIVE'::text, 'DELETING'::text, 'DELETED'::text, 'FAILED'::text])))
-);
-
-COMMENT ON TABLE runtime_branch IS '独立 Git 分支身份、生命周期和权威发布指针';
-
-COMMENT ON COLUMN runtime_branch.branch_id IS '分支实例身份；删除后同名重建必须生成新值';
-
-COMMENT ON COLUMN runtime_branch.project_id IS '所属逻辑项目，参与所有跨表归属校验';
-
-COMMENT ON COLUMN runtime_branch.git_ref IS '受控仓库内完整分支引用';
-
-COMMENT ON COLUMN runtime_branch.mode IS '生产或开发预览的绑定用途';
-
-COMMENT ON COLUMN runtime_branch.status IS '分支创建、使用、删除及恢复状态';
-
-COMMENT ON COLUMN runtime_branch.base_commit_sha IS '登记时固定的差异比较源码基线';
-
-COMMENT ON COLUMN runtime_branch.base_release_id IS '与固定源码提交匹配的资源目录基线，没有对应发布时为空';
-
-COMMENT ON COLUMN runtime_branch.observed_head_sha IS '最近核实的远端分支提交';
-
-COMMENT ON COLUMN runtime_branch.active_release_id IS '本分支唯一当前发布，只由封存事务推进';
-
-COMMENT ON COLUMN runtime_branch.latest_release_id IS '本分支最近受理的候选，不代表发布成功';
-
-COMMENT ON COLUMN runtime_branch.publication_sequence IS '本分支最近受理序号，阻止旧候选覆盖新输入';
-
-COMMENT ON COLUMN runtime_branch.version IS '生命周期乐观锁版本';
-
-COMMENT ON COLUMN runtime_branch.binding_config IS '服务控制的执行绑定引用，不含凭据';
-
-COMMENT ON COLUMN runtime_branch.config_version IS '执行绑定的配置版本';
-
-COMMENT ON COLUMN runtime_branch.operation_key IS '创建或登记操作的项目内幂等键';
-
-COMMENT ON COLUMN runtime_branch.operation_json IS '固定操作输入，用于重试冲突检查和中断恢复';
-
-COMMENT ON COLUMN runtime_branch.signal_version IS '持久化待核对信号版本';
-
-COMMENT ON COLUMN runtime_branch.processed_signal_version IS '已核对的信号版本，避免扫描期间新信号丢失';
-
-COMMENT ON COLUMN runtime_branch.scan_token IS '当前扫描租约身份';
-
-COMMENT ON COLUMN runtime_branch.scan_expires_at IS '扫描租约到期时间';
-
-COMMENT ON COLUMN runtime_branch.created_at IS '分支身份登记时间';
-
-COMMENT ON COLUMN runtime_branch.base_input_set_id IS '登记时封存的固定源码基线，删除分支后仍保留引用';
-
-COMMENT ON COLUMN runtime_branch.production_base_release_id IS '登记时观察到的生产发布，仅用于判断生产是否推进';
-
-CREATE TABLE runtime_branch_event (
-    delivery_id text NOT NULL,
-    payload_digest text NOT NULL,
-    received_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL
-);
-
-COMMENT ON TABLE runtime_branch_event IS '已验证分支事件的持久幂等记录';
-
-COMMENT ON COLUMN runtime_branch_event.delivery_id IS 'Forgejo webhook delivery 身份';
-
-COMMENT ON COLUMN runtime_branch_event.payload_digest IS '事件正文摘要，防止同身份不同输入';
-
-COMMENT ON COLUMN runtime_branch_event.received_at IS '首次收到事件的时间';
-
 CREATE TABLE runtime_job (
     job_id uuid NOT NULL,
     kind text NOT NULL,
@@ -523,9 +425,6 @@ CREATE TABLE runtime_job (
     idempotency_key text,
     request_fingerprint text NOT NULL,
     request_json jsonb DEFAULT '{}'::jsonb NOT NULL,
-    input_mode text DEFAULT 'DURABLE'::text NOT NULL,
-    pinned_instance_id uuid,
-    input_lease_expires_at timestamp with time zone,
     input_set_id uuid,
     output_set_id uuid,
     config_version text NOT NULL,
@@ -546,24 +445,21 @@ CREATE TABLE runtime_job (
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     started_at timestamp with time zone,
     finished_at timestamp with time zone,
-    branch_id uuid,
     CONSTRAINT runtime_job_check CHECK (((idempotency_key IS NULL) = (idempotency_scope IS NULL))),
-    CONSTRAINT runtime_job_check1 CHECK (((input_mode = 'DURABLE'::text) OR ((pinned_instance_id IS NOT NULL) AND (input_lease_expires_at IS NOT NULL)))),
-    CONSTRAINT runtime_job_input_mode_check CHECK ((input_mode = ANY (ARRAY['DURABLE'::text, 'VOLATILE'::text]))),
-    CONSTRAINT runtime_job_kind_check CHECK ((kind = ANY (ARRAY['BUILD_RUN'::text, 'METRIC_QUERY'::text, 'DBT_COMMAND'::text, 'MF_COMMAND'::text, 'QUERY_OPTIONS'::text, 'RUN_CLEANUP'::text, 'DRAFT_VALIDATION'::text]))),
+    CONSTRAINT runtime_job_kind_check CHECK ((kind = ANY (ARRAY['BUILD_RUN'::text, 'RUN_CLEANUP'::text]))),
     CONSTRAINT runtime_job_max_attempts_check CHECK (((max_attempts >= 1) AND (max_attempts <= 3))),
-    CONSTRAINT runtime_job_retry_policy_check CHECK ((retry_policy = ANY (ARRAY['PREPARATION_ONLY'::text, 'READ_ONLY'::text, 'NEVER'::text]))),
+    CONSTRAINT runtime_job_retry_policy_check CHECK ((retry_policy = ANY (ARRAY['PREPARATION_ONLY'::text, 'NEVER'::text]))),
     CONSTRAINT runtime_job_run_lifecycle_check CHECK ((run_lifecycle = ANY (ARRAY['ACTIVE'::text, 'CLEANING'::text, 'CLEANED'::text]))),
     CONSTRAINT runtime_job_status_check CHECK ((status = ANY (ARRAY['QUEUED'::text, 'RUNNING'::text, 'SUCCEEDED'::text, 'FAILED'::text])))
 );
 
-COMMENT ON COLUMN runtime_job.job_id IS '公开任务标识，保留现有 run 和 query UUID';
+COMMENT ON COLUMN runtime_job.job_id IS '内部构建或清理任务标识';
 
-COMMENT ON COLUMN runtime_job.kind IS '执行种类；DRAFT_VALIDATION 仅解析和语义验证，不改变发布或默认产物';
+COMMENT ON COLUMN runtime_job.kind IS '构建或物理清理任务';
 
 COMMENT ON COLUMN runtime_job.project_id IS '所属逻辑项目';
 
-COMMENT ON COLUMN runtime_job.parent_run_id IS '查询或清理绑定的固定构建 run';
+COMMENT ON COLUMN runtime_job.parent_run_id IS '清理绑定的固定构建 run';
 
 COMMENT ON COLUMN runtime_job.idempotency_scope IS '幂等键的接口命名空间';
 
@@ -572,12 +468,6 @@ COMMENT ON COLUMN runtime_job.idempotency_key IS '调用方提供的幂等键';
 COMMENT ON COLUMN runtime_job.request_fingerprint IS '包含固定输入和配置版本的规范化请求摘要';
 
 COMMENT ON COLUMN runtime_job.request_json IS '排除临时 resources 和凭据的可重放参数';
-
-COMMENT ON COLUMN runtime_job.input_mode IS '输入为可持久恢复或仅驻接收实例内存';
-
-COMMENT ON COLUMN runtime_job.pinned_instance_id IS '持有 VOLATILE 输入的唯一实例';
-
-COMMENT ON COLUMN runtime_job.input_lease_expires_at IS '覆盖排队期和执行期的内存输入租约截止时间';
 
 COMMENT ON COLUMN runtime_job.input_set_id IS '受理时固定的输入集合';
 
@@ -619,44 +509,11 @@ COMMENT ON COLUMN runtime_job.started_at IS '首次实际领取时间';
 
 COMMENT ON COLUMN runtime_job.finished_at IS '任务最终结束时间';
 
-COMMENT ON COLUMN runtime_job.branch_id IS '发布、查询或草稿验证的固定分支；通用任务可为空';
-
-CREATE TABLE runtime_job_result (
-    job_id uuid NOT NULL,
-    attempt_id uuid NOT NULL,
-    payload_json jsonb DEFAULT '{}'::jsonb NOT NULL,
-    format_version text DEFAULT '1'::text NOT NULL,
-    stdout_tail text DEFAULT ''::text NOT NULL,
-    stderr_tail text DEFAULT ''::text NOT NULL,
-    exit_code integer,
-    output_truncated boolean DEFAULT false NOT NULL,
-    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL
-);
-
-COMMENT ON COLUMN runtime_job_result.job_id IS '结果所属任务';
-
-COMMENT ON COLUMN runtime_job_result.attempt_id IS '获准提交结果的实际执行';
-
-COMMENT ON COLUMN runtime_job_result.payload_json IS '遵循公开契约的列、行、SQL 和执行结果';
-
-COMMENT ON COLUMN runtime_job_result.format_version IS '结果格式版本';
-
-COMMENT ON COLUMN runtime_job_result.stdout_tail IS '已脱敏且有大小上限的标准输出尾部';
-
-COMMENT ON COLUMN runtime_job_result.stderr_tail IS '已脱敏且有大小上限的标准错误尾部';
-
-COMMENT ON COLUMN runtime_job_result.exit_code IS '实际子进程退出码';
-
-COMMENT ON COLUMN runtime_job_result.output_truncated IS '诊断输出是否发生截断';
-
-COMMENT ON COLUMN runtime_job_result.created_at IS '结果原子提交时间';
-
 CREATE TABLE runtime_project (
     project_id text NOT NULL,
     binding_config jsonb DEFAULT '{}'::jsonb NOT NULL,
     config_version text DEFAULT '1'::text NOT NULL,
     source_set_id uuid,
-    current_output_set_id uuid,
     busy_job_id uuid,
     revision bigint DEFAULT 0 NOT NULL
 );
@@ -669,77 +526,9 @@ COMMENT ON COLUMN runtime_project.config_version IS '连接和项目配置版本
 
 COMMENT ON COLUMN runtime_project.source_set_id IS '当前项目源码快照';
 
-COMMENT ON COLUMN runtime_project.current_output_set_id IS '当前源码版本最近成功的默认输出';
-
 COMMENT ON COLUMN runtime_project.busy_job_id IS '尚未确认停止的通用写任务';
 
 COMMENT ON COLUMN runtime_project.revision IS '项目指针的乐观并发版本';
-
-CREATE TABLE runtime_release (
-    release_id uuid NOT NULL,
-    project_id text NOT NULL,
-    sequence bigint NOT NULL,
-    idempotency_key text NOT NULL,
-    request_json jsonb NOT NULL,
-    baseline_release_id uuid,
-    run_id uuid,
-    artifact_set_id uuid,
-    state text DEFAULT 'PREPARING'::text NOT NULL,
-    build_mode text DEFAULT 'FULL_BUILD'::text NOT NULL,
-    catalog_digest text,
-    error_code text,
-    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    published_at timestamp with time zone,
-    branch_id uuid NOT NULL,
-    CONSTRAINT runtime_release_build_mode_check CHECK ((build_mode = ANY (ARRAY['SEMANTIC_ONLY'::text, 'SELECTIVE_BUILD'::text, 'FULL_BUILD'::text]))),
-    CONSTRAINT runtime_release_check CHECK (((state <> 'PUBLISHED'::text) OR ((run_id IS NOT NULL) AND (artifact_set_id IS NOT NULL) AND (published_at IS NOT NULL) AND (catalog_digest IS NOT NULL)))),
-    CONSTRAINT runtime_release_state_check CHECK ((state = ANY (ARRAY['PREPARING'::text, 'BUILDING'::text, 'VALIDATING'::text, 'PUBLISHED'::text, 'FAILED'::text, 'SUPERSEDED'::text])))
-);
-
-COMMENT ON COLUMN runtime_release.release_id IS '服务生成的不可变公开发布身份';
-
-COMMENT ON COLUMN runtime_release.project_id IS '发布所属逻辑项目';
-
-COMMENT ON COLUMN runtime_release.sequence IS '项目内受理序号';
-
-COMMENT ON COLUMN runtime_release.idempotency_key IS '固定候选输入的管理请求幂等键';
-
-COMMENT ON COLUMN runtime_release.request_json IS '固定源码摘要和配置引用，不含连接凭据';
-
-COMMENT ON COLUMN runtime_release.baseline_release_id IS '候选受理时的活动基线';
-
-COMMENT ON COLUMN runtime_release.run_id IS '执行本候选的固定构建任务';
-
-COMMENT ON COLUMN runtime_release.artifact_set_id IS '同事务封存的完整输出集合';
-
-COMMENT ON COLUMN runtime_release.state IS '业务发布状态，不以执行成功替代发布成功';
-
-COMMENT ON COLUMN runtime_release.build_mode IS '经过验证的全构建或复用模式';
-
-COMMENT ON COLUMN runtime_release.catalog_digest IS '完整展示文件原始字节 SHA256';
-
-COMMENT ON COLUMN runtime_release.error_code IS '发布前失败的稳定诊断码';
-
-COMMENT ON COLUMN runtime_release.created_at IS '候选受理时间';
-
-COMMENT ON COLUMN runtime_release.published_at IS '唯一发布事务完成时刻';
-
-COMMENT ON COLUMN runtime_release.branch_id IS '所属分支实例，发布序号和幂等键均在此范围内';
-
-CREATE TABLE runtime_release_relation (
-    release_id uuid NOT NULL,
-    native_id text NOT NULL,
-    creator_run_id uuid,
-    binding_json jsonb NOT NULL
-);
-
-COMMENT ON COLUMN runtime_release_relation.release_id IS '绑定所属发布快照';
-
-COMMENT ON COLUMN runtime_release_relation.native_id IS '绑定的原生模型或 source 身份';
-
-COMMENT ON COLUMN runtime_release_relation.creator_run_id IS '实际创建物理对象的 run，外部 source 为空';
-
-COMMENT ON COLUMN runtime_release_relation.binding_json IS '物理名称、复用模式、摘要与验证时间';
 
 ALTER TABLE ONLY engine_build
     ADD CONSTRAINT engine_build_pkey PRIMARY KEY (build_id);
@@ -783,63 +572,21 @@ ALTER TABLE ONLY runtime_attempt
 ALTER TABLE ONLY runtime_attempt
     ADD CONSTRAINT runtime_attempt_pkey PRIMARY KEY (attempt_id);
 
-ALTER TABLE ONLY runtime_branch_event
-    ADD CONSTRAINT runtime_branch_event_pkey PRIMARY KEY (delivery_id);
-
-ALTER TABLE ONLY runtime_branch
-    ADD CONSTRAINT runtime_branch_pkey PRIMARY KEY (branch_id);
-
-ALTER TABLE ONLY runtime_branch
-    ADD CONSTRAINT runtime_branch_project_id_branch_id_key UNIQUE (project_id, branch_id);
-
-ALTER TABLE ONLY runtime_branch
-    ADD CONSTRAINT runtime_branch_project_id_operation_key_key UNIQUE (project_id, operation_key);
-
 ALTER TABLE ONLY runtime_job
     ADD CONSTRAINT runtime_job_pkey PRIMARY KEY (job_id);
-
-ALTER TABLE ONLY runtime_job_result
-    ADD CONSTRAINT runtime_job_result_pkey PRIMARY KEY (job_id);
 
 ALTER TABLE ONLY runtime_project
     ADD CONSTRAINT runtime_project_pkey PRIMARY KEY (project_id);
 
-ALTER TABLE ONLY runtime_release
-    ADD CONSTRAINT runtime_release_pkey PRIMARY KEY (release_id);
-
-ALTER TABLE ONLY runtime_release
-    ADD CONSTRAINT runtime_release_project_id_branch_id_idempotency_key_key UNIQUE (project_id, branch_id, idempotency_key);
-
-ALTER TABLE ONLY runtime_release
-    ADD CONSTRAINT runtime_release_project_id_branch_id_release_id_key UNIQUE (project_id, branch_id, release_id);
-
-ALTER TABLE ONLY runtime_release
-    ADD CONSTRAINT runtime_release_project_id_branch_id_sequence_key UNIQUE (project_id, branch_id, sequence);
-
-ALTER TABLE ONLY runtime_release
-    ADD CONSTRAINT runtime_release_project_id_release_id_key UNIQUE (project_id, release_id);
-
-ALTER TABLE ONLY runtime_release_relation
-    ADD CONSTRAINT runtime_release_relation_pkey PRIMARY KEY (release_id, native_id);
-
-ALTER TABLE ONLY runtime_release
-    ADD CONSTRAINT runtime_release_run_id_key UNIQUE (run_id);
-
 CREATE INDEX engine_build_history ON engine_build USING btree (repository, created_at, build_id);
 
 CREATE INDEX runtime_attempt_unconfirmed ON runtime_attempt USING btree (job_id) WHERE ((state = 'EXPIRED_UNCONFIRMED'::text) AND (stop_confirmed_at IS NULL));
-
-CREATE UNIQUE INDEX runtime_branch_live_ref ON runtime_branch USING btree (project_id, git_ref) WHERE (status <> 'DELETED'::text);
-
-CREATE UNIQUE INDEX runtime_branch_production ON runtime_branch USING btree (project_id) WHERE (mode = 'PRODUCTION'::text);
 
 CREATE UNIQUE INDEX runtime_job_idempotency ON runtime_job USING btree (idempotency_scope, idempotency_key) WHERE (idempotency_key IS NOT NULL);
 
 CREATE INDEX runtime_job_parent ON runtime_job USING btree (parent_run_id, status);
 
 CREATE INDEX runtime_job_queue ON runtime_job USING btree (kind, available_at, created_at) WHERE (status = 'QUEUED'::text);
-
-CREATE INDEX runtime_release_relation_creator ON runtime_release_relation USING btree (creator_run_id);
 
 CREATE TRIGGER engine_attempt_change AFTER INSERT OR UPDATE OF deployment_status, reason, version, deployed_at ON engine_deployment_attempt FOR EACH ROW EXECUTE FUNCTION engine_record_change();
 
@@ -883,24 +630,6 @@ ALTER TABLE ONLY runtime_artifact_set
 ALTER TABLE ONLY runtime_attempt
     ADD CONSTRAINT runtime_attempt_job_id_fkey FOREIGN KEY (job_id) REFERENCES runtime_job(job_id);
 
-ALTER TABLE ONLY runtime_branch
-    ADD CONSTRAINT runtime_branch_base_input_set_id_fkey FOREIGN KEY (base_input_set_id) REFERENCES runtime_artifact_set(set_id);
-
-ALTER TABLE ONLY runtime_branch
-    ADD CONSTRAINT runtime_branch_project_id_base_release_id_fkey FOREIGN KEY (project_id, base_release_id) REFERENCES runtime_release(project_id, release_id);
-
-ALTER TABLE ONLY runtime_branch
-    ADD CONSTRAINT runtime_branch_project_id_branch_id_active_release_id_fkey FOREIGN KEY (project_id, branch_id, active_release_id) REFERENCES runtime_release(project_id, branch_id, release_id);
-
-ALTER TABLE ONLY runtime_branch
-    ADD CONSTRAINT runtime_branch_project_id_branch_id_latest_release_id_fkey FOREIGN KEY (project_id, branch_id, latest_release_id) REFERENCES runtime_release(project_id, branch_id, release_id);
-
-ALTER TABLE ONLY runtime_branch
-    ADD CONSTRAINT runtime_branch_project_id_fkey FOREIGN KEY (project_id) REFERENCES runtime_project(project_id);
-
-ALTER TABLE ONLY runtime_branch
-    ADD CONSTRAINT runtime_branch_project_id_production_base_release_id_fkey FOREIGN KEY (project_id, production_base_release_id) REFERENCES runtime_release(project_id, release_id);
-
 ALTER TABLE ONLY runtime_job
     ADD CONSTRAINT runtime_job_attempt_fk FOREIGN KEY (current_attempt_id) REFERENCES runtime_attempt(attempt_id);
 
@@ -914,49 +643,13 @@ ALTER TABLE ONLY runtime_job
     ADD CONSTRAINT runtime_job_parent_run_id_fkey FOREIGN KEY (parent_run_id) REFERENCES runtime_job(job_id);
 
 ALTER TABLE ONLY runtime_job
-    ADD CONSTRAINT runtime_job_project_id_branch_id_fkey FOREIGN KEY (project_id, branch_id) REFERENCES runtime_branch(project_id, branch_id);
-
-ALTER TABLE ONLY runtime_job
     ADD CONSTRAINT runtime_job_project_id_fkey FOREIGN KEY (project_id) REFERENCES runtime_project(project_id);
-
-ALTER TABLE ONLY runtime_job_result
-    ADD CONSTRAINT runtime_job_result_attempt_id_fkey FOREIGN KEY (attempt_id) REFERENCES runtime_attempt(attempt_id);
-
-ALTER TABLE ONLY runtime_job_result
-    ADD CONSTRAINT runtime_job_result_job_id_fkey FOREIGN KEY (job_id) REFERENCES runtime_job(job_id);
 
 ALTER TABLE ONLY runtime_project
     ADD CONSTRAINT runtime_project_busy_fk FOREIGN KEY (busy_job_id) REFERENCES runtime_job(job_id);
 
 ALTER TABLE ONLY runtime_project
-    ADD CONSTRAINT runtime_project_output_fk FOREIGN KEY (current_output_set_id) REFERENCES runtime_artifact_set(set_id);
-
-ALTER TABLE ONLY runtime_project
     ADD CONSTRAINT runtime_project_source_fk FOREIGN KEY (source_set_id) REFERENCES runtime_artifact_set(set_id);
-
-ALTER TABLE ONLY runtime_release
-    ADD CONSTRAINT runtime_release_artifact_set_id_fkey FOREIGN KEY (artifact_set_id) REFERENCES runtime_artifact_set(set_id);
-
-ALTER TABLE ONLY runtime_release
-    ADD CONSTRAINT runtime_release_baseline_release_id_fkey FOREIGN KEY (baseline_release_id) REFERENCES runtime_release(release_id);
-
-ALTER TABLE ONLY runtime_release
-    ADD CONSTRAINT runtime_release_project_id_branch_id_baseline_release_id_fkey FOREIGN KEY (project_id, branch_id, baseline_release_id) REFERENCES runtime_release(project_id, branch_id, release_id);
-
-ALTER TABLE ONLY runtime_release
-    ADD CONSTRAINT runtime_release_project_id_branch_id_fkey FOREIGN KEY (project_id, branch_id) REFERENCES runtime_branch(project_id, branch_id);
-
-ALTER TABLE ONLY runtime_release
-    ADD CONSTRAINT runtime_release_project_id_fkey FOREIGN KEY (project_id) REFERENCES runtime_project(project_id);
-
-ALTER TABLE ONLY runtime_release_relation
-    ADD CONSTRAINT runtime_release_relation_creator_run_id_fkey FOREIGN KEY (creator_run_id) REFERENCES runtime_job(job_id);
-
-ALTER TABLE ONLY runtime_release_relation
-    ADD CONSTRAINT runtime_release_relation_release_id_fkey FOREIGN KEY (release_id) REFERENCES runtime_release(release_id);
-
-ALTER TABLE ONLY runtime_release
-    ADD CONSTRAINT runtime_release_run_id_fkey FOREIGN KEY (run_id) REFERENCES runtime_job(job_id);
 
 -- 变化序号与业务事实在同一事务中递增。
 INSERT INTO engine_change_counter(singleton, value) VALUES (true, 0);

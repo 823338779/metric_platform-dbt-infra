@@ -44,7 +44,7 @@ def create_app(settings: Settings) -> FastAPI:
                                            partial(remote_head, temp_root=settings.temp_root),
                                            partial(is_ancestor, temp_root=settings.temp_root),
                                            builds=build_service, catalogs=catalog_service)
-    query_service = QueryService(build_service, catalog_service, runtime.jobs, runtime.execute_query)
+    query_service = QueryService(build_service, catalog_service, runtime.execute_query)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:

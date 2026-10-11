@@ -9,7 +9,7 @@ from uuid import UUID
 
 from pydantic import Field, model_validator
 
-from .builds import BuildStatus, Contract, ErrorView
+from .builds import Contract
 
 
 class QueryMode(StrEnum):
@@ -40,7 +40,6 @@ class AvailableDimensionsRequest(Contract):
 
 
 class QueryRequest(Contract):
-    idempotency_key: str = Field(min_length=1, max_length=256, description="本次查询的幂等键")
     mode: QueryMode = Field(description="受控的引擎查询模式")
     metric_resource_ids: list[str] = Field(default_factory=list, max_length=100, description="指标资源集合")
     group_by: list[SelectedDimension] = Field(default_factory=list, max_length=100, description="有序分组")
@@ -48,7 +47,7 @@ class QueryRequest(Contract):
     start_time: datetime | None = Field(default=None, description="起点，按构建业务时区解释")
     end_time: datetime | None = Field(default=None, description="终点，按构建业务时区解释")
     order_by: list[SelectedOrder] = Field(default_factory=list, max_length=100, description="有序排序条件")
-    limit: int = Field(default=1000, ge=1, le=10000, description="最多保存的结果行数")
+    limit: int = Field(default=1000, ge=1, le=10000, description="最多返回的结果行数")
     dataset_resource_id: str | None = Field(default=None, description="PREVIEW 的数据集身份")
     dimension_option_id: str | None = Field(default=None, description="DIMENSION_VALUES 的维度选项")
 
@@ -83,25 +82,14 @@ class AvailableDimensionsView(Contract):
     dimensions: list[dict[str, Any]] = Field(description="当前构建及所选指标集合可用的维度")
 
 
-class QueryView(Contract):
-    query_id: UUID = Field(description="持久查询身份")
+class QueryResult(Contract):
     build_id: UUID = Field(description="固定构建身份")
-    state: BuildStatus = Field(description="执行状态")
     mode: QueryMode = Field(description="查询模式")
     commit_sha: str | None = Field(description="固定源码版本")
     business_timezone: str = Field(description="构建固定的业务时区")
     normalized_time_range: dict[str, str | None] = Field(description="归一化时间输入")
     boundary_policy: str = Field(default="metricflow_granularity_alignment", description="引擎粒度边界策略")
-    result_available: bool = Field(default=False, description="结果字节是否可读")
-    error: ErrorView | None = Field(default=None, description="稳定错误")
-
-
-class ResultPage(QueryView):
     sql: str | None = Field(default=None, description="EXPLAIN 返回的完整编译 SQL")
     columns: list[dict[str, Any]] = Field(description="结果列及精度类型")
-    rows: list[list[Any]] = Field(description="有界结果正文")
-    offset: int = Field(description="已保存结果中的偏移")
-    returned_rows: int = Field(description="本页行数")
-    next_offset: int | None = Field(description="下一页偏移")
-    available_rows: int = Field(description="已保存行数，不代表源数据总数")
-    result_truncated: bool = Field(description="引擎结果是否截断")
+    rows: list[list[Any]] = Field(description="本次实时查询的结果正文")
+    result_truncated: bool = Field(description="引擎结果是否达到行数限制并截断")

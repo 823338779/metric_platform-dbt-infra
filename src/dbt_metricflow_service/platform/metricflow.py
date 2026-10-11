@@ -18,13 +18,13 @@ from dbt_metricflow_service.adapters.starrocks import STARROCKS_ADAPTER, StarRoc
 from dbt_metricflow_service.platform.catalog import catalog_from_artifacts
 from dbt_metricflow_service.platform.models import PlatformQueryRequest, QueryMode
 from dbt_metricflow_service.platform.namespace import run_prefix, validate_schema_name
-from dbt_metricflow_service.platform.queries import _json_cell, query_options, serialize_rows, validate_query
+from dbt_metricflow_service.platform.queries import _json_cell, available_dimensions, serialize_rows, validate_query
 
-INVALID_OPTIONS_CODE = "INVALID_QUERY"
+INVALID_DIMENSIONS_CODE = "INVALID_QUERY"
 
 
-class InvalidOptions(ValueError):
-    """已加载固定目录后确认的选项请求错误，不包括连接或初始化故障。"""
+class InvalidDimensionsRequest(ValueError):
+    """已加载固定目录后确认的可用维度请求错误，不包括连接或初始化故障。"""
 
 
 def cleanup_versioned_relations(adapter: Any, schema: str, run_id: UUID) -> None:
@@ -112,9 +112,9 @@ def execute_programmatic(project: Path, profiles: Path, input_data: dict[str, An
         return {"queryCapability": result.result_df is not None}
     if mode == "OPTIONS":
         try:
-            return query_options(engine, tuple(input_data["metrics"]))
+            return available_dimensions(engine, tuple(input_data["metrics"]))
         except ValueError as error:
-            raise InvalidOptions("invalid metrics or dimensions") from error
+            raise InvalidDimensionsRequest("invalid metrics or dimensions") from error
     request = PlatformQueryRequest.model_validate(input_data["request"])
     if request.mode is QueryMode.PREVIEW:
         catalog = catalog_from_artifacts(project / "target")
@@ -133,8 +133,8 @@ def execute_programmatic(project: Path, profiles: Path, input_data: dict[str, An
                    for index, name in enumerate(table.column_names)]
         rows = [[_json_cell(cell) for cell in row] for row in table.rows[:request.limit]]
         return {"columns": columns, "rows": rows, "truncated": len(table.rows) > request.limit}
-    options = query_options(engine, tuple(request.metrics))
-    validate_query(request, options)
+    available = available_dimensions(engine, tuple(request.metrics))
+    validate_query(request, available)
     group_by = [request.dimension] if request.mode is QueryMode.DIMENSION_VALUES else request.group_by
     mf_request = MetricFlowQueryRequest.create(
         metric_names=request.metrics,

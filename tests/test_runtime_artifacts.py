@@ -10,6 +10,7 @@ from sqlalchemy.exc import DBAPIError
 
 from dbt_metricflow_service.runtime.workspace import materialized_workspace
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
+from dbt_metricflow_service.storage.entities import ArtifactSet
 from dbt_metricflow_service.storage.postgres import Database
 from dbt_metricflow_service.storage.rows import row_dict
 
@@ -25,7 +26,7 @@ SQL_PROJECT = "INSERT INTO runtime_project(project_id) VALUES (%s)"
 SQL_MUTATE = "UPDATE runtime_artifact_file SET content = %s WHERE set_id = %s"
 SQL_STATE = "UPDATE runtime_artifact_set SET state = 'STAGING' WHERE set_id = %s"
 SQL_JOB = """INSERT INTO runtime_job(job_id,kind,project_id,request_fingerprint,config_version,
-toolchain_version,deadline_at) VALUES (%s,'DBT_COMMAND',%s,'test','1','1',clock_timestamp()+interval '1 hour')"""
+toolchain_version,deadline_at) VALUES (%s,'BUILD_RUN',%s,'test','1','1',clock_timestamp()+interval '1 hour')"""
 SQL_ATTEMPT = """INSERT INTO runtime_attempt(attempt_id,job_id,attempt_no,worker_id,lease_token,lease_expires_at)
 VALUES (%s,%s,1,%s,%s,clock_timestamp()+interval '1 hour')"""
 
@@ -63,14 +64,18 @@ def test_source_roundtrip_preserves_raw_bytes_and_configured_paths(store, projec
     store.materialize(set_id, destination)
     assert (destination / MODEL_PATH).read_bytes() == MODEL_BYTES
     assert not (destination / TARGET_PATH).exists()
-    assert store.metadata(set_id)["file_count"] == 2
+    with store.database.session() as session:
+        assert session.get(ArtifactSet, set_id).file_count == 2
 
 
 def test_execution_keeps_dependencies_and_excludes_local_state(store, project, tmp_path):
     project_id, source = project
     included = "dbt_packages/example/macros/test.sql"
     forbidden = ["profiles.yml", "target/partial_parse.msgpack", "logs/dbt.log", "request.json",
-                 "project-path.json", "dbt_packages/example/profiles.yml", ".git/config"]
+                 "project-path.json", "dbt_packages/example/profiles.yml", ".git/config",
+                 "target/compiled/artifacts/orders.sql", "target/run/artifacts/orders.sql",
+                 "target/run_results.json", "target/sources.json", "target/publication_evidence.json",
+                 "target/publication_state.json"]
     for relative in [included, *forbidden]:
         path = source / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -81,6 +86,25 @@ def test_execution_keeps_dependencies_and_excludes_local_state(store, project, t
     assert (destination / included).read_bytes() == MODEL_BYTES
     assert (destination / TARGET_PATH).read_bytes() == MANIFEST_BYTES
     assert all(not (destination / path).exists() for path in forbidden)
+
+
+def test_execution_file_selection_excludes_transient_build_outputs(tmp_path):
+    from dbt_metricflow_service.storage.artifacts import _files
+
+    (tmp_path / PROJECT_FILE).write_text(PROJECT_TEXT, encoding="utf-8")
+    retained = [MODEL_PATH, "dbt_packages/example/dbt_project.yml", "dbt_packages/example/macros/test.sql",
+                "target/manifest.json", TARGET_PATH, "target/catalog.json", "target/published_catalog.json"]
+    transient = ["target/compiled/artifacts/orders.sql", "target/run/artifacts/orders.sql",
+                 "target/run_results.json", "target/sources.json", "target/publication_evidence.json",
+                 "target/publication_state.json"]
+    for relative in retained + transient:
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(MODEL_BYTES)
+
+    selected = dict(_files(tmp_path, "EXECUTION", 1024))
+
+    assert set(selected) == {PROJECT_FILE, *retained}
 
 
 def test_sealed_files_cannot_be_overwritten(store, project):
@@ -134,7 +158,8 @@ def test_metadata_has_stable_digest_across_local_roots(store, project, tmp_path)
     destination = tmp_path / "other-root"
     store.materialize(first, destination)
     second = store.capture(project_id, destination)
-    assert store.metadata(first)["content_digest"] == store.metadata(second)["content_digest"]
+    with store.database.session() as session:
+        assert session.get(ArtifactSet, first).content_digest == session.get(ArtifactSet, second).content_digest
     with store.database.transaction() as connection:
         sql_result = connection.exec_driver_sql(
             "SELECT raw_sha256 FROM runtime_artifact_file WHERE set_id=%s AND relative_path=%s", (second, MODEL_PATH)
@@ -172,8 +197,8 @@ def test_gc_preserves_referenced_and_active_worker_artifacts(store, project, att
     assert not store.delete_unreferenced(staged)
     orphan = store.capture(*project)
     assert store.delete_unreferenced(orphan)
-    with pytest.raises(ValueError):
-        store.metadata(orphan)
+    with store.database.session() as session:
+        assert session.get(ArtifactSet, orphan) is None
 
 
 def test_read_file_is_bounded_and_requires_sealed(store, project, attempt):

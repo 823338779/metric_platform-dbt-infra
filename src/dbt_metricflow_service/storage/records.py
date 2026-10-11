@@ -1,10 +1,7 @@
 """数据库记录类型；UUID 由连接适配器读取为字符串，时间保持 datetime。"""
 
-from collections.abc import Callable
 from datetime import datetime
 from typing import Any, NotRequired, TypeAlias, TypedDict
-
-from sqlalchemy.orm import Session
 
 from ..models.payloads import JsonObject
 
@@ -81,10 +78,9 @@ class StoredJob(TypedDict):
     """执行任务持久字段；领取后附加的租约信息由 LeasedJob 描述。"""
 
     job_id: str  # 内部任务身份。
-    kind: str  # 构建、选项、查询或清理类型。
+    kind: str  # 构建或清理类型。
     project_id: str  # 内部执行容器身份。
-    branch_id: str | None  # 历史分支关联。
-    parent_run_id: str | None  # 查询或清理引用的构建任务。
+    parent_run_id: str | None  # 清理引用的构建任务。
     request_json: JsonObject  # 固定执行请求。
     request_fingerprint: str  # 幂等请求摘要。
     status: str  # 执行状态。
@@ -99,7 +95,6 @@ class StoredJob(TypedDict):
     current_attempt_id: str | None  # 当前执行尝试身份。
     error_code: str | None  # 稳定错误码。
     error_detail: JsonObject | None  # 脱敏错误元数据。
-    input_mode: str  # 持久输入或进程内临时输入模式。
 
 
 class LeasedJob(StoredJob):
@@ -107,14 +102,3 @@ class LeasedJob(StoredJob):
 
     attempt_id: str  # 领取或租约查询附加的尝试身份。
     lease_token: str  # 用于 fencing 的租约凭据。
-
-
-class CompletionOptions(TypedDict, total=False):
-    """任务完成协调器可转交给 JobStore.finish 的具名参数。"""
-
-    output_set_id: str | None  # 待封存输出集合。
-    stdout_tail: str  # 脱敏标准输出尾部。
-    stderr_tail: str  # 脱敏错误输出尾部。
-    exit_code: int  # 已确认的子进程退出码。
-    output_truncated: bool  # 诊断输出是否被截断。
-    seal: Callable[[str, Session], None] | None  # 同事务封存产物的回调。

@@ -46,7 +46,11 @@ def test_initialize_complete_schema_and_repeat_without_changes():
     "VALUES(gen_random_uuid(),'missing','SOURCE')",
     "INSERT INTO runtime_artifact_set(set_id,project_id,kind) "
     "VALUES(gen_random_uuid(),'initialized','INVALID')",
+    "INSERT INTO runtime_artifact_set(set_id,project_id,kind) "
+    "VALUES(gen_random_uuid(),'initialized','VALIDATION_INPUT')",
     "INSERT INTO runtime_project(project_id) VALUES('initialized')",
+    "INSERT INTO runtime_job(job_id,kind,project_id,request_fingerprint,config_version,toolchain_version,deadline_at) "
+    "VALUES(gen_random_uuid(),'METRIC_QUERY','initialized','request','1','default',clock_timestamp())",
 ])
 def test_initialized_schema_enforces_constraints(invalid_insert):
     with isolated_database() as db:
@@ -82,14 +86,14 @@ def test_check_requires_initialized_schema():
         db.check()
 
 
-@pytest.mark.parametrize("missing_table", [None, "runtime_job_result"])
+@pytest.mark.parametrize("missing_table", [None, "engine_change"])
 def test_partial_schema_is_rejected_without_repair(missing_table):
     with isolated_database() as db:
         if missing_table:
             db.initialize()
         with db.transaction() as connection:
             if missing_table:
-                connection.exec_driver_sql("DROP TABLE runtime_job_result")
+                connection.exec_driver_sql("DROP TABLE engine_change")
             else:
                 connection.exec_driver_sql("CREATE TABLE runtime_project(project_id text PRIMARY KEY)")
             connection.exec_driver_sql("INSERT INTO runtime_project(project_id) VALUES('preserved')")
@@ -134,10 +138,10 @@ def test_two_schemas_do_not_share_tables_or_constraints():
                 count = connection.exec_driver_sql(
                     "SELECT count(*) FROM pg_constraint WHERE conrelid IN "
                     "('runtime_project'::regclass,'runtime_job'::regclass) AND conname IN "
-                    "('runtime_project_source_fk','runtime_project_output_fk','runtime_project_busy_fk',"
+                    "('runtime_project_source_fk','runtime_project_busy_fk',"
                     "'runtime_job_input_fk','runtime_job_output_fk','runtime_job_attempt_fk')",
                 ).scalar_one()
-                assert count == 6
+                assert count == 5
                 schema = connection.exec_driver_sql("SELECT current_schema()").scalar_one()
                 assert set(inspect(connection).get_table_names(schema=schema)) == set(Base.metadata.tables)
 

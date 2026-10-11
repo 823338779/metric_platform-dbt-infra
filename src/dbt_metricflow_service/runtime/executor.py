@@ -6,7 +6,7 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ParamSpec, TypeVar, cast
+from typing import ParamSpec, TypeVar, cast
 from uuid import UUID
 
 from dbt_metricflow_service.execution.dbt import run_dbt
@@ -35,10 +35,6 @@ T = TypeVar("T")
 
 # 任务类型与持久阶段使用固定协议值，避免执行器扩展公开队列状态。
 BUILD_RUN = "BUILD_RUN"
-DRAFT_VALIDATION = "DRAFT_VALIDATION"
-DBT_COMMAND = "DBT_COMMAND"
-METRIC_QUERY = "METRIC_QUERY"
-QUERY_OPTIONS = "QUERY_OPTIONS"
 RUN_CLEANUP = "RUN_CLEANUP"
 VALIDATING = "VALIDATING"
 PROJECT_DIRECTORY = "project"
@@ -51,9 +47,7 @@ ERROR_RESULT_TOO_LARGE = "RESULT_TOO_LARGE"
 ERROR_RESULT_INVALID = "RESULT_INVALID"
 ERROR_INVALID_QUERY = "INVALID_QUERY"
 TARGET_DIRECTORY = "target"
-QUERY_MODE = "QUERY"
 CLEANUP_MODE = "CLEANUP"
-LOCAL_DBT_COMMANDS = frozenset({"parse", "debug"})
 
 
 def build_engine_environment(project: Path, profiles: Path, schema: str, target: str) -> dict[str, str]:
@@ -68,10 +62,7 @@ def build_engine_environment(project: Path, profiles: Path, schema: str, target:
 
 @dataclass(frozen=True, slots=True)
 class ExecutionResult:
-    """执行完成的数据；只有 worker 的带租约事务能发布结果。"""
-
-    # 现有 HTTP 接口使用的结构化结果及受限执行诊断。
-    payload: dict[str, Any]
+    """执行完成的产物身份；只有 worker 的带租约事务能封存产物。"""
     # 当前 attempt 产生的 STAGING 集合，交给发布事务封存。
     output_set_id: str | None = None
 
@@ -134,29 +125,24 @@ class RuntimeExecutor:
                 return await self._build(job, attempt)
             # 构建在源码固定前失败时尚未执行任何仓库命令，无目录可还原。
             if job["kind"] == RUN_CLEANUP and job["input_set_id"] is None:
-                return ExecutionResult({})
+                return ExecutionResult()
             project = attempt / PROJECT_DIRECTORY
             await _thread(self.artifacts.materialize, str(job["input_set_id"]), project)
-            if job["kind"] in {METRIC_QUERY, QUERY_OPTIONS, RUN_CLEANUP}:
-                body = job["request_json"]
-                if job["kind"] == METRIC_QUERY:
-                    body = {"mode": QUERY_MODE, "request": body["engineRequest"]}
-                elif job["kind"] == RUN_CLEANUP:
-                    body = {"mode": CLEANUP_MODE, "schema": cast(str, job["schema_name"])}
-                    parent_id = UUID(job["parent_run_id"])
-                    if cast(str, job["schema_name"]) != "run_" + parent_id.hex:
-                        body.update({"runId": str(parent_id), "tablePrefix": run_prefix(parent_id)})
-                payload = await self._metricflow(job, project, body)
-                return ExecutionResult(payload)
+            if job["kind"] == RUN_CLEANUP:
+                body = {"mode": CLEANUP_MODE, "schema": cast(str, job["schema_name"])}
+                parent_id = UUID(job["parent_run_id"])
+                if cast(str, job["schema_name"]) != "run_" + parent_id.hex:
+                    body.update({"runId": str(parent_id), "tablePrefix": run_prefix(parent_id)})
+                await self._metricflow(job, project, body)
+                return ExecutionResult()
             raise ValueError("unsupported runtime job kind")
 
     async def _build(self, job: LeasedJob, attempt: Path) -> ExecutionResult:
         from ..platform.build import execute_publication
 
-        if job["request_json"].get("buildId"):
-            job = await self._prepare_build_source(job)
-        elif not job["input_set_id"] or not job["request_json"].get("releaseId"):
+        if not job["request_json"].get("buildId"):
             raise ExecutionError("FIXED_COMMIT_INPUT_REQUIRED")
+        job = await self._prepare_build_source(job)
         project = attempt / PROJECT_DIRECTORY
         await _thread(self.artifacts.materialize, cast(str, job["input_set_id"]), project)
         return await execute_publication(self, job, attempt, project)
@@ -210,10 +196,7 @@ class RuntimeExecutor:
             self.settings.max_output_bytes, lambda: self._authorize(job, phase, external=spec.write_operation),
         )
         # parse/debug 正常退出无需写入核对，写命令失联不能据退出码释放保护。
-        may_write = spec.write_operation or (
-            job["kind"] == DBT_COMMAND and job["request_json"].get("command") not in LOCAL_DBT_COMMANDS
-        )
-        self._check_record(record, may_write=may_write)
+        self._check_record(record, may_write=spec.write_operation)
         return record
 
     @staticmethod
@@ -234,21 +217,19 @@ class RuntimeExecutor:
         environment = build_engine_environment(
             project, self.settings.profiles_dir, cast(str, job["schema_name"]), cast(str, job["profile_binding_id"]),
         )
-        external = job["kind"] in {METRIC_QUERY, QUERY_OPTIONS, RUN_CLEANUP}
+        external = job["kind"] == RUN_CLEANUP
         result = await run_metricflow(
             job["project_id"], MetricFlowRequest(environment, body), self.settings.command_timeout_seconds,
             self.settings.max_output_bytes,
             lambda: self._authorize(job, VALIDATING, external=external),
         )
-        # MetricFlow 直接处理业务错误；超时优先，不能发布线程迟到的结果。
-        if (result.record.status is JobStatus.FAILED and job["kind"] == QUERY_OPTIONS
-                and result.error_code == ERROR_INVALID_QUERY):
+        # 构建探测在内存中读取结果；清理结果由调用方丢弃。
+        if result.record.status is JobStatus.FAILED and result.error_code == ERROR_INVALID_QUERY:
             raise ExecutionError(ERROR_INVALID_QUERY)
         self._check_record(result.record, may_write=job["kind"] == RUN_CLEANUP)
         value = result.payload
         if not isinstance(value, dict):
             raise ExecutionError(ERROR_RESULT_INVALID)
-        # 保留 UTF-8 JSON 大小限制，只计数编码片段，不复制完整结果或重新解析。
         size = 0
         try:
             for chunk in json.JSONEncoder(ensure_ascii=False).iterencode(value):
@@ -256,7 +237,6 @@ class RuntimeExecutor:
                 if size > self.settings.max_result_bytes:
                     raise ExecutionError(ERROR_RESULT_TOO_LARGE)
         except (TypeError, ValueError, RecursionError) as error:
-            # 编码失败沿用引擎失败的脱敏诊断；已结束的读查询无需保留外部执行保护。
             record = result.record.model_copy(update={
                 "status": JobStatus.FAILED, "stderr": type(error).__name__,
             })
