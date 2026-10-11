@@ -8,13 +8,15 @@
 | `postgres.py` | 连接池、Session 事务及变化计数器锁 |
 | `records.py`、`rows.py` | 对外记录类型，以及实体到记录的转换 |
 | `jobs.py` | 任务受理、执行租约、完成与回收 |
-| `builds.py`、`deployments.py`、`changes.py` | 构建、部署意图与持久变化流 |
+| `builds.py`、`deployments.py` | 构建、构建日志与部署意图 |
 | `artifacts.py` | 产物内容、封存、读取与引用保护 |
 | `schema.py`、`schema.sql` | 新库建表及启动前的表完整性检查 |
 
 普通读取直接使用 `Session.get/scalar/scalars`，新增实体使用 `add/flush`。需要数据库原子判断的租约、版本、抢占和批量写入使用显式条件 DML；这些条件不藏进通用 Repository。
 
 每个独立操作进入 `Database.session()`；写入构建或部署事实时使用 `fact_session()`，先取得变化计数器锁。跨 Store 的原子操作传递同一个 Session，不在内部再开启事务。`transaction()` 保留给管理命令和新库初始化的 Connection 调用。
+
+`engine_change` 和计数器仅用于构建日志的持久化与游标续读，不再提供对外变化流。新库不记录部署目标和部署尝试的变化；构建触发器只保存阶段、状态和错误码。保留统一加锁顺序，避免构建日志触发器与业务行锁反转。
 
 Session 关闭 autoflush，涉及锁顺序或外键依赖时显式 flush。数据库触发器更新了已加载实体后，需要刷新或使用带 `populate_existing` 的返回查询，避免把旧 identity map 当成当前事实。实体转换在 Session 内完成。
 

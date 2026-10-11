@@ -51,6 +51,7 @@ def test_application_exposes_only_fixed_commit_business_routes(monkeypatch):
     )
     paths = set(app.openapi()["paths"])
     assert "/v3/builds" in paths
+    assert "/v3/changes" not in paths
     assert not any("validations" in path for path in paths)
     assert not any(path.startswith("/v1/") and path != "/v1/versions" for path in paths)
     assert not any("branches" in path or "compatibility" in path or path.startswith("/internal/") for path in paths)

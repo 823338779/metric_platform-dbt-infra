@@ -241,7 +241,9 @@ class ChangeCounter(Base):
 
     __tablename__ = "engine_change_counter"
 
-    singleton: Mapped[bool] = mapped_column(primary_key=True, server_default=text("true"), comment="变化流计数器唯一行")
+    singleton: Mapped[bool] = mapped_column(
+        primary_key=True, server_default=text("true"), comment="构建日志计数器唯一行"
+    )
     value: Mapped[BigInt] = mapped_column(comment="最后同事务分配的变化序号")
 
 
@@ -255,4 +257,4 @@ class Change(Base):
     object_type: Mapped[str] = mapped_column(comment="引擎事实类型")
     object_id: Mapped[str] = mapped_column(comment="变化对象自然身份")
     object_version: Mapped[BigInt] = mapped_column(comment="变化对应对象版本")
-    summary: Mapped[JsonDocument] = mapped_column(comment="完整有界事实摘要，不含执行秘密")
+    summary: Mapped[JsonDocument] = mapped_column(comment="构建阶段、状态与错误码，不含执行秘密")

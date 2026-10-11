@@ -153,15 +153,3 @@ class LogPage(Contract):
     items: list[str] = Field(description="有界、脱敏日志片段")
     next_cursor: str | None = Field(default=None, description="后续日志位置")
     truncated: bool = Field(default=False, description="源日志是否已截断")
-
-
-class ChangeRecord(Contract):
-    sequence: int = Field(description="与事实同事务提交的变化序号")
-    repository: str = Field(description="规范仓库地址")
-    object_type: str = Field(description="构建或部署对象类型")
-    object_id: str = Field(description="对象的稳定身份")
-    object_version: int = Field(description="对象递增版本")
-    summary: dict[str, Any] = Field(description="可重建历史投影的有界事实摘要")
-
-
-ChangePage = Page[ChangeRecord]

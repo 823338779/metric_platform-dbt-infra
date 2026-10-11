@@ -4,12 +4,11 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from dbt_metricflow_service.models.builds import BuildRequest, ChangePage
+from dbt_metricflow_service.models.builds import BuildRequest
 from dbt_metricflow_service.storage.builds import BuildStore
 from dbt_metricflow_service.storage.records import StoredBuild, StoredDeploymentAttempt
 
 from ..models.builds import BuildStatus, BuildView, ErrorView, LogPage, Page
-from ..storage.changes import ChangeStore
 from ..storage.deployments import DeploymentStore, attempt_view
 from ..storage.jobs import StoreConflict
 from .errors import ServiceError
@@ -70,12 +69,6 @@ class BuildService:
         return Page[BuildView](
             items=[self.view(row, initials.get(row["build_id"])) for row in rows], next_cursor=next_cursor,
         )
-
-    def changes(self, cursor: str | None=None, limit: int=50) -> ChangePage:
-        try:
-            return ChangeStore(self.store.db).read(cursor, limit)
-        except ValueError as error:
-            raise ServiceError("INVALID_CURSOR", str(error)) from error
 
     def logs(self, build_id: UUID | str, cursor: str | None=None) -> LogPage:
         self.load(build_id)

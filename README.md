@@ -9,7 +9,7 @@
 | `models` | `/v3` 请求响应与封存资源模型；无 I/O |
 | `api` | 唯一 HTTP 装配、鉴权、参数和错误转换 |
 | `application` | builds、deployments、catalog、queries 四个具体用例服务；不持有 Runtime |
-| `storage` | PostgreSQL 短事务、任务/产物存储、变化流和新库初始化 |
+| `storage` | PostgreSQL 短事务、任务/产物存储、构建日志和新库初始化 |
 | `runtime` | 同进程 worker、租约恢复、完成事务、执行工作目录 |
 | `platform` | 固定 Git 读取、完整工程构建、原生目录与查询适配 |
 | `execution` / `adapters` | 进程内引擎调用、串行与取消控制、脱敏及底层引擎适配 |
@@ -21,7 +21,7 @@
 查询用例负责受理编排，`application/query_plan.py` 负责资源及选项到引擎请求的纯转换；
 时间只归一化一次，幂等摘要与执行元数据复用同一请求。部署协调器由启动入口显式传入 worker。
 构建、部署历史使用 v2 游标，按创建时间和唯一键在数据库中排序；升级前的 v1 历史游标返回
-`INVALID_CURSOR`，调用方应省略游标从首页重新读取。目录游标和变化流游标不变。
+`INVALID_CURSOR`，调用方应省略游标从首页重新读取。目录游标不变。
 
 ## 启动
 
@@ -105,7 +105,6 @@ uv run --frozen dbt-service-admin build --file build-request.json
 | `GET /v3/builds/{buildId}/resources/{resourceId}` | 资源详情；另有 `/lineage`、`/source`、`/native-details` |
 | `POST /v3/query/available-dimensions?build_id={build_id}` | build_id 为独立 URL 参数，请求体指定 metricResourceIds，200 同步返回可用的 dimensions 列表，包含时间粒度和允许的过滤操作 |
 | `POST /v3/query?build_id={build_id}` | build_id 为独立 URL 参数，同步执行 QUERY、EXPLAIN、PREVIEW、DIMENSION_VALUES，直接返回本次结果，最多 8 MiB |
-| `GET /v3/changes` | 同事务持久变化流；省略 cursor 从起点重放 |
 
 目录、可用维度、查询始终使用选定 buildId；不重新解析当前部署。新构建不使旧构建目录和查询失效。物理清理后仍保留目录，`queryAvailable=false`。QUERY/EXPLAIN 使用 metricResourceIds；分组/过滤/维度取值使用该构建及指标集合生成的 optionId。PREVIEW 使用 datasetResourceId。请求体 `limit` 表示本次返回行数上限，默认 1000、最大 10000；查询请求不接受 `offset` 或 `idempotencyKey`。每次请求重新调用引擎，返回 QueryResult，不提供历史结果或分页读取。数值精度和 null 保留，时间按固定构建时区归一化。
 
@@ -125,7 +124,7 @@ uv run --frozen dbt-service-admin init-db
 
 初始化直接执行 storage/schema.sql，重复执行不会重建已完整初始化的表；部分表缺失时拒绝自动修补。服务启动只检查当前 schema 的业务表是否齐全。不提供数据库迁移、历史数据导入或旧身份映射。本次删除旧发布、分支和通用任务结果表，旧库不能依靠重复执行 init-db 升级；部署新版需使用按当前 schema.sql 初始化的新库。
 
-持久化保留构建、部署、异步任务及执行尝试、变化流和必要的产物快照。成功任务不再保存通用结果和诊断副本；目录只保存封存文件，元数据只保存独立的版本、来源和验证字段。完整构建每次独立执行，不保留旧发布基线和默认输出复用机制。执行产物仅保留恢复工程所需文件及 manifest、semantic_manifest、catalog、published_catalog；compiled/run、run_results、sources 和额外验证证据文件只在构建期间使用。
+持久化保留构建、部署、异步任务及执行尝试、构建日志和必要的产物快照。成功任务不再保存通用结果和诊断副本；目录只保存封存文件，元数据只保存独立的版本、来源和验证字段。完整构建每次独立执行，不保留旧发布基线和默认输出复用机制。执行产物仅保留恢复工程所需文件及 manifest、semantic_manifest、catalog、published_catalog；compiled/run、run_results、sources 和额外验证证据文件只在构建期间使用。
 
 对结果未知的执行，人工核实目标仓库停止后才释放保护：
 
@@ -134,7 +133,7 @@ uv run --frozen dbt-service-admin reconcile-attempt <attempt-uuid> --confirm-ext
 uv run --frozen dbt-service-admin gc --older-than-hours 24 --limit 100
 ```
 
-gc 只回收无引用产物，没有历史自动 TTL。新变化流不自动裁剪；消费端提交本地投影与游标应使用同一事务。
+gc 只回收无引用产物，没有历史自动 TTL。构建日志不自动裁剪。
 
 ## 验证
 

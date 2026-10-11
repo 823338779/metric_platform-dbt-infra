@@ -56,6 +56,7 @@ def test_v3_build_api_and_error_contract(client):
         "/v1/project-runs",
         "/v1/query-jobs",
         "/internal/git-branch-events",
+        "/v3/changes",
     ],
 )
 def test_removed_business_routes_are_404(client, path):

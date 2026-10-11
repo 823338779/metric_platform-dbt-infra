@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 
 from dbt_metricflow_service.application.builds import BuildService
 
-from ..models.builds import BuildRequest, BuildView, ChangePage, LogPage, Page
+from ..models.builds import BuildRequest, BuildView, LogPage, Page
 
 
 def router(service: BuildService, guard: Callable[..., Awaitable[str]]) -> APIRouter:
@@ -42,9 +42,5 @@ def router(service: BuildService, guard: Callable[..., Awaitable[str]]) -> APIRo
     def cancel(build_id: UUID, caller: str=dependency) -> JSONResponse:
         view, status = service.cancel(build_id, caller)
         return JSONResponse(view.model_dump(mode="json", by_alias=True), status_code=status)
-
-    @routes.get("/changes", response_model=ChangePage)
-    def changes(cursor: str | None = None, limit: int = Query(default=50, ge=1, le=200)) -> ChangePage:
-        return service.changes(cursor, limit)
 
     return routes

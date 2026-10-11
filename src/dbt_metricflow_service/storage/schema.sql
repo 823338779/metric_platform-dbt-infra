@@ -4,34 +4,13 @@
 CREATE FUNCTION engine_record_change() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
-DECLARE next_sequence bigint; identity text; record_version bigint; projection jsonb; lifecycle text;
+DECLARE next_sequence bigint;
 BEGIN
  UPDATE engine_change_counter SET value=value+1 WHERE singleton RETURNING value INTO next_sequence;
- IF TG_TABLE_NAME='engine_build' THEN
-  identity := NEW.build_id::text; record_version := NEW.version;
- ELSIF TG_TABLE_NAME='engine_deployment_target' THEN
-  identity := jsonb_build_array(NEW.repository,NEW.environment,NEW.branch_name)::text;
-  -- 观察事实有自己的变化版本，不能复用不随观察更新的目标 CAS version。
-  record_version := next_sequence;
- ELSE
-  identity := jsonb_build_array(NEW.repository,NEW.environment,NEW.branch_name,NEW.generation)::text;
-  record_version := NEW.version;
- END IF;
- projection := to_jsonb(NEW)-'request_json'-'config_snapshot'-'caller'-'idempotency_key'
-               -'request_digest'-'last_checked_at';
- IF TG_TABLE_NAME='engine_build' THEN
-  SELECT run_lifecycle INTO lifecycle FROM runtime_job WHERE job_id=NEW.run_id;
-  projection := projection || jsonb_build_object(
-   'catalog_available',NEW.build_status='SUCCEEDED' AND NEW.output_set_id IS NOT NULL,
-   'query_available',NEW.build_status='SUCCEEDED' AND NEW.output_set_id IS NOT NULL
-      AND lifecycle='ACTIVE',
-   'query_unavailable_reason',CASE
-      WHEN NEW.build_status<>'SUCCEEDED' THEN 'BUILD_NOT_SUCCEEDED'
-      WHEN NEW.output_set_id IS NULL THEN 'ARTIFACT_UNAVAILABLE'
-      WHEN lifecycle IN ('CLEANING','CLEANED') THEN 'PHYSICAL_OBJECTS_REMOVED'
-      ELSE NULL END);
- END IF;
- INSERT INTO engine_change VALUES(next_sequence,NEW.repository,TG_TABLE_NAME,identity,record_version,projection);
+ -- 仅保留构建日志续读所需的阶段、状态与错误码。
+ INSERT INTO engine_change VALUES(
+  next_sequence,NEW.repository,TG_TABLE_NAME,NEW.build_id::text,NEW.version,
+  jsonb_build_object('phase',NEW.phase,'build_status',NEW.build_status,'error_code',NEW.error_code));
  RETURN NEW;
 END $$;
 
@@ -178,7 +157,7 @@ COMMENT ON COLUMN engine_change.object_id IS '变化对象自然身份';
 
 COMMENT ON COLUMN engine_change.object_version IS '变化对应对象版本';
 
-COMMENT ON COLUMN engine_change.summary IS '完整有界事实摘要，不含执行秘密';
+COMMENT ON COLUMN engine_change.summary IS '构建阶段、状态与错误码，不含执行秘密';
 
 CREATE TABLE engine_change_counter (
     singleton boolean DEFAULT true NOT NULL,
@@ -186,7 +165,7 @@ CREATE TABLE engine_change_counter (
     CONSTRAINT engine_change_counter_singleton_check CHECK (singleton)
 );
 
-COMMENT ON COLUMN engine_change_counter.singleton IS '变化流计数器唯一行';
+COMMENT ON COLUMN engine_change_counter.singleton IS '构建日志计数器唯一行';
 
 COMMENT ON COLUMN engine_change_counter.value IS '最后同事务分配的变化序号';
 
@@ -588,13 +567,9 @@ CREATE INDEX runtime_job_parent ON runtime_job USING btree (parent_run_id, statu
 
 CREATE INDEX runtime_job_queue ON runtime_job USING btree (kind, available_at, created_at) WHERE (status = 'QUEUED'::text);
 
-CREATE TRIGGER engine_attempt_change AFTER INSERT OR UPDATE OF deployment_status, reason, version, deployed_at ON engine_deployment_attempt FOR EACH ROW EXECUTE FUNCTION engine_record_change();
-
 CREATE TRIGGER engine_build_change AFTER INSERT OR UPDATE ON engine_build FOR EACH ROW EXECUTE FUNCTION engine_record_change();
 
 CREATE TRIGGER engine_job_change AFTER UPDATE OF status, phase, output_set_id, error_code, run_lifecycle ON runtime_job FOR EACH ROW EXECUTE FUNCTION engine_sync_job();
-
-CREATE TRIGGER engine_target_change AFTER INSERT OR UPDATE ON engine_deployment_target FOR EACH ROW EXECUTE FUNCTION engine_record_change();
 
 CREATE TRIGGER runtime_artifact_file_guard BEFORE INSERT OR DELETE OR UPDATE ON runtime_artifact_file FOR EACH ROW EXECUTE FUNCTION runtime_guard_artifact_file();
 
