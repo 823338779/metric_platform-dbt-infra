@@ -23,6 +23,7 @@ def build_body(**changes):
         "environment": PREVIEW,
         "executionBinding": "warehouse",
         "configVersion": "1",
+        "schemaName": "analytics",
         "idempotencyKey": "build-001",
         **changes,
     }

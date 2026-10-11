@@ -159,7 +159,7 @@ def execution(tmp_path):
     ("RUN_CLEANUP", {"mode": "CLEANUP", "schema": "run_fixture"}),
     ("RUN_CLEANUP", {}),
 ])
-async def test_cleanup_uses_restored_input_without_result_payload(execution, monkeypatch, kind, payload):
+async def test_cleanup_preserves_shared_objects_without_result_payload(execution, monkeypatch, kind, payload):
     executor, _, _, _ = execution
     job = claimed(execution, kind, payload)
     if kind == "RUN_CLEANUP":
@@ -201,7 +201,7 @@ async def test_expired_lease_does_not_start_engine(execution, monkeypatch, tmp_p
 
     programmatic_engine(monkeypatch, execute)
     with pytest.raises(ExecutionError) as error:
-        await executor.execute(job)
+        await executor._metricflow(job, tmp_path, {"mode": "PROBE"})
     assert error.value.code == "LEASE_LOST"
     assert not marker.exists()
 
@@ -227,7 +227,16 @@ async def test_cancellation_or_timeout_waits_for_engine_before_workspace_removal
         return {}
 
     programmatic_engine(monkeypatch, execute)
-    task = asyncio.create_task(executor.execute(job))
+
+    async def run_engine():
+        with runtime_execution.attempt_workspace(
+            executor.settings.temp_root, job["job_id"], job["attempt_id"]
+        ) as attempt:
+            project = attempt / "project"
+            await runtime_execution._thread(executor.artifacts.materialize, job["input_set_id"], project)
+            await executor._metricflow(job, project, {"mode": "PROBE"})
+
+    task = asyncio.create_task(run_engine())
     try:
         async with asyncio.timeout(5):
             while not started.is_set():
@@ -268,7 +277,7 @@ async def test_timeout_retains_bounded_diagnostics_and_unknown_stop(execution, m
 
     programmatic_engine(monkeypatch, execute)
     with pytest.raises(ExecutionError) as error:
-        await executor.execute(job)
+        await executor._metricflow(job, executor.settings.temp_root, {"mode": "PROBE"})
     assert error.value.code == "COMMAND_TIMEOUT"
     assert error.value.stopped is False
     assert error.value.payload["status"] == "timed_out"
@@ -316,7 +325,7 @@ async def test_repeated_cancellation_waits_for_filesystem_thread(tmp_path):
     assert marker.exists()
 
 
-async def test_source_only_cleanup_drops_schema_without_semantic_manifest(execution, monkeypatch, tmp_path):
+async def test_source_only_cleanup_preserves_schema_without_semantic_manifest(execution, monkeypatch, tmp_path):
     executor, database, project_id, _ = execution
     connection = parse_dsn(os.environ[DATABASE_ENV])
     for name, key in [("HOST", "host"), ("PORT", "port"), ("USER", "user"), ("DATABASE", "dbname")]:
@@ -350,7 +359,7 @@ async def test_source_only_cleanup_drops_schema_without_semantic_manifest(execut
         assert result.output_set_id is None
         with database.transaction() as connection:
             sql_result = connection.exec_driver_sql("SELECT 1 FROM pg_namespace WHERE nspname=%s", (schema,))
-            assert row_dict(sql_result) is None
+            assert row_dict(sql_result) is not None
     finally:
         with database.transaction() as connection:
             sql_result = connection.exec_driver_sql(

@@ -11,6 +11,7 @@
         "environment": "PREVIEW",
         "executionBinding": "warehouse",
         "configVersion": "1",
+        "schemaName": "analytics",
         "deploymentPolicy": "NONE",
         "idempotencyKey": "build-001",
         "origin": null
@@ -343,7 +344,7 @@
               "relation": {
                 "database": null,
                 "schema": "analytics",
-                "identifier": "rv_example_orders"
+                "identifier": "orders"
               },
               "columns": {}
             }
@@ -365,7 +366,7 @@
               "relation": {
                 "database": null,
                 "schema": "analytics",
-                "identifier": "rv_example_view"
+                "identifier": "orders_view"
               },
               "columns": {}
             }

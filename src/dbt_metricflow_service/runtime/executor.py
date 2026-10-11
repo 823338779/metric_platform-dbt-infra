@@ -7,7 +7,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ParamSpec, TypeVar, cast
-from uuid import UUID
 
 from dbt_metricflow_service.execution.dbt import run_dbt
 from dbt_metricflow_service.execution.metricflow import MetricFlowRequest, run_metricflow
@@ -17,9 +16,6 @@ from dbt_metricflow_service.execution.models import (
     JobStatus,
 )
 from dbt_metricflow_service.models.payloads import JsonObject
-from dbt_metricflow_service.platform.namespace import (
-    run_prefix,
-)
 from dbt_metricflow_service.runtime.workspace import attempt_workspace
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
@@ -47,7 +43,6 @@ ERROR_RESULT_TOO_LARGE = "RESULT_TOO_LARGE"
 ERROR_RESULT_INVALID = "RESULT_INVALID"
 ERROR_INVALID_QUERY = "INVALID_QUERY"
 TARGET_DIRECTORY = "target"
-CLEANUP_MODE = "CLEANUP"
 
 
 def build_engine_environment(project: Path, profiles: Path, schema: str, target: str) -> dict[str, str]:
@@ -123,17 +118,8 @@ class RuntimeExecutor:
         with attempt_workspace(self.settings.temp_root, job["job_id"], job["attempt_id"]) as attempt:
             if job["kind"] == BUILD_RUN:
                 return await self._build(job, attempt)
-            # 构建在源码固定前失败时尚未执行任何仓库命令，无目录可还原。
-            if job["kind"] == RUN_CLEANUP and job["input_set_id"] is None:
-                return ExecutionResult()
-            project = attempt / PROJECT_DIRECTORY
-            await _thread(self.artifacts.materialize, str(job["input_set_id"]), project)
+            # 固定 schema 内的表由多次构建共用，清理仅结束本构建的可查询生命周期。
             if job["kind"] == RUN_CLEANUP:
-                body = {"mode": CLEANUP_MODE, "schema": cast(str, job["schema_name"])}
-                parent_id = UUID(job["parent_run_id"])
-                if cast(str, job["schema_name"]) != "run_" + parent_id.hex:
-                    body.update({"runId": str(parent_id), "tablePrefix": run_prefix(parent_id)})
-                await self._metricflow(job, project, body)
                 return ExecutionResult()
             raise ValueError("unsupported runtime job kind")
 

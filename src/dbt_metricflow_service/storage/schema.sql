@@ -456,7 +456,7 @@ COMMENT ON COLUMN runtime_job.config_version IS '执行所需配置版本';
 
 COMMENT ON COLUMN runtime_job.toolchain_version IS '执行所需工具链与镜像版本';
 
-COMMENT ON COLUMN runtime_job.schema_name IS '固定构建使用且不复用的物理 schema';
+COMMENT ON COLUMN runtime_job.schema_name IS '构建请求指定的固定物理 schema，多次构建可共用';
 
 COMMENT ON COLUMN runtime_job.profile_binding_id IS '不含凭据的 profile 绑定引用';
 

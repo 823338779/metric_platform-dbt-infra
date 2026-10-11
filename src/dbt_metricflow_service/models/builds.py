@@ -50,14 +50,6 @@ class ConfigSnapshot(Contract):
     profile_binding_id: str = Field(min_length=1, description="受控 profile 的 target 引用")
     environments: list[Environment] = Field(min_length=1, description="允许使用的执行环境")
     business_timezone: str = Field(default="UTC", description="构建固定的业务时区")
-    schema_name: str | None = Field(default=None, description="可选固定 schema；物理表仍按构建隔离")
-
-    @field_validator("schema_name")
-    @classmethod
-    def valid_schema(cls, value: str | None) -> str | None:
-        if value is not None and not re.fullmatch(r"[a-z][a-z0-9_]{0,255}", value):
-            raise ValueError("invalid schemaName")
-        return value
 
 
 def validate_branch(value: str | None) -> str | None:
@@ -92,9 +84,17 @@ class BuildRequest(Contract):
     environment: Environment = Field(description="构建的物理执行环境")
     execution_binding: str = Field(min_length=1, max_length=128, description="可复用执行配置引用")
     config_version: str = Field(min_length=1, max_length=128, description="不可变语义配置版本")
+    schema_name: str = Field(description="调用方必填固定 schema；同名物理表由后续构建覆盖")
     deployment_policy: DeploymentPolicy = Field(default=DeploymentPolicy.NONE, description="是否附带成功部署意图")
     idempotency_key: str = Field(min_length=1, max_length=256, description="调用方持久化的一次受理键")
     origin: Origin | None = Field(default=None, description="无业务语义的追溯标签")
+
+    @field_validator("schema_name")
+    @classmethod
+    def valid_schema(cls, value: str) -> str:
+        if not re.fullmatch(r"[a-z][a-z0-9_]{0,255}", value):
+            raise ValueError("invalid schemaName")
+        return value
 
     _branch = field_validator("branch_name")(validate_branch)
 

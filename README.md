@@ -67,14 +67,14 @@ dbt 命令通过 `dbtRunner.invoke()` 直接执行，MetricFlow 验证和查询�
             "businessTimezone":"Asia/Shanghai"}}]
 ```
 
-可选 `schemaName` 指定受控 schema；每次构建仍有独立表名前缀。省略时使用独立 `run_<uuid>` schema。历史查询需要匹配原工具链与配置的执行环境，不应伪造版本标识。
+调用方必须在每次构建请求中指定 `schemaName`，缺失、空值或非法名称会被拒绝。构建使用固定 schema 和原模型表名（包括模型配置的 alias），不生成随机 schema 或表名前缀；后续构建覆盖同名表，历史构建查询也会读取当前表数据。清理仅结束该构建的可查询生命周期，保留共用 schema 和表；部署指针切换不会恢复旧表数据。历史查询需要匹配原工具链与配置的执行环境，不应伪造版本标识。
 
 ## 构建与部署
 
 ```json
 {"repository":"https://git.example.com/data/sales.git","branchName":"feature/orders",
  "commitSha":"0123456789012345678901234567890123456789","environment":"PREVIEW",
- "executionBinding":"warehouse","configVersion":"1","deploymentPolicy":"NONE","idempotencyKey":"build-001"}
+ "executionBinding":"warehouse","configVersion":"1","schemaName":"analytics","deploymentPolicy":"NONE","idempotencyKey":"build-001"}
 ```
 
 `POST /v3/builds` 在 Git I/O 前原子保存构建身份和持久任务，返回 202。部署策略默认为 NONE。PREVIEW 可指定分支、完整 SHA 或两者；main 只可用于 PRODUCTION，正式环境必须显式 SHA。无分支只允许构建，不部署。分支输入在 worker 首次解析后固定 SHA，重试不会跟随最新 head。
@@ -162,4 +162,4 @@ uv run --frozen ruff check src tests
 uv run --frozen pytest -q tests/integration/test_publication_proxy_flow.py
 ```
 
-测试覆盖完整构建、部署、四种查询、版本隔离与不安全模板失败，创建独立测试 schema；该证据不代表 StarRocks 已做真实集成验证。
+测试覆盖完整构建、部署、四种查询、固定 schema 覆盖与不安全模板失败，创建独立测试 schema；该证据不代表 StarRocks 已做真实集成验证。

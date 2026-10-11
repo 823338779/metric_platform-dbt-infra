@@ -55,7 +55,7 @@ class RuntimeJob(Base):
     output_set_id: Mapped[StringUUID | None] = mapped_column(comment="成功事务发布的输出集合")
     config_version: Mapped[str] = mapped_column(comment="执行所需配置版本")
     toolchain_version: Mapped[str] = mapped_column(comment="执行所需工具链与镜像版本")
-    schema_name: Mapped[str | None] = mapped_column(comment="固定构建使用且不复用的物理 schema")
+    schema_name: Mapped[str | None] = mapped_column(comment="构建请求指定的固定物理 schema，多次构建可共用")
     profile_binding_id: Mapped[str | None] = mapped_column(comment="不含凭据的 profile 绑定引用")
     status: Mapped[str] = mapped_column(
         server_default=text("'QUEUED'::text"), comment="持久队列及公开状态的内部生命周期"

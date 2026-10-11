@@ -23,7 +23,6 @@ from .rows import entity_dict
 JSON_MODE = "json"
 BUILD_KIND = "BUILD_RUN"
 BUILD_FIELD = "buildId"
-SCHEMA_PREFIX = "run_"
 PROJECT_PREFIX = "engine:"
 QUEUED = "QUEUED"
 FAILED = "FAILED"
@@ -143,7 +142,7 @@ class BuildStore:
                 config_version=request.config_version,
                 toolchain_version=toolchain,
                 profile_binding_id=config["profileBindingId"],
-                schema_name=config.get("schemaName") or SCHEMA_PREFIX + run_id.hex,
+                schema_name=request.schema_name,
                 timeout_seconds=timeout,
             )
             build = Build(

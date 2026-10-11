@@ -14,7 +14,7 @@ from sqlglot import exp
 from dbt_metricflow_service.models.payloads import JsonObject
 from dbt_metricflow_service.storage.records import LeasedJob
 
-from ..platform.namespace import TABLE_NAME_PATTERN, prepare_versioned_project
+from ..platform.namespace import TABLE_NAME_PATTERN, prepare_fixed_schema_project
 from .template import validate_templates
 
 if TYPE_CHECKING:
@@ -75,18 +75,17 @@ SCHEMA_TEMPLATE = """{% macro generate_schema_name(custom_schema_name=none, node
 """
 
 
-def prepare_publication_project(project: Path, run_id: UUID, schema: str) -> str:
-    """所有物理模型使用本次 run 的新前缀，只修改任务副本。"""
-    prefix = prepare_versioned_project(project, run_id, schema)
+def prepare_publication_project(project: Path, schema: str) -> None:
+    """物理模型使用指定 schema 和原表名，只修改任务副本。"""
+    prepare_fixed_schema_project(project, schema)
     path = project / MACROS_DIRECTORY / SCHEMA_FILE
     if path.exists():
         raise ValueError("项目已有受控 schema 宏")
     path.write_text(SCHEMA_TEMPLATE, encoding=UTF8)
-    return prefix
 
 
-def validate_bound_manifest(target: Path, schema: str, prefix: str) -> None:
-    # 最终解析的所有物理模型必须属于本次构建。
+def validate_bound_manifest(target: Path, schema: str) -> None:
+    # 最终解析的所有物理模型必须属于指定 schema。
     manifest = json.loads((target / MANIFEST_FILE).read_text(encoding=UTF8))
     observed = set()
     for node in manifest["nodes"].values():
@@ -100,7 +99,6 @@ def validate_bound_manifest(target: Path, schema: str, prefix: str) -> None:
         if (
             actual[1] != schema
             or not isinstance(actual[2], str)
-            or not actual[2].startswith(prefix)
             or not TABLE_NAME_PATTERN.fullmatch(actual[2])
         ):
             raise ValueError("新建关系不属于候选")
@@ -200,11 +198,11 @@ async def execute_publication(
     if any((project / name).exists() for name in ROOT_CONFIGS[1:3]):
         await command(DEPS)
         await asyncio.to_thread(validate_templates, project)
-    prefix = await asyncio.to_thread(
-        prepare_publication_project, project, UUID(job["job_id"]), cast(str, job["schema_name"])
+    await asyncio.to_thread(
+        prepare_publication_project, project, cast(str, job["schema_name"])
     )
     await command(PARSE, NO_PARTIAL_PARSE)
-    await asyncio.to_thread(validate_bound_manifest, target, cast(str, job["schema_name"]), prefix)
+    await asyncio.to_thread(validate_bound_manifest, target, cast(str, job["schema_name"]))
 
     await command(COMPILE)
     compiled = json.loads((target / MANIFEST_FILE).read_text(encoding=UTF8))
@@ -247,7 +245,7 @@ async def execute_publication(
     }
     if not (tests | physical_ids) <= completed:
         raise ValueError("模型或必需测试执行不完整")
-    await asyncio.to_thread(validate_bound_manifest, target, cast(str, job["schema_name"]), prefix)
+    await asyncio.to_thread(validate_bound_manifest, target, cast(str, job["schema_name"]))
     if not physical_ids <= physical_catalog.get("nodes", {}).keys():
         raise ValueError("物理对象缺失，不能发布")
     empty = not manifest["nodes"] and not manifest.get("sources") and not manifest.get("metrics")

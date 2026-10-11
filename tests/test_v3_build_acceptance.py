@@ -77,3 +77,20 @@ def test_rejected_binding_creates_no_build(store):
     with pytest.raises(ServiceError) as failure:
         app.submit(request(executionBinding="missing"), CALLER)
     assert failure.value.status == 422
+
+
+def test_request_schema_is_persisted_and_part_of_idempotency(store):
+    from dbt_metricflow_service.application.errors import ServiceError
+    from dbt_metricflow_service.storage.jobs import JobStore
+
+    app = service(store)
+    body = request(schemaName="caller_schema")
+    first = app.submit(body, CALLER)
+    row = app.store.get(first.build_id)
+    assert JobStore(store.db).get(row["run_id"])["schema_name"] == "caller_schema"
+    assert row["request_json"]["schemaName"] == "caller_schema"
+    with pytest.raises(ServiceError) as failure:
+        app.submit(body.model_copy(update={"schema_name": "other_schema"}), CALLER)
+    assert failure.value.status == 409
+    second = app.submit(request(schemaName="caller_schema"), CALLER)
+    assert JobStore(store.db).get(app.store.get(second.build_id)["run_id"])["schema_name"] == "caller_schema"

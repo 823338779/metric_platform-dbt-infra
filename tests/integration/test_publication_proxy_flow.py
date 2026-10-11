@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 import yaml
+from psycopg2 import sql
 from sqlalchemy import select
 
 from dbt_metricflow_service.application.builds import BuildService
@@ -73,6 +74,7 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
         builds=builds,
         catalogs=catalogs,
     )
+    schema = "fixed_test_" + uuid4().hex
     target = DeploymentKey(repository=str(repo), branchName="main", environment="PRODUCTION")
 
     async def execute(kind):
@@ -93,6 +95,7 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
                 environment="PRODUCTION",
                 executionBinding="engine",
                 configVersion="1",
+                schemaName=schema,
                 deploymentPolicy="ON_SUCCESS",
                 idempotencyKey=uuid4().hex,
             ),
@@ -141,14 +144,14 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
                 first.build_id, mode="DIMENSION_VALUES", metricResourceIds=[metric], dimensionOptionId=dimension
             )
         ).rows
-        # 语义变更也执行完整构建，物理关系全部独立；不复用旧模型。
+        # 语义变更也执行完整构建，固定 schema 中的模型保持原表名。
         before = catalogs.read(first.build_id)[1]
         yaml_file = next(path for path in (repo / "models").glob("*.yml") if "revenue" in path.read_text())
         yaml_file.write_text(yaml_file.read_text() + "\n# semantic documentation update\n")
         git(repo, "commit", "-am", "semantic-change")
         semantic = await build()
         after = catalogs.read(semantic.build_id)[1]
-        assert {item["relation"]["identifier"] for item in after["relationBindings"]} != {
+        assert {item["relation"]["identifier"] for item in after["relationBindings"]} == {
             item["relation"]["identifier"] for item in before["relationBindings"]
         }
         assert all(item["mode"] == "BUILT" for item in after["relationBindings"])
@@ -157,7 +160,7 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
             QueryRequest(mode="QUERY", metricResourceIds=[metric]),
             "integration",
         )
-        # 新源码生成独立物理对象；新消费者仍可对旧构建提交查询。
+        # 新源码覆盖同名表，旧构建查询同样读取当前数据。
         path = repo / "models" / "orders.sql"
         path.write_text(path.read_text().replace("10.25", "11.25"))
         git(repo, "commit", "-am", "new-data")
@@ -165,7 +168,9 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
         assert second.build_id != first.build_id
         assert deployments.current(target).active_build_id == second.build_id
         assert completed.rows == first_result.rows
-        assert (await query(first.build_id, mode="QUERY", metricResourceIds=[metric])).rows == first_result.rows
+        assert Decimal(
+            str((await query(first.build_id, mode="QUERY", metricResourceIds=[metric])).rows[0][0])
+        ) == Decimal("32.00")
         assert Decimal(
             str((await query(second.build_id, mode="QUERY", metricResourceIds=[metric])).rows[0][0])
         ) == Decimal("32.00")
@@ -182,6 +187,7 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
                 environment="PRODUCTION",
                 executionBinding="engine",
                 configVersion="1",
+                schemaName=schema,
                 deploymentPolicy="ON_SUCCESS",
                 idempotencyKey=uuid4().hex,
             ),
@@ -193,8 +199,10 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
         runtime.jobs.fail(job["job_id"], job["lease_token"], "INVALID_DEFINITION")
         assert deployments.reconcile(target, rejected.initial_deployment["generation"]).deployment_status == "FAILED"
         assert deployments.current(target).active_build_id == second.build_id
-        assert (await query(first.build_id, mode="QUERY", metricResourceIds=[metric])).rows == first_result.rows
-        # 精简快照仍能清理非活动构建；历史目录和源码不随物理对象删除。
+        assert Decimal(
+            str((await query(first.build_id, mode="QUERY", metricResourceIds=[metric])).rows[0][0])
+        ) == Decimal("32.00")
+        # 清理结束旧构建查询生命周期，保留共享物理表、历史目录和源码。
         first_run = store.get(first.build_id)["run_id"]
         first_schema = runtime.jobs.get(first_run)["schema_name"]
         runtime.jobs.reserve_cleanup(first_run)
@@ -202,11 +210,13 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
         with runtime.db.transaction() as connection:
             assert connection.exec_driver_sql(
                 "SELECT 1 FROM pg_namespace WHERE nspname=%s", (first_schema,),
-            ).first() is None
+            ).first() is not None
         assert catalogs.list(first.build_id).items
         assert catalogs.resource(first.build_id, dataset, "source")["content"]
         with pytest.raises(ServiceError):
             await query(first.build_id, mode="QUERY", metricResourceIds=[metric])
         assert (await query(second.build_id, mode="QUERY", metricResourceIds=[metric])).rows
     finally:
+        with runtime.db.transaction() as connection:
+            connection.exec_driver_sql(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
         await runtime.close()

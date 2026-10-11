@@ -3,15 +3,12 @@ from __future__ import annotations
 import hashlib
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
-from dbt_metricflow_service.admin import register_bindings
 from dbt_metricflow_service.models.builds import BuildRequest
 from dbt_metricflow_service.platform.bindings import ProjectBinding, resolve_revision
-from tests.test_publication_storage import store as store
 from tests.test_v3_contract import build_body
 
 
@@ -108,41 +105,13 @@ def test_remote_cannot_be_supplied_by_request() -> None:
     assert [item["loc"] for item in error.value.errors()] == [("remote",)]
 
 
-def test_fixed_schema_binding_is_controlled_by_service(tmp_path: Path, store) -> None:
-    config = tmp_path / "bindings.json"
-    config.write_text(
-        '[{"repository":"https://example.invalid/project.git","executionBinding":"sample",'
-        '"configVersion":"1","config":{"environments":["PREVIEW"],"profileBindingId":"starrocks","schemaName":"dbt_ecom"}}]',
-        encoding="utf-8",
-    )
-
-    register_bindings(store.db, SimpleNamespace(max_artifact_file_bytes=4096, config_version="1"), config)
-
-    with store.db.transaction() as connection:
-        assert (
-            connection.exec_driver_sql(
-                "SELECT config_json FROM engine_execution_binding WHERE execution_binding=%s", ("sample",)
-            ).scalar_one()["schemaName"]
-            == "dbt_ecom"
-        )
+def test_schema_is_supplied_by_build_request() -> None:
     baseline = build_body()
-    BuildRequest.model_validate(baseline)
+    assert BuildRequest.model_validate({**baseline, "schemaName": "dbt_ecom"}).schema_name == "dbt_ecom"
+
+
+@pytest.mark.parametrize("schema", [None, "dbt-ecom", "", "a" * 257, "dbt_ecom;drop schema public"])
+def test_build_rejects_unsafe_schema(schema) -> None:
     with pytest.raises(ValidationError) as error:
-        BuildRequest.model_validate({**baseline, "schemaName": "attacker_db"})
+        BuildRequest.model_validate({**build_body(), "schemaName": schema})
     assert [item["loc"] for item in error.value.errors()] == [("schemaName",)]
-
-
-@pytest.mark.parametrize("schema", ["dbt-ecom", "", "a" * 257])
-def test_fixed_schema_binding_rejects_unsafe_name(tmp_path: Path, schema: str) -> None:
-    config = tmp_path / "bindings.json"
-    config.write_text(
-        '{"repository":"https://example.invalid/project.git","executionBinding":"sample",'
-        '"configVersion":"1","config":{"environments":["PREVIEW"],"profileBindingId":"starrocks","schemaName":"'
-        + schema
-        + '"}}',
-        encoding="utf-8",
-    )
-    config.write_text("[" + config.read_text(encoding="utf-8") + "]", encoding="utf-8")
-
-    with pytest.raises(ValueError):
-        register_bindings(None, SimpleNamespace(max_artifact_file_bytes=4096, config_version="1"), config)

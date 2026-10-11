@@ -1,11 +1,10 @@
-"""为平台固定 schema 内的每次 dbt 构建隔离物理对象。"""
+"""为平台构建校验固定 schema，保留项目的物理表名。"""
 
 from __future__ import annotations
 
 import json
 import re
 from pathlib import Path
-from uuid import UUID
 
 import yaml
 
@@ -14,7 +13,6 @@ TABLE_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 MAX_SCHEMA_NAME_LENGTH = 256
 MAX_TABLE_NAME_LENGTH = 1024
 ALIAS_MACRO_PATTERN = re.compile(r"\{%\s*macro\s+generate_alias_name\s*\(", re.IGNORECASE)
-ALIAS_MACRO_FILE = "generate_alias_name.sql"
 MACROS_DIRECTORY = "macros"
 TARGET_PATH = "target-path"
 TARGET_DIRECTORY = "target"
@@ -28,23 +26,16 @@ def validate_schema_name(schema: str) -> str:
     return schema
 
 
-def run_prefix(run_id: UUID) -> str:
-    """同一 run 重试时始终生成相同的模型表前缀。"""
-
-    return f"rv_{run_id.hex}_"
-
-
-def prepare_versioned_project(project: Path, run_id: UUID, schema: str) -> str:
+def prepare_fixed_schema_project(project: Path, schema: str) -> None:
     """仅修改已核对 Git 摘要的任务副本，不改受控仓库。"""
 
     validate_schema_name(schema)
-    prefix = run_prefix(run_id)
     macros = project / MACROS_DIRECTORY
     if macros.exists():
         for path in macros.rglob("*.sql"):
             if ALIAS_MACRO_PATTERN.search(path.read_text(encoding="utf-8")):
                 raise ValueError("项目已定义受控物理表别名宏")
-    # 检查所有实际宏目录；注入的物理命名宏必须在非默认配置下同样被 dbt 加载。
+    # 检查所有实际宏目录；受控 schema 宏在非默认配置下也必须被 dbt 加载。
     project_file = project / "dbt_project.yml"
     configuration = yaml.safe_load(project_file.read_text(encoding="utf-8")) if project_file.is_file() else {}
     macro_paths = configuration.get("macro-paths", [MACROS_DIRECTORY])
@@ -59,21 +50,10 @@ def prepare_versioned_project(project: Path, run_id: UUID, schema: str) -> str:
         configuration[TARGET_PATH] = TARGET_DIRECTORY
         project_file.write_text(yaml.safe_dump(configuration, sort_keys=False), encoding="utf-8")
     macros.mkdir(exist_ok=True)
-    (macros / ALIAS_MACRO_FILE).write_text(
-        "{% macro generate_alias_name(custom_alias_name=none, node=none) -%}\n"
-        "    {%- if custom_alias_name is none -%}\n"
-        f"        {{{{ return('{prefix}' ~ node.name) }}}}\n"
-        "    {%- else -%}\n"
-        f"        {{{{ return('{prefix}' ~ (custom_alias_name | trim)) }}}}\n"
-        "    {%- endif -%}\n"
-        "{%- endmacro %}\n",
-        encoding="utf-8",
-    )
-    return prefix
 
 
-def validate_versioned_manifest(target: Path, schema: str, prefix: str) -> None:
-    """在任何模型写入之前确认全部可写关系属于本 run。"""
+def validate_fixed_schema_manifest(target: Path, schema: str) -> None:
+    """在任何模型写入之前确认全部可写关系属于指定 schema。"""
 
     manifest = json.loads((target / "manifest.json").read_text(encoding="utf-8"))
     nodes = manifest.get("nodes")
@@ -96,9 +76,9 @@ def validate_versioned_manifest(target: Path, schema: str, prefix: str) -> None:
         relation = node.get("relation_name")
         relation_parts = [part.strip('`" ') for part in relation.split(".")] if isinstance(relation, str) else []
         if (node.get("schema") != schema or not isinstance(alias, str)
-                or not alias.startswith(prefix) or len(alias) > MAX_TABLE_NAME_LENGTH
+                or len(alias) > MAX_TABLE_NAME_LENGTH
                 or not TABLE_NAME_PATTERN.fullmatch(alias)
                 or len(relation_parts) < 2 or relation_parts[-2:] != [schema, alias]
                 or alias in names):
-            raise ValueError("dbt 物理关系不属于当前运行任务")
+            raise ValueError("dbt 物理关系不属于指定 schema")
         names.add(alias)

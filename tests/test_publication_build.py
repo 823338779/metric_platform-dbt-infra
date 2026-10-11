@@ -5,7 +5,7 @@ import os
 import subprocess
 import sys
 from types import SimpleNamespace
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 import yaml
@@ -23,7 +23,6 @@ from dbt_metricflow_service.platform.build import (
 def publication_executor(tmp_path):
     """工具链边界提供原生产物，发布验证和目录封存仍执行真实代码。"""
     from dbt_metricflow_service.platform.catalog import CATALOG_SCHEMA, MANIFEST_SCHEMA
-    from dbt_metricflow_service.platform.namespace import run_prefix
     from dbt_metricflow_service.runtime.executor import RuntimeExecutor
 
     project = tmp_path / "project"
@@ -34,7 +33,7 @@ def publication_executor(tmp_path):
     job = {"job_id": str(uuid4()), "attempt_id": str(uuid4()), "project_id": "sample",
            "request_json": {"buildId": str(uuid4())}, "schema_name": "candidate",
            "profile_binding_id": "test", "config_version": "1", "toolchain_version": "1"}
-    alias = run_prefix(UUID(job["job_id"])) + "orders"
+    alias = "orders"
     manifest = {"metadata": {"dbt_schema_version": MANIFEST_SCHEMA, "adapter_type": "postgres"},
                 "nodes": {"model.sample.orders": {"resource_type": "model", "name": "orders",
                           "config": {"materialized": "table"}, "database": "db", "schema": "candidate",
@@ -114,19 +113,19 @@ def test_only_configured_freshness_thresholds_require_execution(freshness, expec
     assert requires_source_freshness({"freshness": freshness}) is expected
 
 
-def test_manifest_cannot_bind_a_previous_run(tmp_path):
-    prefix = prepare_publication_project(tmp_path, uuid4(), "candidate")
+def test_manifest_cannot_escape_fixed_schema(tmp_path):
+    prepare_publication_project(tmp_path, "candidate")
     target = tmp_path / "target"
     target.mkdir()
     node = {"resource_type": "model", "config": {"materialized": "table"}, "database": "db",
-            "schema": "candidate", "alias": prefix + "orders", "relation_name": '"candidate"."' + prefix + 'orders"'}
+            "schema": "candidate", "alias": "orders", "relation_name": '"candidate"."orders"'}
     path = target / "manifest.json"
     path.write_text(json.dumps({"nodes": {"model.p.orders": node}}))
-    validate_bound_manifest(target, "candidate", prefix)
-    node.update(alias="old_orders", relation_name='"candidate"."old_orders"')
+    validate_bound_manifest(target, "candidate")
+    node.update(schema="other", relation_name='"other"."orders"')
     path.write_text(json.dumps({"nodes": {"model.p.orders": node}}))
     with pytest.raises(ValueError):
-        validate_bound_manifest(target, "candidate", prefix)
+        validate_bound_manifest(target, "candidate")
 
 
 @pytest.mark.parametrize("sql", [
@@ -151,7 +150,7 @@ def test_actual_dbt_tests_parse_under_publication_mapping(tmp_path, test_config,
     document["models"][1]["columns"][0]["data_tests"] = [
         {"not_null": {"config": test_config}}]
     definition.write_text(yaml.safe_dump(document, allow_unicode=True), encoding="utf-8")
-    prefix = prepare_publication_project(project, uuid4(), "main")
+    prepare_publication_project(project, "main")
     parsed = subprocess.run(
         [sys.executable, "-m", "dbt.cli.main", "parse", "--no-partial-parse",
          "--project-dir", str(project), "--profiles-dir", str(profiles)],
@@ -162,21 +161,49 @@ def test_actual_dbt_tests_parse_under_publication_mapping(tmp_path, test_config,
     manifest = json.loads((target / "manifest.json").read_text(encoding="utf-8"))
     tests = [node for node in manifest["nodes"].values() if node["resource_type"] == "test"]
     assert tests and all(node["schema"] == "main" for node in tests)
+    models = [node for node in manifest["nodes"].values() if node["resource_type"] == "model"]
+    assert models and all(node["alias"] == node["name"] for node in models)
     if writes:
         with pytest.raises(ValueError, match="发布测试禁止写入失败结果表"):
-            validate_bound_manifest(target, "main", prefix)
+            validate_bound_manifest(target, "main")
     else:
-        validate_bound_manifest(target, "main", prefix)
+        validate_bound_manifest(target, "main")
 def test_custom_target_directory_is_normalized_for_sealing(tmp_path):
     """命令和封存使用同一输出目录，原始源码仍由输入快照保留。"""
-    from uuid import uuid4
-
     import yaml
 
     from dbt_metricflow_service.platform.build import prepare_publication_project
 
     project_file = tmp_path / "dbt_project.yml"
     project_file.write_text("name: sample\nversion: '1.0'\ntarget-path: custom-target\n", encoding="utf-8")
-    prepare_publication_project(tmp_path, uuid4(), "analytics")
+    prepare_publication_project(tmp_path, "analytics")
     config = yaml.safe_load(project_file.read_text(encoding="utf-8"))
     assert config["target-path"] == "target"
+
+
+def test_repeated_dbt_build_overwrites_original_and_custom_alias_tables(tmp_path):
+    import duckdb
+
+    project, profiles, _ = make_resource_project(tmp_path)
+    model = project / "models/orders.sql"
+    source = model.read_text(encoding="utf-8")
+    model.write_text("{{ config(alias='sales_orders') }}\n" + source, encoding="utf-8")
+    prepare_publication_project(project, "main")
+    for value in (10, 20):
+        model.write_text(
+            "{{ config(alias='sales_orders') }}\n" + source.replace("10 as revenue", f"{value} as revenue"),
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [sys.executable, "-m", "dbt.cli.main", "build", "--no-partial-parse",
+             "--project-dir", str(project), "--profiles-dir", str(profiles)],
+            capture_output=True, text=True, encoding="utf-8", timeout=60,
+            env={**os.environ, "PYTHONUTF8": "1", "DBT_SEND_ANONYMOUS_USAGE_STATS": "false"},
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        validate_bound_manifest(project / "target", "main")
+        with duckdb.connect(str(tmp_path / "warehouse.duckdb")) as connection:
+            assert connection.execute("select revenue from main.sales_orders").fetchone() == (value,)
+            names = {row[0] for row in connection.execute("show tables").fetchall()}
+            assert "sales_orders" in names
+            assert all(not name.startswith("rv_") for name in names)
