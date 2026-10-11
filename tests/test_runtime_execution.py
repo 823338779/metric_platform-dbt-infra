@@ -110,7 +110,7 @@ def claimed(execution, kind, request):
 
 
 def programmatic_engine(monkeypatch, execute=None):
-    """保留线程、租约和 JSON 文件边界，仅替换需要仓库访问的 SDK 函数。"""
+    """保留线程、租约和内存载荷传递，仅替换需要仓库访问的 SDK 函数。"""
 
     def default_execute(project, profiles, data):
         assert (project / PROJECT_FILE).exists()
@@ -172,7 +172,7 @@ async def test_programmatic_tasks_use_restored_input_and_return_json(execution, 
     assert not (executor.settings.temp_root / str(job["job_id"]) / str(job["attempt_id"])).exists()
 
 
-async def test_oversized_programmatic_result_is_rejected_before_parsing(execution, monkeypatch):
+async def test_oversized_programmatic_result_is_rejected(execution, monkeypatch):
     executor, _, _, _ = execution
     executor.settings = dataclasses.replace(executor.settings, max_result_bytes=32)
     job = claimed(execution, "QUERY_OPTIONS", {"mode": "OPTIONS", "metrics": ["orders"]})
@@ -297,7 +297,7 @@ async def test_write_engine_connection_loss_does_not_confirm_external_stop(execu
     # SDK 连接异常不能证明外部写入已经停止，保留未知结果保护。
     monkeypatch.setattr(dbtRunner, "invoke", lambda *_: SimpleNamespace(success=False, exception=ConnectionError()))
     with pytest.raises(ExecutionError) as error:
-        await executor._command(job, spec, "BUILDING")
+        await executor._dbt(job, spec, "BUILDING")
     assert error.value.stopped is False
 
 
@@ -305,7 +305,7 @@ async def test_write_engine_connection_loss_does_not_confirm_external_stop(execu
 async def test_options_invalid_input_uses_structured_error_code(execution, monkeypatch):
     executor, _, _, _ = execution
     job = claimed(execution, "QUERY_OPTIONS", {"mode": "OPTIONS", "metrics": ["missing"]})
-    # SDK 参数异常仍通过真实 JSON 错误文件转换为稳定公开错误码。
+    # SDK 参数异常通过内存错误码转换为稳定公开错误码。
     def execute(project, profiles, data):
         raise metricflow.InvalidOptions()
 

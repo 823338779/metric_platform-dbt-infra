@@ -1,9 +1,5 @@
 from __future__ import annotations
 
-import json
-import os
-import subprocess
-import sys
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -24,8 +20,6 @@ from dbt_metricflow_service.platform.models import PlatformQueryRequest, QueryMo
 from dbt_metricflow_service.platform.namespace import run_prefix, validate_schema_name
 from dbt_metricflow_service.platform.queries import _json_cell, query_options, serialize_rows, validate_query
 
-WORKER_MODULE = "dbt_metricflow_service.platform.metricflow"
-WORKER_TIMEOUT_SECONDS = 1800
 INVALID_OPTIONS_CODE = "INVALID_QUERY"
 
 
@@ -162,48 +156,3 @@ def execute_programmatic(project: Path, profiles: Path, input_data: dict[str, An
     if result.result_df is None:
         raise ValueError("MetricFlow 未返回结果集")
     return serialize_rows(result.result_df, limit=request.limit)
-
-
-def invoke_programmatic(
-    project: Path, profiles: Path, schema: str, target: str,
-    input_path: Path, output_path: Path,
-) -> dict[str, Any]:
-    """子进程隔离 dbt 全局配置和数据库连接，产物通过受控 JSON 文件传递。"""
-
-    environment = {
-        **os.environ, "DBT_PROJECT_DIR": str(project), "DBT_PROFILES_DIR": str(profiles),
-        "DBT_TARGET_PATH": str(project / "target"), "DBT_PLATFORM_SCHEMA": schema,
-        "DBT_SEND_ANONYMOUS_USAGE_STATS": "false", "DBT_TARGET": target,
-    }
-    try:
-        subprocess.run(
-            [sys.executable, "-m", WORKER_MODULE, str(input_path), str(output_path)],
-            cwd=project, env=environment, capture_output=True, timeout=WORKER_TIMEOUT_SECONDS, check=True,
-        )
-    except (OSError, subprocess.SubprocessError) as error:
-        raise ValueError("MetricFlow 程序化查询失败") from error
-    result = json.loads(output_path.read_text(encoding="utf-8"))
-    if not isinstance(result, dict):
-        raise ValueError("MetricFlow 结果格式无效")
-    return result
-
-
-def main() -> None:
-    if len(sys.argv) != 3:
-        raise SystemExit(2)
-    input_path = Path(sys.argv[1]).resolve()
-    output_path = Path(sys.argv[2]).resolve()
-    payload = json.loads(input_path.read_text(encoding="utf-8"))
-    project = Path(os.environ["DBT_PROJECT_DIR"]).resolve()
-    profiles = Path(os.environ["DBT_PROFILES_DIR"]).resolve()
-    try:
-        result = execute_programmatic(project, profiles, payload)
-    except InvalidOptions:
-        # 同步选项接口可区分无效参数与可重试的基础设施错误。
-        output_path.write_text(json.dumps({"errorCode": INVALID_OPTIONS_CODE}), encoding="utf-8")
-        raise SystemExit(2) from None
-    output_path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
-
-
-if __name__ == "__main__":
-    main()

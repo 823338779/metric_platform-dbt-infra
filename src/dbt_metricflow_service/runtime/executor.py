@@ -3,14 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ParamSpec, TypeVar, cast
 from uuid import UUID
 
-from dbt_metricflow_service.execution.embedded import run_embedded
+from dbt_metricflow_service.execution.dbt import run_dbt
+from dbt_metricflow_service.execution.metricflow import MetricFlowRequest, run_metricflow
 from dbt_metricflow_service.execution.models import (
     CommandSpec,
     JobRecord,
@@ -50,30 +50,20 @@ ERROR_COMMAND_TIMEOUT = "COMMAND_TIMEOUT"
 ERROR_RESULT_TOO_LARGE = "RESULT_TOO_LARGE"
 ERROR_RESULT_INVALID = "RESULT_INVALID"
 ERROR_INVALID_QUERY = "INVALID_QUERY"
-PLATFORM_MODULE = "dbt_metricflow_service.platform.metricflow"
-MODULE_OPTION = "-m"
 TARGET_DIRECTORY = "target"
-INPUT_FILE = "input.json"
-OUTPUT_FILE = "output.json"
 QUERY_MODE = "QUERY"
 CLEANUP_MODE = "CLEANUP"
 LOCAL_DBT_COMMANDS = frozenset({"parse", "debug"})
 
 
-def build_programmatic_command(
-    project: Path, profiles: Path, schema: str, target: str, input_path: Path, output_path: Path,
-) -> CommandSpec:
-    """沿用命令参数模型描述 MetricFlow 的进程内 SDK 调用。"""
+def build_engine_environment(project: Path, profiles: Path, schema: str, target: str) -> dict[str, str]:
+    """构建 dbt 与 MetricFlow 共用的引擎环境。"""
 
-    environment = {
+    return {
         **os.environ, "DBT_PROJECT_DIR": str(project), "DBT_PROFILES_DIR": str(profiles),
         "DBT_TARGET_PATH": str(project / TARGET_DIRECTORY), "DBT_PLATFORM_SCHEMA": schema,
         "DBT_SEND_ANONYMOUS_USAGE_STATS": "false", "DBT_TARGET": target, "PYTHONUTF8": "1",
     }
-    return CommandSpec(
-        argv=(sys.executable, MODULE_OPTION, PLATFORM_MODULE, str(input_path), str(output_path)),
-        cwd=project, environment=environment, write_operation=False,
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,7 +146,7 @@ class RuntimeExecutor:
                     parent_id = UUID(job["parent_run_id"])
                     if cast(str, job["schema_name"]) != "run_" + parent_id.hex:
                         body.update({"runId": str(parent_id), "tablePrefix": run_prefix(parent_id)})
-                payload = await self._programmatic(job, project, attempt, body)
+                payload = await self._metricflow(job, project, body)
                 return ExecutionResult(payload)
             raise ValueError("unsupported runtime job kind")
 
@@ -209,65 +199,72 @@ class RuntimeExecutor:
         except (ValueError, OSError) as error:
             raise ExecutionError("SOURCE_UNAVAILABLE", stopped=True) from error
 
-    async def _command(self, job: LeasedJob, spec: CommandSpec, phase: str) -> JobRecord:
-        # 在实际执行前记录阶段；排队等待 SDK 串行锁后必须重新核对租约。
-        external = spec.write_operation or job["kind"] in {METRIC_QUERY, QUERY_OPTIONS, RUN_CLEANUP}
+    async def _authorize(self, job: LeasedJob, phase: str, *, external: bool) -> None:
+        # 两类引擎都在取得共享串行锁后记录阶段并重新核对租约。
+        valid = await _thread(self.jobs.phase, job["job_id"], job["lease_token"], phase, external=external)
+        if not valid:
+            raise ExecutionError(ERROR_LEASE_LOST, stopped=False)
 
-        async def authorize() -> None:
-            valid = await _thread(self.jobs.phase, job["job_id"], job["lease_token"], phase, external=external)
-            if not valid:
-                raise ExecutionError(ERROR_LEASE_LOST, stopped=False)
-
-        # 所有引擎操作共用进程内执行入口，租约校验仍在取得串行锁后执行。
-        record = await run_embedded(
+    async def _dbt(self, job: LeasedJob, spec: CommandSpec, phase: str) -> JobRecord:
+        # dbt 使用命令执行记录；不携带 MetricFlow 的请求、结果或业务错误码。
+        record = await run_dbt(
             job["project_id"], spec, self.settings.command_timeout_seconds,
-            self.settings.max_output_bytes, authorize,
+            self.settings.max_output_bytes, lambda: self._authorize(job, phase, external=spec.write_operation),
         )
+        # parse/debug 正常退出无需写入核对，写命令失联不能据退出码释放保护。
+        may_write = spec.write_operation or (
+            job["kind"] == DBT_COMMAND and job["request_json"].get("command") not in LOCAL_DBT_COMMANDS
+        )
+        self._check_record(record, may_write=may_write)
+        return record
+
+    @staticmethod
+    def _check_record(record: JobRecord, *, may_write: bool) -> None:
+        # 仅统一已脱敏的运行诊断与超时保护，不解释引擎特有的业务结果。
         if record.status is not JobStatus.SUCCEEDED:
             timed_out = record.status is JobStatus.TIMED_OUT
-            # parse/debug 的正常退出无需仓库写入核对，其他写命令失联不能据退出码释放保护。
-            may_write = spec.write_operation or job["kind"] == RUN_CLEANUP or (
-                job["kind"] == DBT_COMMAND and job["request_json"].get("command") not in LOCAL_DBT_COMMANDS
-            )
             raise ExecutionError(
                 ERROR_COMMAND_TIMEOUT if timed_out else ERROR_COMMAND_FAILED,
                 record.model_dump(mode=JSON_MODE),
                 stopped=not timed_out and not may_write,
             )
-        return record
 
-    async def _programmatic(
-        self, job: LeasedJob, project: Path, attempt: Path, body: JsonObject,
+    async def _metricflow(
+        self, job: LeasedJob, project: Path, body: JsonObject,
     ) -> JsonObject:
-        # 控制文件位于项目之外，产物采集不会收集查询参数和结果。
-        input_path, output_path = attempt / INPUT_FILE, attempt / OUTPUT_FILE
-        input_path.write_text(json.dumps(body), encoding=UTF8)
-        spec = build_programmatic_command(
+        # 请求作为内存对象交给执行线程，结果也不经过临时控制文件。
+        environment = build_engine_environment(
             project, self.settings.profiles_dir, cast(str, job["schema_name"]), cast(str, job["profile_binding_id"]),
-            input_path, output_path,
         )
-        try:
-            await self._command(job, spec, VALIDATING)
-        except ExecutionError as error:
-            # 引擎只对已验证的选项参数错误写出稳定代码，其他错误仍保留原诊断。
-            if job["kind"] == QUERY_OPTIONS and output_path.is_file():
-                with output_path.open("rb") as stream:
-                    raw = stream.read(self.settings.max_result_bytes + 1)
-                try:
-                    diagnostic = json.loads(raw) if len(raw) <= self.settings.max_result_bytes else {}
-                except ValueError:
-                    diagnostic = {}
-                if isinstance(diagnostic, dict) and diagnostic.get("errorCode") == ERROR_INVALID_QUERY:
-                    raise ExecutionError(ERROR_INVALID_QUERY) from error
-            raise
-        # 先有界读取再解析，空字典也是有效的清理结果。
-        with output_path.open("rb") as stream:
-            raw = stream.read(self.settings.max_result_bytes + 1)
-        if len(raw) > self.settings.max_result_bytes:
-            raise ExecutionError(ERROR_RESULT_TOO_LARGE)
-        value = json.loads(raw)
+        external = job["kind"] in {METRIC_QUERY, QUERY_OPTIONS, RUN_CLEANUP}
+        result = await run_metricflow(
+            job["project_id"], MetricFlowRequest(environment, body), self.settings.command_timeout_seconds,
+            self.settings.max_output_bytes,
+            lambda: self._authorize(job, VALIDATING, external=external),
+        )
+        # MetricFlow 直接处理业务错误；超时优先，不能发布线程迟到的结果。
+        if (result.record.status is JobStatus.FAILED and job["kind"] == QUERY_OPTIONS
+                and result.error_code == ERROR_INVALID_QUERY):
+            raise ExecutionError(ERROR_INVALID_QUERY)
+        self._check_record(result.record, may_write=job["kind"] == RUN_CLEANUP)
+        value = result.payload
         if not isinstance(value, dict):
             raise ExecutionError(ERROR_RESULT_INVALID)
+        # 保留 UTF-8 JSON 大小限制，只计数编码片段，不复制完整结果或重新解析。
+        size = 0
+        try:
+            for chunk in json.JSONEncoder(ensure_ascii=False).iterencode(value):
+                size += len(chunk.encode(UTF8))
+                if size > self.settings.max_result_bytes:
+                    raise ExecutionError(ERROR_RESULT_TOO_LARGE)
+        except (TypeError, ValueError, RecursionError) as error:
+            # 编码失败沿用引擎失败的脱敏诊断；已结束的读查询无需保留外部执行保护。
+            record = result.record.model_copy(update={
+                "status": JobStatus.FAILED, "stderr": type(error).__name__,
+            })
+            raise ExecutionError(
+                ERROR_COMMAND_FAILED, record.model_dump(mode=JSON_MODE), stopped=job["kind"] != RUN_CLEANUP,
+            ) from error
         return value
 
     @staticmethod

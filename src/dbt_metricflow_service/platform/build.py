@@ -160,20 +160,18 @@ async def execute_publication(
     """逻辑解析、选择性构建和完整验证使用同一个受租约控制的命令执行器。"""
     from ..execution.models import CommandSpec
     from ..platform.catalog import catalog_from_artifacts
-    from ..runtime.executor import ExecutionResult, build_programmatic_command
+    from ..runtime.executor import ExecutionResult, build_engine_environment
     from .build_plan import full_build_plan, validate_publication_evidence
     from .sealed_catalog import write_publication_catalog
 
     target = project / TARGET
     request = job["request_json"]
     settings = executor.settings
-    base = build_programmatic_command(
+    environment = build_engine_environment(
         project,
         settings.profiles_dir,
         cast(str, job["schema_name"]),
         cast(str, job["profile_binding_id"]),
-        attempt / "input.json",
-        attempt / "output.json",
     )
     common = (
         "--project-dir",
@@ -189,12 +187,12 @@ async def execute_publication(
     async def command(*args: str) -> None:
         # deps 不支持 target-path，沿用既有执行器的命令参数边界。
         options = common[:-2] if args[0] == DEPS else common
-        spec = CommandSpec((DBT, *args, *options), project, base.environment, args[0] == BUILD)
+        spec = CommandSpec((DBT, *args, *options), project, environment, args[0] == BUILD)
         from ..runtime.executor import ExecutionError
         from .validation_summary import failure_summary
 
         try:
-            await executor._command(job, spec, COMMAND_PHASES[args[0]])
+            await executor._dbt(job, spec, COMMAND_PHASES[args[0]])
         except ExecutionError as error:
             # 摘要与当前租约失败事务一起保存；不复制 stderr、SQL 或数据库异常。
             summary = failure_summary(target, args[0], settings.max_artifact_file_bytes)
@@ -241,7 +239,7 @@ async def execute_publication(
         raise ValueError("构建步骤证明超限")
     await command(DOCS, GENERATE)
     result_path.write_bytes(raw_results)
-    probe = await executor._programmatic(job, project, attempt, {"mode": "PROBE"})
+    probe = await executor._metricflow(job, project, {"mode": "PROBE"})
     manifest = json.loads((target / MANIFEST_FILE).read_text(encoding=UTF8))
     physical_catalog = json.loads((target / CATALOG_FILE).read_text(encoding=UTF8))
     results = json.loads(raw_results)
