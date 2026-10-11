@@ -91,27 +91,23 @@
       }
     },
     {
-      "name": "options-request",
-      "model": "OptionsRequest",
+      "name": "available-dimensions-request",
+      "model": "AvailableDimensionsRequest",
       "value": {
-        "idempotencyKey": "options-1",
         "metricResourceIds": [
           "metric.revenue"
         ]
       }
     },
     {
-      "name": "options-queued",
-      "model": "OptionsTaskView",
+      "name": "available-dimensions-result",
+      "model": "AvailableDimensionsView",
       "value": {
-        "optionsTaskId": "12345678-1234-4234-8234-123456789abc",
         "buildId": "12345678-1234-4234-8234-123456789abc",
-        "state": "QUEUED",
         "metricResourceIds": [
           "metric.revenue"
         ],
-        "options": null,
-        "error": null
+        "dimensions": []
       }
     },
     {
@@ -189,8 +185,8 @@
       }
     },
     {
-      "name": "query-status",
-      "model": "QueryView",
+      "name": "query-result",
+      "model": "ResultPage",
       "value": {
         "queryId": "12345678-1234-4234-8234-123456789abc",
         "buildId": "12345678-1234-4234-8234-123456789abc",
@@ -204,7 +200,15 @@
         },
         "boundaryPolicy": "metricflow_granularity_alignment",
         "resultAvailable": true,
-        "error": null
+        "error": null,
+        "sql": null,
+        "columns": [],
+        "rows": [],
+        "offset": 0,
+        "returnedRows": 0,
+        "nextOffset": null,
+        "availableRows": 0,
+        "resultTruncated": false
       }
     },
     {

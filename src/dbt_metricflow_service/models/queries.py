@@ -1,4 +1,4 @@
-"""版本固定的查询与异步选项协议；原生语义由引擎执行。"""
+"""版本固定的同步查询与选项协议；原生语义由引擎执行。"""
 
 from __future__ import annotations
 
@@ -35,8 +35,7 @@ class SelectedOrder(Contract):
     direction: Literal["ASC", "DESC"] = Field(description="排序方向")
 
 
-class OptionsRequest(Contract):
-    idempotency_key: str = Field(min_length=1, max_length=256, description="异步选项请求键")
+class AvailableDimensionsRequest(Contract):
     metric_resource_ids: list[str] = Field(min_length=1, max_length=100, description="指标资源集合")
 
 
@@ -78,13 +77,10 @@ class QueryRequest(Contract):
         return self
 
 
-class OptionsTaskView(Contract):
-    options_task_id: UUID = Field(description="持久选项任务身份")
+class AvailableDimensionsView(Contract):
     build_id: UUID = Field(description="固定构建身份")
-    state: BuildStatus = Field(description="异步执行状态")
     metric_resource_ids: list[str] = Field(description="规范化指标集合")
-    options: list[dict[str, Any]] | None = Field(default=None, description="成功后生成的合法选项")
-    error: ErrorView | None = Field(default=None, description="稳定错误")
+    dimensions: list[dict[str, Any]] = Field(description="当前构建及所选指标集合可用的维度")
 
 
 class QueryView(Contract):

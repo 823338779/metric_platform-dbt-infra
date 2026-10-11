@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import time
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 
 from sqlalchemy.exc import DBAPIError as DatabaseError
@@ -31,6 +32,8 @@ WORKER_FAILED = "WORKER_FAILED"
 VOLATILE = "VOLATILE"
 FAILURE_LOG = "Runtime worker operation failed: %s"
 EXTERNAL_OUTCOME_UNKNOWN = "externalOutcomeUnknown"
+SYNCHRONOUS_KINDS = ("METRIC_QUERY", "QUERY_OPTIONS")
+TERMINAL_STATES = frozenset({"SUCCEEDED", "FAILED"})
 
 
 class Worker:
@@ -73,7 +76,7 @@ class Worker:
                     self.runtime.jobs.claim, str(self.runtime.instance_id),
                     toolchain_version=self.runtime.toolchain,
                     config_versions=[self.runtime.settings.config_version],
-                    kinds=["BUILD_RUN", "METRIC_QUERY", "QUERY_OPTIONS", "RUN_CLEANUP"],
+                    kinds=["BUILD_RUN", "RUN_CLEANUP"],
                 )
                 if job is not None:
                     await self._execute(job)
@@ -82,6 +85,28 @@ class Worker:
                 # 不记录连接异常原文，避免 DSN 或服务配置进入日志。
                 logger.warning(FAILURE_LOG, type(error).__name__)
             await asyncio.sleep(POLL_SECONDS)
+
+    async def execute_now(self, job_id: str) -> None:
+        """在请求内执行指定查询；并发幂等调用等待同一记录的终态。"""
+        while True:
+            row = await asyncio.to_thread(self.runtime.jobs.get, job_id)
+            if row is None or row["kind"] not in SYNCHRONOUS_KINDS:
+                raise ValueError("synchronous query record is unavailable")
+            if row["status"] in TERMINAL_STATES:
+                return
+            if row["deadline_at"] <= datetime.now(UTC):
+                raise TimeoutError("synchronous query deadline exceeded")
+            job = await asyncio.to_thread(
+                self.runtime.jobs.claim, str(self.runtime.instance_id),
+                toolchain_version=self.runtime.toolchain,
+                config_versions=[self.runtime.settings.config_version],
+                kinds=list(SYNCHRONOUS_KINDS), job_id=job_id,
+            )
+            if job is not None:
+                # 复用租约心跳、受控执行和完成事务；不启动后台槽位。
+                await self._execute(job)
+            else:
+                await asyncio.sleep(POLL_SECONDS)
 
     async def _execute(self, job: LeasedJob) -> None:
         execution = asyncio.create_task(self.executor.execute(job))

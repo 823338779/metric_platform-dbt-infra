@@ -1,29 +1,23 @@
-"""异步选项身份和结果在后续构建后保持稳定。"""
+"""同步选项在后续构建后仍保持固定构建和指标集合的映射。"""
 from uuid import uuid4
 
 import pytest
 
 from dbt_metricflow_service.application.errors import ServiceError
-from dbt_metricflow_service.models.queries import OptionsRequest
-from dbt_metricflow_service.runtime.completion import complete_job
+from dbt_metricflow_service.models.queries import AvailableDimensionsRequest
 from tests.test_publication_queries import query_service
 from tests.test_publication_storage import store as store
 from tests.test_v3_catalog_queries import ready_build
 
 
-def test_options_admission_deduplicates_and_reads_same_mapping(store, tmp_path):
+def test_synchronous_options_reuse_same_mapping(store, tmp_path):
     service, job, build = query_service(store, tmp_path)
-    request = OptionsRequest(idempotencyKey=uuid4().hex, metricResourceIds=["metric.sample.orders"])
-    accepted = service.submit_options(build["build_id"], request, "platform")
-    assert accepted.state == "QUEUED"
-    assert service.submit_options(build["build_id"], request, "platform").options_task_id == accepted.options_task_id
-    child = service.jobs.claim(str(uuid4()), toolchain_version=job["toolchain_version"], kinds=["QUERY_OPTIONS"])
-    existing = service.jobs.result(str(service.fixture_options.options_task_id))["payload_json"]
-    assert complete_job(service.jobs, child["job_id"], child["lease_token"], existing)
-    result = service.get_options(accepted.options_task_id)
-    assert result.state == "SUCCEEDED"
-    assert result.options == service.get_options(service.fixture_options.options_task_id).options
+    request = AvailableDimensionsRequest(metricResourceIds=["metric.sample.orders"])
+    result = service.available_dimensions(build["build_id"], request, "platform")
+    assert result.dimensions == service.fixture_options.dimensions
+    assert service.available_dimensions(build["build_id"], request, "platform") == result
+    assert service.jobs.claim(str(uuid4()), toolchain_version=job["toolchain_version"], kinds=["QUERY_OPTIONS"]) is None
     with pytest.raises(ServiceError):
-        service.get_options(uuid4())
+        service.available_dimensions(uuid4(), request, "platform")
     ready_build(store, tmp_path)
-    assert service.get_options(accepted.options_task_id).options == result.options
+    assert service.available_dimensions(build["build_id"], request, "platform").dimensions == result.dimensions

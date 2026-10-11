@@ -462,6 +462,7 @@ class JobStore:
         config_versions: list[str] | None = None,
         toolchain_version: str = "default",
         kinds: list[str] | None = None,
+        job_id: UUID | str | None = None,
     ) -> LeasedJob | None:
         # 短事务领取一个任务，跳过其他 worker 已锁住的任务；VOLATILE 输入必须仍有效。
         with self.db.fact_session() as session:
@@ -475,6 +476,8 @@ class JobStore:
                     RuntimeJob.config_version.in_(versions),
                     RuntimeJob.toolchain_version == toolchain_version,
                     true() if kinds is None else RuntimeJob.kind.in_(kinds),
+                    # 同步请求只认领自己的记录，不能执行另一个请求的查询。
+                    true() if job_id is None else RuntimeJob.job_id == str(job_id),
                     or_(
                         RuntimeJob.input_mode == DURABLE,
                         and_(

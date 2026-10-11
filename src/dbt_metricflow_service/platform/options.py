@@ -4,7 +4,7 @@ import hashlib
 import json
 
 from ..models.artifacts import ResourceKind
-from ..models.payloads import JsonObject, QueryOption, QueryOptions
+from ..models.payloads import AvailableDimensions, JsonObject, QueryOption
 
 UTF8 = "utf-8"
 PATH_SEPARATOR = "__"
@@ -23,7 +23,7 @@ GRAIN_LABELS = {
 
 def map_options(
     build_id: str, metric_ids: list[str], catalog: JsonObject, native: JsonObject
-) -> tuple[QueryOptions, dict[str, str]]:
+) -> tuple[AvailableDimensions, dict[str, str]]:
     indexed = {item["resourceId"]: item for item in catalog["resources"]}
     selected = sorted(set(metric_ids))
     output: list[QueryOption] = []
@@ -60,5 +60,5 @@ def map_options(
             }
         )
         mapping[option_id] = token
-    response: QueryOptions = {"buildId": str(build_id), "metricResourceIds": selected, "options": output}
+    response: AvailableDimensions = {"buildId": str(build_id), "metricResourceIds": selected, "dimensions": output}
     return response, mapping

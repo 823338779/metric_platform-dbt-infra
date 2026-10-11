@@ -57,6 +57,12 @@ class Runtime:
                                        max_set_bytes=settings.max_artifact_bytes)
         self.worker = None
 
+    def execute_query(self, job_id: str) -> None:
+        """供 HTTP 线程池调用，直到查询执行和结果落库完成才返回。"""
+        from dbt_metricflow_service.runtime.worker import Worker
+
+        asyncio.run(Worker(self).execute_now(job_id))
+
 
     async def start(self, *, deployments: DeploymentService | None = None) -> None:
         # 本地目录只保存当前执行，可由空目录启动。

@@ -103,20 +103,19 @@ uv run --frozen dbt-service-admin build --file build-request.json
 | `GET /v3/deployments/current`、`GET /v3/deployments` | 自然键当前观察、意图历史 |
 | `GET /v3/builds/{buildId}/catalog` | 目录搜索、kind 筛选、游标分页 |
 | `GET /v3/builds/{buildId}/resources/{resourceId}` | 资源详情；另有 `/lineage`、`/source`、`/native-details` |
-| `POST /v3/builds/{buildId}/query-options` | 202 持久异步选项任务 |
-| `GET /v3/query-options/{optionsTaskId}` | 选项状态与结果 |
-| `POST /v3/builds/{buildId}/queries` | QUERY、EXPLAIN、PREVIEW、DIMENSION_VALUES |
-| `GET /v3/queries/{queryId}/status` | 仅任务/结果存在性，不加载结果正文 |
-| `GET /v3/queries/{queryId}/results` | offset/limit 分页，最多 200 行和 8 MiB |
+| `POST /v3/query/available-dimensions?build_id={build_id}` | build_id 为独立 URL 参数，请求体指定 metricResourceIds，200 同步返回可用的 dimensions 列表，包含时间粒度和允许的过滤操作 |
+| `POST /v3/query?build_id={build_id}` | build_id 为独立 URL 参数，同步执行 QUERY、EXPLAIN、PREVIEW、DIMENSION_VALUES，从起点返回最多 100 行和 8 MiB |
 | `GET /v3/changes` | 同事务持久变化流；省略 cursor 从起点重放 |
 
-目录、选项、查询始终使用选定 buildId；不重新解析当前部署。新构建不使旧构建目录和查询失效。物理清理后仍保留目录，`queryAvailable=false`。QUERY/EXPLAIN 使用 metricResourceIds；分组/过滤/维度取值使用该构建及指标集合异步生成的 optionId。PREVIEW 使用 datasetResourceId。查询行数默认 1000、最大 10000；分页只切片已保存结果，不重新执行 SQL。数值精度和 null 保留，时间按固定构建时区归一化。
+目录、可用维度、查询始终使用选定 buildId；不重新解析当前部署。新构建不使旧构建目录和查询失效。物理清理后仍保留目录，`queryAvailable=false`。QUERY/EXPLAIN 使用 metricResourceIds；分组/过滤/维度取值使用该构建及指标集合生成的 optionId。PREVIEW 使用 datasetResourceId。请求体 `limit` 表示查询结果总行数上限，默认 1000、最大 10000，仍参与幂等判定；查询请求暂不接受 `offset`，统一返回已保存结果的前 100 行以内。响应保留 ResultPage 元数据，但当前 HTTP 接口不提供翻页能力。数值精度和 null 保留，时间按固定构建时区归一化。
 
 其他列表默认 50、最多 200，统一 `items/nextCursor`。错误统一为 `error`，包含 `code/message/retryable/phase/buildId`。完整协议以 `/openapi.json` 为准；健康及版本接口仍是 `/health/live`、`/health/ready`、`/v1/versions`。
 
+只有构建、部署及其取消流程使用异步状态。两个查询接口均通过必填的 URL 参数 `build_id` 指定构建，请求体不包含 buildId。可用维度接口请求体只接收 `metricResourceIds`，不需要幂等键或任务编号，响应列表字段为 `dimensions`。查询接口保留幂等键和 `queryId`，在原请求内完成并返回首屏；相同请求重试复用已有结果。原 builds 下的 query-options、available-dimensions、queries 路由及 GET results 路由已移除。失败直接返回结构化 HTTP 错误，不返回 QUEUED/RUNNING；可用维度和查询的状态轮询路由已移除。执行记录保留租约、版本清理保护和已完成结果，后台 worker 不认领查询，不在请求结束后自动重试查询。同步调用方的 HTTP 超时应大于 `COMMAND_TIMEOUT_SECONDS`（默认 1800 秒），并为网络与结果传输留出余量。
+
 ## 初始化与运维
 
-这是整体协议替换。旧 `/v1` 业务路由、所有 `/v2/projects`、独立 validation、同步选项和分支登记入口均已移除，不提供兼容路由。调用方需另行迁移，不能混用新旧部署。
+这是整体协议替换。旧 `/v1` 业务路由、所有 `/v2/projects`、独立 validation 和分支登记入口均已移除，不提供兼容路由。调用方需另行迁移，不能混用新旧部署。
 
 部署使用空的 PostgreSQL 数据库，执行以下命令创建完整表结构、约束和触发器：
 

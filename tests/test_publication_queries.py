@@ -9,9 +9,9 @@ import pytest
 
 from dbt_metricflow_service.application.errors import ServiceError
 from dbt_metricflow_service.application.queries import QueryService
-from dbt_metricflow_service.models.queries import OptionsRequest as QueryOptionsRequest
+from dbt_metricflow_service.models.queries import AvailableDimensionsRequest
 from dbt_metricflow_service.models.queries import QueryRequest as PublishedQueryRequest
-from dbt_metricflow_service.runtime.completion import complete_job
+from tests.synchronous_queries import inline_executor
 from tests.test_publication_catalog import build
 from tests.test_publication_storage import store as store
 from tests.test_v3_catalog_queries import ready_build
@@ -33,31 +33,15 @@ def query_service(store, tmp_path):
     catalog = build().model_dump(mode="json", by_alias=True)
     catalogs = CatalogService(builds.store, artifacts)
     catalogs.read_build = lambda build: deepcopy(catalog)
-    service = QueryService(builds, catalogs, jobs)
-    request = QueryOptionsRequest(idempotencyKey=uuid4().hex, metricResourceIds=["metric.sample.orders"])
-    task = service.submit_options(view.build_id, request, "platform")
-    child = jobs.claim(str(uuid4()), toolchain_version=record["toolchain_version"], kinds=["QUERY_OPTIONS"])
-    complete_job(
-        jobs,
-        child["job_id"],
-        child["lease_token"],
-        {
-            "metrics": [{"name": "orders"}],
-            "dimensions": [
-                {"token": "order__region", "name": "region", "type": "categorical"},
-                {"token": "return__region", "name": "region", "type": "categorical"},
-            ],
-            "timeDimensions": [{"token": "metric_time__month", "granularity": "month"}],
-            "allowedFilters": ["=", "IN"],
-        },
-    )
-    service.fixture_options = task
+    service = QueryService(builds, catalogs, jobs, inline_executor(jobs, builds.toolchain))
+    request = AvailableDimensionsRequest(metricResourceIds=["metric.sample.orders"])
+    service.fixture_options = service.available_dimensions(view.build_id, request, "platform")
     return service, jobs.get(record["run_id"]), {"build_id": str(view.build_id)}
 
 
 def test_options_are_versioned_and_do_not_merge_paths(store, tmp_path):
     service, job, release = query_service(store, tmp_path)
-    options = service.get_options(service.fixture_options.options_task_id).options
+    options = service.fixture_options.dimensions
     assert len({item["optionId"] for item in options}) == 3
     assert all("token" not in item for item in options)
     assert next(item for item in options if item["granularities"])["resourceId"] is None

@@ -15,7 +15,7 @@ from dbt_metricflow_service.application.deployments import DeploymentService
 from dbt_metricflow_service.application.queries import QueryService
 from dbt_metricflow_service.models.builds import BuildRequest
 from dbt_metricflow_service.models.deployments import DeploymentKey
-from dbt_metricflow_service.models.queries import OptionsRequest, QueryRequest
+from dbt_metricflow_service.models.queries import AvailableDimensionsRequest, QueryRequest
 from dbt_metricflow_service.platform.source import is_ancestor, remote_head
 from dbt_metricflow_service.runtime.completion import complete_job
 from dbt_metricflow_service.runtime.executor import ExecutionError, RuntimeExecutor
@@ -63,7 +63,7 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
     store.register_binding(str(repo), "engine", "1", {"profileBindingId": "postgres", "environments": ["PRODUCTION"]})
     builds = BuildService(store, runtime.toolchain, 180)
     catalogs = CatalogService(store, runtime.artifacts)
-    queries = QueryService(builds, catalogs, runtime.jobs)
+    queries = QueryService(builds, catalogs, runtime.jobs, runtime.execute_query)
     deployments = DeploymentService(
         DeploymentStore(runtime.db),
         lambda repository, branch: remote_head(repository, branch, settings.temp_root),
@@ -102,9 +102,11 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
         return view
 
     async def query(build_id, **fields):
-        view = queries.submit(build_id, QueryRequest(idempotencyKey=uuid4().hex, **fields), "integration")
-        await execute("METRIC_QUERY")
-        return queries.results(view.query_id)
+        result = await asyncio.to_thread(
+            queries.submit, build_id, QueryRequest(idempotencyKey=uuid4().hex, **fields), "integration"
+        )
+        assert result.state == "SUCCEEDED"
+        return result
 
     try:
         first = await build()
@@ -112,11 +114,11 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
         resources = catalogs.list(first.build_id).model_dump(mode="json", by_alias=True)["items"]
         metric = next(item["resourceId"] for item in resources if item["kind"] == "METRIC")
         dataset = next(item["resourceId"] for item in resources if "PREVIEW" in item["capabilities"])
-        task = queries.submit_options(
-            first.build_id, OptionsRequest(idempotencyKey=uuid4().hex, metricResourceIds=[metric]), "integration"
+        result = await asyncio.to_thread(
+            queries.available_dimensions, first.build_id,
+            AvailableDimensionsRequest(metricResourceIds=[metric]), "integration"
         )
-        await execute("QUERY_OPTIONS")
-        options = queries.get_options(task.options_task_id).options
+        options = result.dimensions
         dimension = next(item["optionId"] for item in options if item["dimensionType"] != "time")
         first_result = await query(first.build_id, mode="QUERY", metricResourceIds=[metric])
         assert Decimal(str(first_result.rows[0][0])) == Decimal("31.00")
@@ -139,8 +141,8 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
             item["relation"]["identifier"] for item in before["relationBindings"]
         }
         assert all(item["mode"] == "BUILT" for item in after["relationBindings"])
-        queued = queries.submit(
-            first.build_id,
+        completed = await asyncio.to_thread(
+            queries.submit, first.build_id,
             QueryRequest(idempotencyKey=uuid4().hex, mode="QUERY", metricResourceIds=[metric]),
             "integration",
         )
@@ -151,8 +153,7 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
         second = await build()
         assert second.build_id != first.build_id
         assert deployments.current(target).active_build_id == second.build_id
-        await execute("METRIC_QUERY")
-        assert queries.results(queued.query_id).rows == first_result.rows
+        assert queries.results(completed.query_id).rows == first_result.rows
         assert (await query(first.build_id, mode="QUERY", metricResourceIds=[metric])).rows == first_result.rows
         assert Decimal(
             str((await query(second.build_id, mode="QUERY", metricResourceIds=[metric])).rows[0][0])

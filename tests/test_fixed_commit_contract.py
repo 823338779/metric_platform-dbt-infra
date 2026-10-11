@@ -42,7 +42,8 @@ def test_application_exposes_only_fixed_commit_business_routes(monkeypatch):
         api,
         "Runtime",
         lambda settings: SimpleNamespace(
-            db=None, jobs=SimpleNamespace(db=None), artifacts=None, toolchain="test", settings=settings
+            db=None, jobs=SimpleNamespace(db=None), artifacts=None, toolchain="test", settings=settings,
+            execute_query=lambda *_: pytest.fail("OpenAPI generation executed a query"),
         ),
     )
     app = api.create_app(

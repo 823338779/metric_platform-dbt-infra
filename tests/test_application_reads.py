@@ -13,6 +13,7 @@ from dbt_metricflow_service.application.errors import ServiceError
 from dbt_metricflow_service.application.queries import QueryService
 from dbt_metricflow_service.models.queries import QueryRequest
 from dbt_metricflow_service.storage.paging import page as legacy_page
+from tests.synchronous_queries import inline_executor
 from tests.test_publication_storage import store as store
 from tests.test_v3_build_acceptance import CALLER, request, service
 from tests.test_v3_catalog_queries import ready_build
@@ -69,17 +70,17 @@ def test_history_cursor_filters_and_concurrent_insert(store, deployments):
 
 def test_query_submission_does_not_read_deployments(store, tmp_path):
     app, build, jobs, artifacts = ready_build(store, tmp_path)
-    queries = QueryService(app, CatalogService(app.store, artifacts), jobs)
+    queries = QueryService(app, CatalogService(app.store, artifacts), jobs, inline_executor(jobs, app.toolchain))
     with reads(store.db) as statements:
         view = queries.submit(
             build.build_id,
             QueryRequest(idempotencyKey=uuid4().hex, mode="EXPLAIN", metricResourceIds=["metric.revenue"]),
             CALLER,
         )
-    assert view.state == "QUEUED"
+    assert view.state == "SUCCEEDED"
     assert not any("engine_deployment_attempt" in statement for statement in statements)
-    # 受理和返回状态各读一次构建；可用性及目录校验复用各自已读取的快照。
-    assert sum("FROM engine_build" in statement for statement in statements) == 2
+    # 受理、同步完成事务和结果元数据各读一次构建；可用性及目录校验复用快照。
+    assert sum("FROM engine_build" in statement for statement in statements) == 3
 
 
 @pytest.mark.parametrize("deployments", [False, True])

@@ -1,6 +1,7 @@
 """Framework database failures retain the runtime API and worker contract."""
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -19,16 +20,19 @@ from tests.test_runtime_api import runtime_pair as runtime_pair
 )
 async def test_database_errors_return_503(runtime_pair, monkeypatch, error):
     runtimes, _ = runtime_pair
-    app = create_app(runtimes[0].settings)
+    app = create_app(replace(runtimes[0].settings, service_token="test"))
 
     def unavailable(*args, **kwargs):
         raise error
 
-    monkeypatch.setattr(app.state.runtime.jobs, "get", unavailable)
+    monkeypatch.setattr(app.state.runtime.db, "session", unavailable)
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
                                     base_url="http://test") as client:
-            response = await client.get("/v3/queries/" + str(uuid4()) + "/status")
+            response = await client.post(
+                "/v3/query", params={"build_id": str(uuid4())}, headers={"Authorization": "Bearer test"},
+                json={"idempotencyKey": "query", "mode": "QUERY", "metricResourceIds": ["metric.orders"]},
+            )
         assert response.status_code == 503
         assert response.json()["error"]["code"] == "STORAGE_UNAVAILABLE"
         assert "private-password" not in response.text

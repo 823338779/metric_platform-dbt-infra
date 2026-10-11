@@ -66,13 +66,14 @@ def test_invalid_build_inputs(changes):
         BuildRequest.model_validate(build_body(**changes))
 
 
-def test_query_modes_are_strict_and_version_is_in_path():
+def test_query_modes_are_strict_and_build_is_outside_body():
     from dbt_metricflow_service.models.queries import QueryRequest
 
     query = {"mode": "QUERY", "metricResourceIds": ["metric.revenue"], "idempotencyKey": "q"}
     assert QueryRequest.model_validate(query).limit == 1000
     for changed in (
         {"limit": 10001},
+        {"offset": 0},
         {"buildId": SHA},
         {"releaseId": SHA},
         {"datasetResourceId": "table.a"},
@@ -84,12 +85,12 @@ def test_query_modes_are_strict_and_version_is_in_path():
         QueryRequest.model_validate({**query, "mode": "PREVIEW", "datasetResourceId": "table.a"})
 
 
-def test_options_require_idempotency_and_nonempty_metrics():
-    from dbt_metricflow_service.models.queries import OptionsRequest
+def test_options_require_nonempty_metrics_without_task_key():
+    from dbt_metricflow_service.models.queries import AvailableDimensionsRequest
 
     with pytest.raises(ValidationError):
-        OptionsRequest.model_validate({"idempotencyKey": "o", "metricResourceIds": []})
-    assert OptionsRequest.model_validate({"idempotencyKey": "o", "metricResourceIds": ["m", "m"]})
+        AvailableDimensionsRequest.model_validate({"metricResourceIds": []})
+    assert AvailableDimensionsRequest.model_validate({"metricResourceIds": ["m", "m"]})
 
 
 def test_exchange_fixture_matches_models():

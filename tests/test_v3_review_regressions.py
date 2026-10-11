@@ -11,6 +11,7 @@ from sqlalchemy import event
 from dbt_metricflow_service.models.deployments import DeploymentKey
 from dbt_metricflow_service.storage.deployments import DeploymentStore
 from tests.schema_helpers import isolated_database
+from tests.synchronous_queries import inline_executor
 from tests.test_publication_storage import store as store
 from tests.test_v3_build_acceptance import CALLER, request, service
 from tests.test_v3_deployments import deployment_service
@@ -103,10 +104,19 @@ def test_query_and_cleanup_acceptance_are_atomic(store, tmp_path, monkeypatch):
     from tests.test_v3_catalog_queries import ready_build
 
     app, build, jobs, artifacts = ready_build(store, tmp_path)
-    queries = QueryService(app, CatalogService(app.store, artifacts), jobs)
+    queries = QueryService(app, CatalogService(app.store, artifacts), jobs, inline_executor(jobs, app.toolchain))
     run = app.store.get(build.build_id)["run_id"]
     barrier = Barrier(2)
     original = queries._reserve
+    cleanup_finished = Event()
+    execute = queries.execute
+
+    def execute_after_cleanup_check(job_id):
+        # 同步请求保留执行中的引用，直到并发清理完成受理检查。
+        assert cleanup_finished.wait(timeout=5)
+        execute(job_id)
+
+    queries.execute = execute_after_cleanup_check
 
     def reserve(*args):
         barrier.wait(timeout=5)
@@ -128,6 +138,8 @@ def test_query_and_cleanup_acceptance_are_atomic(store, tmp_path, monkeypatch):
             return jobs.reserve_cleanup(run)
         except CleanupBlocked:
             return None
+        finally:
+            cleanup_finished.set()
 
     monkeypatch.setattr(queries, "_reserve", reserve)
     with ThreadPoolExecutor(max_workers=2) as pool:

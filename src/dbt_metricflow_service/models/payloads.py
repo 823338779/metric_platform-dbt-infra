@@ -20,12 +20,12 @@ class QueryOption(TypedDict):
     operators: list[str]  # 当前选项允许的过滤操作。
 
 
-class QueryOptions(TypedDict):
-    """异步选项计算完成后的固定版本结果。"""
+class AvailableDimensions(TypedDict):
+    """固定构建及指标集合可用的维度。"""
 
     buildId: str  # 选项所属构建。
     metricResourceIds: list[str]  # 排序去重后的指标资源集合。
-    options: list[QueryOption]  # 该指标集合可用的选项。
+    dimensions: list[QueryOption]  # 该指标集合可用的维度。
 
 
 class ValidationCheck(TypedDict):

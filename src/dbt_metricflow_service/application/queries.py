@@ -1,20 +1,21 @@
-"""固定构建的异步选项与查询；不重新解析当前部署或执行外部进程。"""
+"""固定构建的同步选项与查询；执行记录保留版本保护、幂等和结果分页。"""
 
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from dbt_metricflow_service.application.builds import BuildService
 from dbt_metricflow_service.application.catalog import CatalogService
-from dbt_metricflow_service.models.payloads import JsonObject, QueryOption, QueryOptions
-from dbt_metricflow_service.models.queries import OptionsRequest, QueryRequest
+from dbt_metricflow_service.models.payloads import AvailableDimensions, JsonObject, QueryOption
+from dbt_metricflow_service.models.queries import AvailableDimensionsRequest, QueryRequest
 from dbt_metricflow_service.storage.jobs import JobStore
 from dbt_metricflow_service.storage.records import StoredBuild, StoredJob
 
 from ..models.builds import BuildStatus, ErrorView
-from ..models.queries import OptionsTaskView, QueryView, ResultPage
+from ..models.queries import AvailableDimensionsView, QueryView, ResultPage
 from ..platform.options import map_options
 from ..platform.query_time import canonical_query, normalize_query_time, query_time_metadata
 from ..platform.results import result_page
@@ -26,14 +27,22 @@ from .query_plan import compile_query
 OPTIONS = "QUERY_OPTIONS"
 QUERY = "METRIC_QUERY"
 JSON_MODE = "json"
+OPTIONS_CALLER = "query-options"
+NO_RETRY = "NEVER"
+TIMEOUT_CODES = frozenset({"COMMAND_TIMEOUT", "TASK_TIMEOUT"})
+INVALID_QUERY = "INVALID_QUERY"
 
 
 class QueryService:
-    def __init__(self, builds: BuildService, catalogs: CatalogService, jobs: JobStore) -> None:
-        # 注入已有具体能力；任务执行由持久队列和 worker 承担。
+    def __init__(
+        self, builds: BuildService, catalogs: CatalogService, jobs: JobStore, execute: Callable[[str], None],
+    ) -> None:
+        # 执行回调在当前请求内完成；持久记录仅用于租约保护及结果重读。
         self.builds = builds
         self.catalogs = catalogs
         self.jobs = jobs
+        # 指定记录必须完成后返回，不能交给后台队列后立即返回。
+        self.execute = execute
 
     def _scope(self, build: StoredBuild, caller: str, kind: str) -> str:
         return json.dumps([build["repository"], caller, kind], separators=(",", ":"))
@@ -55,7 +64,6 @@ class QueryService:
         # JobStore 同时锁父构建并核对 lifecycle，引用取得与清理互斥。
         # 成功且可查询的构建具有持久父任务，查询受理不会删除这条历史记录。
         parent = cast(StoredJob, self.jobs.get(cast(str, build["run_id"])))
-        retry = "READ_ONLY" if build["config_snapshot"].get("queryRetrySafe") else "PREPARATION_ONLY"
         try:
             return self.jobs.reserve(
                 kind,
@@ -70,32 +78,42 @@ class QueryService:
                 profile_binding_id=parent["profile_binding_id"],
                 schema_name=parent["schema_name"],
                 timeout_seconds=self.builds.timeout,
-                retry_policy=retry,
+                retry_policy=NO_RETRY,
+                max_attempts=1,
             )
         except StoreConflict as error:
             raise ServiceError("IDEMPOTENCY_CONFLICT", "task key already binds another request", 409) from error
         except CleanupBlocked as error:
             raise ServiceError("PHYSICAL_OBJECTS_REMOVED", "build is being cleaned", 410) from error
 
-    def submit_options(self, build_id: UUID | str, request: OptionsRequest, caller: str) -> OptionsTaskView:
+    def available_dimensions(
+        self, build_id: UUID | str, request: AvailableDimensionsRequest, caller: str,
+    ) -> AvailableDimensionsView:
         build = self.builds.load(build_id)
-        body = request.model_dump(mode=JSON_MODE, by_alias=True)
-        body["metricResourceIds"] = sorted(set(request.metric_resource_ids))
-        prior, fingerprint = self._prior(build, body, caller, OPTIONS)
-        if prior:
-            return self.get_options(prior["job_id"])
         self._available(build)
         catalog = self.catalogs.read_build(build)
-        indexed = self._metrics(catalog, body["metricResourceIds"])
-        payload = {
-            "buildId": str(build_id),
-            "publicRequest": body,
-            "publicDigest": fingerprint,
-            "mode": "OPTIONS",
-            "metrics": [indexed[key]["name"] for key in body["metricResourceIds"]],
-        }
-        row = self._reserve(build, body, caller, OPTIONS, payload)
-        return self.get_options(row["job_id"])
+        selected = sorted(set(request.metric_resource_ids))
+        result, _ = self._options(build, selected, catalog, caller)
+        return AvailableDimensionsView.model_validate(result)
+
+    def _complete(self, row: StoredJob, build: StoredBuild) -> None:
+        # 重复幂等请求等待同一执行完成，HTTP 不暴露排队或运行中状态。
+        # 终态允许跨工具链重读；未完成记录不能在不兼容实例空等至超时。
+        if row["status"] not in {BuildStatus.SUCCEEDED, BuildStatus.FAILED}:
+            self._available(build)
+        try:
+            self.execute(row["job_id"])
+        except TimeoutError as error:
+            raise ServiceError("COMMAND_TIMEOUT", "query execution timed out", 504,
+                               build_id=build["build_id"]) from error
+        completed = self.jobs.get(row["job_id"])
+        if completed is None:
+            raise ServiceError("TASK_NOT_FOUND", "query execution record is unavailable", 404)
+        if completed["status"] != BuildStatus.SUCCEEDED:
+            code = completed["error_code"] or "EXECUTION_OUTCOME_UNKNOWN"
+            status = 422 if code == INVALID_QUERY else 504 if code in TIMEOUT_CODES else 503
+            raise ServiceError(code, "query execution did not complete", status,
+                               phase=completed["phase"], build_id=build["build_id"])
 
     @staticmethod
     def _metrics(catalog: JsonObject, selected: list[str]) -> dict[str, JsonObject]:
@@ -141,47 +159,38 @@ class QueryService:
             else None
         )
 
-    def get_options(self, options_task_id: UUID | str) -> OptionsTaskView:
-        row, build = self._task(options_task_id, OPTIONS)
-        metrics = row["request_json"]["publicRequest"]["metricResourceIds"]
-        options = None
-        if row["status"] == "SUCCEEDED":
-            catalog = self.catalogs.read_build(build)
-            result = self.jobs.result(row["job_id"])
-            if not result:
-                raise ServiceError("RESULT_REMOVED", "options result was removed", 410)
-            options = map_options(build["build_id"], metrics, catalog, result["payload_json"])[0]["options"]
-        return OptionsTaskView.model_validate(
-            {
-                "options_task_id": row["job_id"],
-                "build_id": build["build_id"],
-                "state": self._state(row),
-                "metric_resource_ids": metrics,
-                "options": options,
-                "error": self._error(row, build),
-            }
-        )
-
     def _options(
-        self, build: StoredBuild, selected: list[str], catalog: JsonObject
-    ) -> tuple[QueryOptions, dict[str, str]]:
-        # 查询消费已完成的选项，不在应用层同步等待或重新运行引擎。
+        self, build: StoredBuild, selected: list[str], catalog: JsonObject, caller: str = OPTIONS_CALLER,
+    ) -> tuple[AvailableDimensions, dict[str, str]]:
+        # 复用同一构建和指标集合的完整结果；首次查询也能当场计算，不要求预提交。
+        indexed = self._metrics(catalog, selected)
         rows = self.jobs.options_for(cast(str, build["run_id"]))
         for row in rows:
             if row["request_json"].get("publicRequest", {}).get("metricResourceIds") == selected:
                 result = self.jobs.result(row["job_id"])
                 if result:
                     return map_options(build["build_id"], selected, catalog, result["payload_json"])
-        raise ServiceError("OPTIONS_NOT_READY", "obtain query options for this build and metric set first", 409)
+        body = {"metricResourceIds": selected, "idempotencyKey": uuid4().hex}
+        payload = {
+            "buildId": build["build_id"], "publicRequest": body, "mode": "OPTIONS",
+            "metrics": [indexed[key]["name"] for key in selected],
+        }
+        row = self._reserve(build, body, caller, OPTIONS, payload)
+        self._complete(row, build)
+        result = self.jobs.result(row["job_id"])
+        if not result:
+            raise ServiceError("RESULT_REMOVED", "options result was removed", 410)
+        return map_options(build["build_id"], selected, catalog, result["payload_json"])
 
-    def submit(self, build_id: UUID | str, request: QueryRequest, caller: str) -> QueryView:
+    def submit(self, build_id: UUID | str, request: QueryRequest, caller: str) -> ResultPage:
         build = self.builds.load(build_id)
         timezone = build["config_snapshot"]["businessTimezone"]
         request = normalize_query_time(request, timezone)
         body = canonical_query(request)
         prior, fingerprint = self._prior(build, body, caller, QUERY)
         if prior:
-            return self.status(prior["job_id"])
+            self._complete(prior, build)
+            return self.results(prior["job_id"])
         self._available(build)
         catalog = self.catalogs.read_build(build)
         indexed = self._metrics(catalog, body["metricResourceIds"])
@@ -189,7 +198,7 @@ class QueryService:
         mapping: dict[str, str] = {}
         if request.group_by or request.filters or request.dimension_option_id:
             available, mapping = self._options(build, body["metricResourceIds"], catalog)
-            options = available["options"]
+            options = available["dimensions"]
         engine = compile_query(request, build["run_id"], indexed, options, mapping)
         payload = {
             "buildId": str(build_id),
@@ -198,7 +207,9 @@ class QueryService:
             "engineRequest": engine.model_dump(mode=JSON_MODE, by_alias=True),
             **query_time_metadata(body, timezone),
         }
-        return self.status(self._reserve(build, body, caller, QUERY, payload)["job_id"])
+        row = self._reserve(build, body, caller, QUERY, payload)
+        self._complete(row, build)
+        return self.results(row["job_id"])
 
     def status(self, query_id: UUID | str) -> QueryView:
         row, build = self._task(query_id, QUERY)

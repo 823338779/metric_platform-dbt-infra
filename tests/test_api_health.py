@@ -26,6 +26,7 @@ def application(monkeypatch, tmp_path):
         jobs=SimpleNamespace(db=None),
         artifacts=None,
         toolchain="test",
+        execute_query=lambda *_: pytest.fail("health endpoint executed a query"),
         started=False,
         closed=False,
     )

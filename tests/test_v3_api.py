@@ -66,7 +66,7 @@ def test_removed_business_routes_are_404(client, path):
 def test_openapi_declares_only_v3_business_contract(client):
     paths = client.get("/openapi.json").json()["paths"]
     assert all(path.startswith("/v3/") or path in {"/health/live", "/health/ready", "/v1/versions"} for path in paths)
-    assert "/v3/builds/{build_id}/queries" in paths
+    assert "/v3/query" in paths
 
 
 def test_exchange_fixture_matches_actual_openapi(client):

@@ -8,6 +8,7 @@ import pytest
 from dbt_metricflow_service.runtime.completion import complete_job
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.jobs import JobStore
+from tests.synchronous_queries import inline_executor
 from tests.test_publication_storage import store as store
 from tests.test_v3_build_acceptance import CALLER, request, service
 
@@ -150,29 +151,29 @@ def test_cleanup_completion_preserves_catalog_and_source(store, tmp_path):
 def test_option_scope_includes_build_and_metric_set(store, tmp_path):
     from dbt_metricflow_service.application.catalog import CatalogService
     from dbt_metricflow_service.application.queries import QueryService
-    from dbt_metricflow_service.models.queries import OptionsRequest
+    from dbt_metricflow_service.models.queries import AvailableDimensionsRequest
 
     app, build, jobs, artifacts = ready_build(store, tmp_path)
-    queries = QueryService(app, CatalogService(app.store, artifacts), jobs)
-    body = OptionsRequest(idempotencyKey=str(uuid4()), metricResourceIds=["metric.revenue"])
-    first = queries.submit_options(build.build_id, body, CALLER)
-    assert first.options_task_id == queries.submit_options(build.build_id, body, CALLER).options_task_id
+    queries = QueryService(app, CatalogService(app.store, artifacts), jobs, inline_executor(jobs, app.toolchain))
+    body = AvailableDimensionsRequest(metricResourceIds=["metric.revenue"])
+    first = queries.available_dimensions(build.build_id, body, CALLER)
+    assert first.dimensions == queries.available_dimensions(build.build_id, body, CALLER).dimensions
     assert first.build_id == build.build_id
-    assert first.state == "QUEUED"
+    assert first.dimensions
 
 
 def test_historical_environment_missing_is_503(store, tmp_path):
     from dbt_metricflow_service.application.catalog import CatalogService
     from dbt_metricflow_service.application.errors import ServiceError
     from dbt_metricflow_service.application.queries import QueryService
-    from dbt_metricflow_service.models.queries import OptionsRequest
+    from dbt_metricflow_service.models.queries import AvailableDimensionsRequest
 
     app, build, jobs, artifacts = ready_build(store, tmp_path)
     app.toolchain = "different"
-    query = QueryService(app, CatalogService(app.store, artifacts), jobs)
+    query = QueryService(app, CatalogService(app.store, artifacts), jobs, inline_executor(jobs, app.toolchain))
     with pytest.raises(ServiceError) as failure:
-        query.submit_options(
-            build.build_id, OptionsRequest(idempotencyKey="o", metricResourceIds=["metric.revenue"]), CALLER
+        query.available_dimensions(
+            build.build_id, AvailableDimensionsRequest(metricResourceIds=["metric.revenue"]), CALLER
         )
     assert failure.value.status == 503
 
@@ -183,14 +184,14 @@ def test_result_metadata_and_explain_survive_without_loading_status_payload(stor
     from dbt_metricflow_service.models.queries import QueryRequest
 
     app, build, jobs, artifacts = ready_build(store, tmp_path)
-    queries = QueryService(app, CatalogService(app.store, artifacts), jobs)
+    queries = QueryService(app, CatalogService(app.store, artifacts), jobs, inline_executor(jobs, app.toolchain))
     view = queries.submit(
         build.build_id,
         QueryRequest(idempotencyKey=uuid4().hex, mode="EXPLAIN", metricResourceIds=["metric.revenue"]),
         CALLER,
     )
-    job = jobs.claim(str(uuid4()), toolchain_version=app.toolchain, kinds=["METRIC_QUERY"])
-    assert complete_job(jobs, job["job_id"], job["lease_token"], {"sql": "select 1", "rows": [], "columns": []})
+    assert view.state == "SUCCEEDED"
+    assert view.sql == "select 1"
     assert queries.results(view.query_id).sql == "select 1"
     monkeypatch.setattr(jobs, "result", lambda *_: pytest.fail("status loaded result body"))
     assert queries.status(view.query_id).result_available
