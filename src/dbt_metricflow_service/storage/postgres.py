@@ -1,23 +1,21 @@
-"""短事务连接池；迁移仅由管理命令显式执行。"""
+"""短事务连接池；建表仅由管理命令显式执行。"""
 
 from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
-from pathlib import Path
 
 from psycopg2.extensions import connection as PsycopgConnection
 from psycopg2.extensions import new_array_type, new_type, parse_dsn, register_type
-from sqlalchemy import Connection, create_engine, event
+from sqlalchemy import Connection, create_engine, event, select
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import ConnectionPoolEntry
 
-MIGRATION_PATH = Path(__file__).parent / "migrations" / "001_runtime.sql"
-MIGRATIONS = (MIGRATION_PATH, MIGRATION_PATH.with_name("002_publication.sql"),
-              MIGRATION_PATH.with_name("003_agent_draft_validation.sql"),
-              MIGRATION_PATH.with_name("004_branch_publications.sql"),
-              MIGRATION_PATH.with_name("005_branch_baselines.sql"))
+from .entities import ChangeCounter
+
 CONNECTION_OPTIONS = "-c statement_timeout=10000 -c lock_timeout=5000"
-SQL_LOCK_FACTS = "SELECT value FROM engine_change_counter WHERE singleton FOR UPDATE"
+# ORM 与管理事务共用同一个事实锁表达式，保持触发器的全局加锁顺序。
+FACT_LOCK = select(ChangeCounter.value).where(ChangeCounter.singleton.is_(True)).with_for_update()
 
 
 class Database:
@@ -32,23 +30,36 @@ class Database:
             pool_size=max_connections, max_overflow=0, pool_timeout=5, pool_pre_ping=True,
         )
         event.listen(self.engine, "connect", _string_uuids)
+        # 每次 Store 事务独立创建 Session；显式写入避免 autoflush 改变加锁顺序。
+        self._sessions = sessionmaker(bind=self.engine, autoflush=False, expire_on_commit=False)
 
     def transaction(self) -> AbstractContextManager[Connection]:
         return self.engine.begin()
+
+    def session(self) -> AbstractContextManager[Session]:
+        """提交成功的短事务，异常时回滚并关闭当前 Session。"""
+        return self._sessions.begin()
+
+    @contextmanager
+    def fact_session(self) -> Iterator[Session]:
+        # ORM 事实写入也先锁变化计数器，保持与数据库触发器相同的锁顺序。
+        with self.session() as session:
+            session.execute(FACT_LOCK)
+            yield session
 
     @contextmanager
     def fact_transaction(self) -> Iterator[Connection]:
         # 事实事务先锁变化序号，再锁业务行，避免触发器与目标/任务锁顺序反转。
         # 只包含短数据库操作；Git、引擎执行和产物传输均在事务之外。
         with self.transaction() as connection:
-            connection.exec_driver_sql(SQL_LOCK_FACTS)
+            connection.execute(FACT_LOCK)
             yield connection
 
-    def migrate(self) -> None:
-        from .schema import migrate
+    def initialize(self) -> None:
+        from .schema import initialize
 
         with self.transaction() as connection:
-            migrate(connection)
+            initialize(connection)
 
     def check(self) -> None:
         from .schema import check

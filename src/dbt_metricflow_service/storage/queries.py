@@ -5,16 +5,18 @@ from __future__ import annotations
 from typing import cast
 from uuid import UUID
 
+from sqlalchemy import func, select
+
 from dbt_metricflow_service.models.payloads import JsonObject
 from dbt_metricflow_service.storage.jobs import JobStore
 from dbt_metricflow_service.storage.records import DatabaseRow, StoredJob
 
-from .branches import SQL_BRANCH_LOCK, SQL_PARENT_LOCK
-from .jobs import SQL_SELECT_FROM_RUNTIME_JOB_2, SQL_SELECT_FROM_RUNTIME_JOB_4
-from .rows import row_dict
+from .branches import ACTIVE, PRODUCTION
+from .entities import Branch, Release, RuntimeJob, RuntimeProject
+from .rows import entity_dict
 
-SQL_RELEASE = "SELECT * FROM runtime_release WHERE project_id=%s AND run_id=%s AND state='PUBLISHED'"
-SQL_ALIAS = "SELECT target_id FROM runtime_legacy_identity WHERE project_id=%s AND kind='QUERY' AND legacy_id=%s"
+PUBLISHED = "PUBLISHED"
+METRIC_QUERY = "METRIC_QUERY"
 
 
 class InactiveRelease(ValueError):
@@ -27,32 +29,29 @@ class QueryStore:
         self.db = jobs.db
 
     def release_for_run(self, project_id: str, run_id: UUID | str) -> DatabaseRow | None:
-        with self.db.transaction() as connection:
-            return row_dict(connection.exec_driver_sql(SQL_RELEASE, (project_id, run_id)))
-
-    def query_id(self, project_id: str, query_id: str) -> tuple[str, bool]:
-        with self.db.transaction() as connection:
-            alias = row_dict(connection.exec_driver_sql(SQL_ALIAS, (project_id, query_id)))
-        return (alias["target_id"], True) if alias else (query_id, False)
+        with self.db.session() as session:
+            return entity_dict(session.scalar(select(Release).where(
+                Release.project_id == project_id, Release.run_id == str(run_id), Release.state == PUBLISHED)))
 
     def reserve(
         self, project_id: str, release: DatabaseRow, scope: str, key: str, payload: JsonObject, timeout_seconds: int
     ) -> StoredJob:
         # 同键锁先于父 run、项目和发布槽，保持 JobStore 的锁顺序。
-        from .jobs import SQL_SELECT_PG_ADVISORY_XACT_LOCK_HASHTEXTEXTENDED
-
-        with self.db.transaction() as connection:
-            connection.exec_driver_sql(SQL_SELECT_PG_ADVISORY_XACT_LOCK_HASHTEXTEXTENDED, (scope + ":" + key,))
-            parent = row_dict(connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB_4, (release["run_id"],)))
-            connection.exec_driver_sql(SQL_PARENT_LOCK, (project_id,))
-            slot = row_dict(connection.exec_driver_sql(SQL_BRANCH_LOCK, (project_id, None, None)))
-            prior = row_dict(connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB_2, (scope, key)))
+        with self.db.session() as session:
+            session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(scope + ":" + key, 0))))
+            parent = entity_dict(session.get(RuntimeJob, release["run_id"], with_for_update=True))
+            session.execute(select(RuntimeProject.project_id).where(
+                RuntimeProject.project_id == project_id).with_for_update())
+            slot = entity_dict(session.scalar(select(Branch).where(
+                Branch.project_id == project_id, Branch.mode == PRODUCTION).with_for_update()))
+            prior = entity_dict(session.scalar(select(RuntimeJob).where(
+                RuntimeJob.idempotency_scope == scope, RuntimeJob.idempotency_key == key)))
             if prior:
                 return cast(StoredJob, prior)
-            if slot["status"] != "ACTIVE" or slot["active_release_id"] != release["release_id"]:
+            if slot["status"] != ACTIVE or slot["active_release_id"] != release["release_id"]:
                 raise InactiveRelease("release replaced")
             return cast(StoredJob, self.jobs.reserve_in_transaction(
-                connection, "METRIC_QUERY", project_id, payload,
+                session, METRIC_QUERY, project_id, payload,
                 idempotency_scope=scope, idempotency_key=key,
                 parent_run_id=parent["job_id"], input_set_id=parent["output_set_id"],
                 config_version=parent["config_version"], toolchain_version=parent["toolchain_version"],

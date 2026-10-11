@@ -42,12 +42,3 @@ class ValidationSummary(TypedDict):
     phase: str  # 发生失败的执行阶段。
     checks: list[ValidationCheck]  # 有界的检查结果集合。
     truncated: bool  # 原始证明或检查列表是否超出限制。
-
-
-class HistoryMigrationReport(TypedDict):
-    """历史发布映射到构建身份的结果。"""
-
-    mapping: dict[str, str]  # 旧发布身份到新构建身份的映射。
-    sourceIncomplete: list[str]  # 来源证据不完整的旧发布身份。
-    conflicts: list[str]  # 来源或执行关联冲突的旧发布身份。
-    dryRun: bool  # 是否只预览迁移结果。

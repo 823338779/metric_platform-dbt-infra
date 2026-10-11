@@ -30,7 +30,7 @@ def runtime_pair(tmp_path):
     from dbt_metricflow_service.runtime.service import Runtime
     from dbt_metricflow_service.storage.postgres import Database
     db = Database(dsn)
-    db.migrate()
+    db.initialize()
     db.close()
     toolchain = uuid4().hex
     runtimes = [Runtime(Settings(

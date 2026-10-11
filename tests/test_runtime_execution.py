@@ -131,7 +131,7 @@ def execution(tmp_path):
     if not dsn:
         pytest.skip("SERVICE_TEST_DATABASE_URL is required for execution integration tests")
     database = Database(dsn)
-    database.migrate()
+    database.initialize()
     jobs = JobStore(database)
     artifacts = ArtifactStore(database)
     project_id = str(uuid4())
@@ -157,7 +157,7 @@ def execution(tmp_path):
      {"observed": {"mode": "OPTIONS", "metrics": ["orders"]}}),
     ("RUN_CLEANUP", {"mode": "CLEANUP", "schema": "run_fixture"}, {}),
     ("RUN_CLEANUP", {}, {}),
-    ("METRIC_QUERY", {"mode": "EXPLAIN", "metrics": ["orders"]},
+    ("METRIC_QUERY", {"engineRequest": {"mode": "EXPLAIN", "metrics": ["orders"]}},
      {"observed": {"mode": "QUERY", "request": {"mode": "EXPLAIN", "metrics": ["orders"]}}}),
 ])
 async def test_programmatic_tasks_use_restored_input_and_return_json(execution, monkeypatch, kind, payload, expected):

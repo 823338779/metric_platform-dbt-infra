@@ -9,9 +9,10 @@ import pytest
 from pydantic import ValidationError
 
 from dbt_metricflow_service.admin import register_bindings
+from dbt_metricflow_service.models.builds import BuildRequest
 from dbt_metricflow_service.platform.bindings import ProjectBinding, resolve_revision
-from dbt_metricflow_service.storage.history_models import FixedCommitRequest
 from tests.test_publication_storage import store as store
+from tests.test_v3_contract import build_body
 
 
 def git(repo: Path, *args: str) -> str:
@@ -100,18 +101,11 @@ def test_reject_unsafe_sha_subdir_symlink_and_digest(repository: Path, tmp_path:
 
 
 def test_remote_cannot_be_supplied_by_request() -> None:
-    with pytest.raises(ValidationError):
-        FixedCommitRequest.model_validate(
-            {
-                "projectId": "sample",
-                "commitSha": "a" * 40,
-                "projectDigest": "b" * 64,
-                "profileBindingId": "postgres",
-                "configVersion": "1",
-                "idempotencyKey": "one",
-                "remote": "https://untrusted.invalid/repo.git",
-            }
-        )
+    baseline = build_body()
+    BuildRequest.model_validate(baseline)
+    with pytest.raises(ValidationError) as error:
+        BuildRequest.model_validate({**baseline, "remote": "https://untrusted.invalid/repo.git"})
+    assert [item["loc"] for item in error.value.errors()] == [("remote",)]
 
 
 def test_fixed_schema_binding_is_controlled_by_service(tmp_path: Path, store) -> None:
@@ -131,18 +125,11 @@ def test_fixed_schema_binding_is_controlled_by_service(tmp_path: Path, store) ->
             ).scalar_one()["schemaName"]
             == "dbt_ecom"
         )
-    with pytest.raises(ValidationError):
-        FixedCommitRequest.model_validate(
-            {
-                "projectId": "sample",
-                "commitSha": "a" * 40,
-                "projectDigest": "b" * 64,
-                "profileBindingId": "starrocks",
-                "configVersion": "2",
-                "idempotencyKey": "one",
-                "schemaName": "attacker_db",
-            }
-        )
+    baseline = build_body()
+    BuildRequest.model_validate(baseline)
+    with pytest.raises(ValidationError) as error:
+        BuildRequest.model_validate({**baseline, "schemaName": "attacker_db"})
+    assert [item["loc"] for item in error.value.errors()] == [("schemaName",)]
 
 
 @pytest.mark.parametrize("schema", ["dbt-ecom", "", "a" * 257])

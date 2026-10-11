@@ -5,178 +5,45 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable
+from datetime import timedelta
 from typing import cast, overload
 from uuid import UUID, uuid4
 
-from psycopg2.extras import Json
-from sqlalchemy import Connection
+from sqlalchemy import and_, func, literal, or_, select, true, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.orm import Session
 
 from dbt_metricflow_service.models.payloads import JsonObject, JsonValue
 from dbt_metricflow_service.storage.records import DatabaseRow, LeasedJob, StoredJob
-from dbt_metricflow_service.storage.rows import row_dict
+from dbt_metricflow_service.storage.rows import entity_dict
 
 from .branches import BranchStore
+from .entities import (
+    ArtifactFile,
+    ArtifactSet,
+    Branch,
+    Build,
+    DeploymentTarget,
+    JobResult,
+    Release,
+    ReleaseRelation,
+    RuntimeAttempt,
+    RuntimeJob,
+    RuntimeProject,
+)
 from .postgres import Database
 
-# SQL 统一作为静态常量，数据全部由绑定参数传入。
-SQL_SELECT_PARENT_RUN_ID_FROM = "SELECT parent_run_id FROM runtime_job WHERE job_id=%s"
-SQL_ENGINE_DEPLOYMENT_REFERENCE = """SELECT 1 FROM engine_deployment_target t
- JOIN engine_build b ON b.build_id=t.active_build_id WHERE b.run_id=%s LIMIT 1"""
-SQL_SELECT_J_A = (
-    "SELECT j.*,a.attempt_id,a.execution_stage,a.lease_token FROM runtime_job j JOIN runtime_attempt a "
-    "ON a.attempt_id=j.current_attempt_id WHERE j.job_id=%s AND j.status='RUNNING' AND "
-    "a.state='EXECUTING' AND a.lease_token=%s AND a.lease_expires_at>clock_timestamp() AND "
-    "j.deadline_at>clock_timestamp() AND (j.input_mode='DURABLE' OR "
-    "j.input_lease_expires_at>clock_timestamp()) FOR UPDATE OF j,a"
-)
-SQL_UPDATE_RUNTIME_PROJECT_SET = (
-    "UPDATE runtime_project SET busy_job_id=NULL WHERE busy_job_id=%s AND NOT EXISTS (SELECT 1 FROM "
-    "runtime_attempt WHERE job_id=%s AND execution_stage='EXTERNAL' AND stop_confirmed_at IS NULL)"
-)
-SQL_INSERT_INTO_RUNTIME_PROJECT = (
-    "INSERT INTO runtime_project(project_id,binding_config,config_version) VALUES(%s,%s,%s) ON "
-    "CONFLICT(project_id) DO NOTHING"
-)
-SQL_SELECT_FROM_RUNTIME_PROJECT = "SELECT * FROM runtime_project WHERE project_id=%s FOR UPDATE"
-SQL_UPDATE_RUNTIME_PROJECT_SET_2 = (
-    "UPDATE runtime_project SET "
-    "binding_config=%s,config_version=%s,source_set_id=COALESCE(%s,source_set_id),current_output_set_id=C"
-    "ASE WHEN %s THEN NULL ELSE current_output_set_id END,revision=revision+1 WHERE project_id=%s "
-    "RETURNING *"
-)
-SQL_SELECT_FROM_RUNTIME_PROJECT_2 = """SELECT p.*,
- COALESCE(b.publication_sequence,0) AS publication_sequence,
- b.active_release_id AS active_published_release_id
- FROM runtime_project p LEFT JOIN runtime_branch b ON b.project_id=p.project_id AND b.mode='PRODUCTION'
- WHERE p.project_id=%s"""
-SQL_SELECT_FROM_RUNTIME_JOB = "SELECT * FROM runtime_job WHERE job_id=%s"
-SQL_SELECT_FROM_RUNTIME_JOB_2 = "SELECT * FROM runtime_job WHERE idempotency_scope=%s AND idempotency_key=%s"
-SQL_SELECT_FROM_RUNTIME_JOB_RESULT = "SELECT * FROM runtime_job_result WHERE job_id=%s"
-SQL_INSERT_INTO_RUNTIME_JOB = (
-    "INSERT INTO "
-    "runtime_job(job_id,kind,project_id,parent_run_id,idempotency_scope,idempotency_key,request_fingerpri"
-    "nt,request_json,input_mode,pinned_instance_id,input_lease_expires_at,input_set_id,config_version,too"
-    "lchain_version,schema_name,profile_binding_id,run_lifecycle,deadline_at,retry_policy,max_attempts) "
-    "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,CASE WHEN %s='VOLATILE' THEN clock_timestamp()+%s*interval '1 "
-    "second' ELSE NULL END,%s,%s,%s,%s,%s,%s,clock_timestamp()+%s*interval '1 second',%s,%s) RETURNING *"
-)
-SQL_SELECT_FROM_RUNTIME_JOB_3 = (
-    "SELECT * FROM runtime_job WHERE status='QUEUED' AND available_at<=clock_timestamp() AND "
-    "deadline_at>clock_timestamp() AND config_version=ANY(%s) AND toolchain_version=%s AND (%s IS NULL "
-    "OR kind=ANY(%s)) AND (input_mode='DURABLE' OR (pinned_instance_id=%s AND "
-    "input_lease_expires_at>clock_timestamp())) ORDER BY available_at,created_at LIMIT 1 FOR UPDATE SKIP "
-    "LOCKED"
-)
-SQL_INSERT_INTO_RUNTIME_ATTEMPT = (
-    "INSERT INTO runtime_attempt(attempt_id,job_id,attempt_no,worker_id,lease_token,lease_expires_at) "
-    "VALUES(%s,%s,%s,%s,%s,clock_timestamp()+%s*interval '1 second')"
-)
-SQL_UPDATE_RUNTIME_JOB_SET = (
-    "UPDATE runtime_job SET "
-    "status='RUNNING',attempt_no=attempt_no+1,current_attempt_id=%s,started_at=COALESCE(started_at,clock_"
-    "timestamp()) WHERE job_id=%s RETURNING *"
-)
-SQL_SELECT_JOB_ID_FROM = "SELECT job_id FROM runtime_job WHERE job_id=%s FOR UPDATE"
-SQL_UPDATE_RUNTIME_ATTEMPT_SET = (
-    "UPDATE runtime_attempt SET "
-    "heartbeat_at=clock_timestamp(),lease_expires_at=clock_timestamp()+%s*interval '1 second' WHERE "
-    "attempt_id=%s"
-)
-SQL_UPDATE_RUNTIME_JOB_SET_2 = (
-    "UPDATE runtime_job SET input_lease_expires_at=clock_timestamp()+%s*interval '1 second' WHERE "
-    "input_mode='VOLATILE' AND pinned_instance_id=%s AND status IN ('QUEUED','RUNNING') AND "
-    "input_lease_expires_at>clock_timestamp() AND deadline_at>clock_timestamp() AND (%s IS NULL OR "
-    "job_id=ANY(%s::uuid[]))"
-)
-SQL_UPDATE_RUNTIME_JOB_SET_3 = "UPDATE runtime_job SET phase=%s WHERE job_id=%s"
-SQL_SELECT_FROM_RUNTIME_ARTIFACT_SET = "SELECT * FROM runtime_artifact_set WHERE set_id=%s"
-SQL_UPDATE_RUNTIME_JOB_SET_4 = "UPDATE runtime_job SET input_set_id=%s WHERE job_id=%s"
-SQL_INSERT_INTO_RUNTIME_JOB_RESULT = (
-    "INSERT INTO "
-    "runtime_job_result(job_id,attempt_id,payload_json,stdout_tail,stderr_tail,exit_code,output_truncated"
-    ") VALUES(%s,%s,%s,%s,%s,%s,%s)"
-)
-SQL_UPDATE_RUNTIME_ATTEMPT_SET_2 = (
-    "UPDATE runtime_attempt SET "
-    "state='SUCCEEDED',stop_confirmed_at=clock_timestamp(),finished_at=clock_timestamp() WHERE "
-    "attempt_id=%s"
-)
-SQL_UPDATE_RUNTIME_JOB_SET_5 = (
-    "UPDATE runtime_job SET "
-    "status='SUCCEEDED',output_set_id=%s,finished_at=clock_timestamp(),error_code=NULL,error_detail=NULL "
-    "WHERE job_id=%s"
-)
-SQL_UPDATE_RUNTIME_ATTEMPT_SET_3 = (
-    "UPDATE runtime_attempt SET state=CASE WHEN %s THEN 'FAILED' ELSE 'EXPIRED_UNCONFIRMED' "
-    "END,stop_confirmed_at=CASE WHEN %s THEN clock_timestamp() ELSE NULL "
-    "END,finished_at=clock_timestamp() WHERE attempt_id=%s"
-)
-SQL_UPDATE_RUNTIME_JOB_SET_6 = (
-    "UPDATE runtime_job SET status='FAILED',error_code=%s,error_detail=%s,finished_at=clock_timestamp() WHERE job_id=%s"
-)
-SQL_SELECT_J_FROM = (
-    "SELECT j.* FROM runtime_job j WHERE status IN ('QUEUED','RUNNING') AND "
-    "(deadline_at<=clock_timestamp() OR (input_mode='VOLATILE' AND "
-    "input_lease_expires_at<=clock_timestamp()) OR EXISTS (SELECT 1 FROM runtime_attempt a WHERE "
-    "a.attempt_id=j.current_attempt_id AND a.lease_expires_at<=clock_timestamp())) ORDER BY created_at "
-    "FOR UPDATE OF j SKIP LOCKED"
-)
-SQL_SELECT_JOB_ID_FROM_2 = "SELECT job_id FROM runtime_attempt WHERE attempt_id=%s AND lease_token=%s"
-SQL_SELECT_FROM_RUNTIME_JOB_4 = "SELECT * FROM runtime_job WHERE job_id=%s FOR UPDATE"
-SQL_UPDATE_RUNTIME_ATTEMPT_SET_4 = (
-    "UPDATE runtime_attempt SET state='STOPPED',stop_confirmed_at=clock_timestamp() WHERE attempt_id=%s "
-    "AND state='EXPIRED_UNCONFIRMED'"
-)
-SQL_SELECT_FROM_RUNTIME_JOB_5 = "SELECT * FROM runtime_job WHERE kind='RUN_CLEANUP' AND parent_run_id=%s"
-SQL_SELECT_FROM_RUNTIME_JOB_6 = (
-    "SELECT 1 FROM runtime_job WHERE (job_id=%s OR parent_run_id=%s) AND status IN ('QUEUED','RUNNING') LIMIT 1"
-)
-SQL_SELECT_FROM_RUNTIME_ATTEMPT = (
-    "SELECT 1 FROM runtime_attempt a JOIN runtime_job j ON j.job_id=a.job_id WHERE (j.job_id=%s OR "
-    "j.parent_run_id=%s) AND a.execution_stage='EXTERNAL' AND a.stop_confirmed_at IS NULL LIMIT 1"
-)
-SQL_UPDATE_RUNTIME_JOB_SET_7 = "UPDATE runtime_job SET run_lifecycle='CLEANING' WHERE job_id=%s"
-SQL_INSERT_INTO_RUNTIME_JOB_2 = (
-    "INSERT INTO "
-    "runtime_job(job_id,kind,project_id,parent_run_id,idempotency_scope,idempotency_key,request_fingerpri"
-    "nt,config_version,toolchain_version,schema_name,profile_binding_id,input_set_id,deadline_at,retry_po"
-    "licy) VALUES(%s,'RUN_CLEANUP',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,clock_timestamp()+interval '10 "
-    "minutes','PREPARATION_ONLY') RETURNING *"
-)
-SQL_SELECT_PG_ADVISORY_XACT_LOCK_HASHTEXTEXTENDED = "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))"
-SQL_SELECT_STATE_PROJECT_ID = "SELECT state,project_id FROM runtime_artifact_set WHERE set_id=%s"
-SQL_UPDATE_RUNTIME_PROJECT_SET_3 = "UPDATE runtime_project SET busy_job_id=%s WHERE project_id=%s"
-SQL_UPDATE_RUNTIME_ATTEMPT_SET_5 = (
-    "UPDATE runtime_attempt SET execution_stage='EXTERNAL',external_execution_refs=%s WHERE attempt_id=%s"
-)
-SQL_SELECT_FROM_RUNTIME_ARTIFACT_SET_2 = "SELECT * FROM runtime_artifact_set WHERE set_id=%s FOR UPDATE"
-SQL_UPDATE_RUNTIME_JOB_SET_8 = "UPDATE runtime_job SET run_lifecycle='CLEANED' WHERE job_id=%s"
-SQL_UPDATE_RUNTIME_PROJECT_SET_4 = (
-    "UPDATE runtime_project SET current_output_set_id=%s,revision=revision+1 WHERE project_id=%s AND "
-    "config_version=%s AND (source_set_id=%s OR source_set_id=(SELECT source_set_id FROM "
-    "runtime_artifact_set WHERE set_id=%s))"
-)
-SQL_SELECT_CLOCK_TIMESTAMP_AS = "SELECT clock_timestamp() AS now"
-SQL_SELECT_RELATIVE_PATH_FROM = "SELECT relative_path FROM runtime_artifact_file WHERE set_id=%s"
-SQL_SELECT_FROM_RUNTIME_ATTEMPT_2 = "SELECT * FROM runtime_attempt WHERE attempt_id=%s FOR UPDATE"
-SQL_UPDATE_RUNTIME_ATTEMPT_SET_6 = (
-    "UPDATE runtime_attempt SET state=%s,finished_at=clock_timestamp(),stop_confirmed_at=CASE WHEN %s "
-    "THEN NULL ELSE clock_timestamp() END WHERE attempt_id=%s"
-)
-SQL_UPDATE_RUNTIME_JOB_SET_9 = (
-    "UPDATE runtime_job SET "
-    "status='QUEUED',current_attempt_id=NULL,available_at=clock_timestamp()+%s*interval '1 second' WHERE "
-    "job_id=%s"
-)
-SQL_SELECT_FROM_RUNTIME_ATTEMPT_3 = (
-    "SELECT 1 FROM runtime_attempt WHERE job_id=%s AND execution_stage='EXTERNAL' AND stop_confirmed_at IS NULL"
-)
-SQL_UPDATE_RUNTIME_JOB_SET_10 = (
-    "UPDATE runtime_job SET "
-    "status='QUEUED',current_attempt_id=NULL,available_at=clock_timestamp(),deadline_at=clock_timestamp()"
-    "+interval '10 minutes',finished_at=NULL,error_code=NULL WHERE job_id=%s RETURNING *"
-)
-
+# ORM 表达式显式保留条件更新和行锁，时间边界由数据库判断。
+EXECUTING = "EXECUTING"
+PRODUCTION = "PRODUCTION"
+PREPARATION_ONLY = "PREPARATION_ONLY"
+QUERY_OPTIONS = "QUERY_OPTIONS"
+INVALID_QUERY = "INVALID_QUERY"
+PREPARING = "PREPARING"
+BUILDING = "BUILDING"
+VALIDATING = "VALIDATING"
+PUBLISHED = "PUBLISHED"
+SUPERSEDED = "SUPERSEDED"
 QUEUED = "QUEUED"
 RUNNING = "RUNNING"
 SUCCEEDED = "SUCCEEDED"
@@ -209,23 +76,10 @@ REQUIRED_BUILD_FILES = frozenset(
 REQUIRED_VALIDATION_FLAGS = ("allTestsPassed", "representativeQueryPassed", "relationsVerified")
 MAX_DIAGNOSTIC = 1024 * 1024
 MAX_RESULT = 16 * 1024 * 1024
-SQL_OPTIONS_RETRY = """UPDATE runtime_job j SET status='QUEUED',current_attempt_id=NULL,
- available_at=clock_timestamp(),finished_at=NULL,error_code=NULL,error_detail=NULL
- WHERE job_id=%s AND kind='QUERY_OPTIONS' AND status='FAILED' AND attempt_no<max_attempts
- AND deadline_at>clock_timestamp() AND error_code<>'INVALID_QUERY'
- AND NOT EXISTS(SELECT 1 FROM runtime_attempt a WHERE a.job_id=j.job_id
- AND a.execution_stage='EXTERNAL' AND a.stop_confirmed_at IS NULL)"""
-SQL_RELEASE_RUN_ARTIFACTS = """UPDATE runtime_job SET input_set_id=NULL,output_set_id=NULL
- WHERE (job_id=%s OR parent_run_id=%s)
- AND NOT EXISTS(SELECT 1 FROM engine_build b WHERE b.run_id=runtime_job.job_id)
- AND NOT EXISTS(SELECT 1 FROM engine_build b WHERE b.run_id=runtime_job.parent_run_id)"""
-SQL_EXTERNAL_ATTEMPT = "SELECT 1 FROM runtime_attempt WHERE job_id=%s AND execution_stage='EXTERNAL' LIMIT 1"
+
+
 FORBIDDEN_REQUEST_KEYS = frozenset({"resources", "credentials", "password", "token", "secret", "environment", "env"})
-LEGACY_IMPORT_DIGEST = "legacyImportDigest"
-BINDING_FIELD = "binding"
 RELEASE_FIELD = "releaseId"
-SQL_RELEASE_BRANCH = "SELECT branch_id FROM runtime_release WHERE project_id=%s AND release_id=%s"
-SQL_ASSIGN_BRANCH = "UPDATE runtime_job SET branch_id=%s WHERE job_id=%s RETURNING *"
 
 
 class _FinishLeaseLost(Exception):
@@ -261,14 +115,6 @@ def _safe_request(value: JsonValue) -> JsonValue:
     return value
 
 
-SQL_ATTACH_DIGEST = "UPDATE runtime_job SET request_json=request_json || %s::jsonb WHERE job_id=%s"
-SQL_RESULT_EXISTS = "SELECT EXISTS(SELECT 1 FROM runtime_job_result WHERE job_id=%s)"
-SQL_OPTIONS_FOR_BUILD = """SELECT * FROM runtime_job WHERE parent_run_id=%s AND kind='QUERY_OPTIONS'
- AND status='SUCCEEDED' ORDER BY created_at DESC"""
-SQL_ATTEMPT_EXTERNAL = "SELECT execution_stage FROM runtime_attempt WHERE attempt_id=%s"
-SQL_ENGINE_CANCEL = "SELECT cancel_requested FROM engine_build WHERE run_id=%s"
-
-
 class JobStore:
     def __init__(
         self,
@@ -294,75 +140,91 @@ class JobStore:
         preview_profile: str | None = None,
     ) -> DatabaseRow:
         # 项目导入与普通任务受理锁同一项目行，换源时立即移除旧输出指针。
-        with self.db.transaction() as connection:
-            sql_result = connection.exec_driver_sql(
-                SQL_INSERT_INTO_RUNTIME_PROJECT,
-                (project_id, Json(binding_config or {}), config_version),
+        with self.db.session() as session:
+            session.execute(
+                pg_insert(RuntimeProject)
+                .values(project_id=project_id, binding_config=binding_config or {}, config_version=config_version)
+                .on_conflict_do_nothing(index_elements=[RuntimeProject.project_id])
             )
-            sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_PROJECT, (project_id,))
-            current = cast(DatabaseRow, row_dict(sql_result))
+            project = session.get(RuntimeProject, project_id, with_for_update=True, populate_existing=True)
             if source_set_id is not None:
-                sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_ARTIFACT_SET, (source_set_id,))
-                source = row_dict(sql_result)
-                if (
-                    not source
-                    or source["state"] != SEALED
-                    or source["kind"] != SOURCE
-                    or source["project_id"] != project_id
-                ):
+                source = session.get(ArtifactSet, source_set_id)
+                if not source or source.state != SEALED or source.kind != SOURCE or source.project_id != project_id:
                     raise ValueError("Project source must be a sealed source of the same project")
-            changed = source_set_id is not None and current["source_set_id"] != str(source_set_id)
-            sql_result = connection.exec_driver_sql(
-                SQL_UPDATE_RUNTIME_PROJECT_SET_2,
-                (
-                    Json(binding_config if binding_config is not None else current["binding_config"]),
-                    config_version,
-                    source_set_id,
-                    changed or current["config_version"] != config_version,
-                    project_id,
-                ),
-            )
-            result = dict(cast(DatabaseRow, row_dict(sql_result)))
-            BranchStore.ensure_production(connection, project_id, preview_profile)
-            return result
+            changed = source_set_id is not None and project.source_set_id != str(source_set_id)
+            if changed or project.config_version != config_version:
+                project.current_output_set_id = None
+            if binding_config is not None:
+                project.binding_config = binding_config
+            if source_set_id is not None:
+                project.source_set_id = source_set_id
+            project.config_version = config_version
+            project.revision += 1
+            session.flush()
+            BranchStore.ensure_production(session, project_id, preview_profile)
+            return entity_dict(project)
 
     def project(self, project_id: str) -> DatabaseRow | None:
-        with self.db.transaction() as connection:
-            sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_PROJECT_2, (project_id,))
-            return row_dict(sql_result)
+        with self.db.session() as session:
+            row = session.execute(
+                select(
+                    RuntimeProject,
+                    func.coalesce(Branch.publication_sequence, 0),
+                    Branch.active_release_id,
+                )
+                .outerjoin(Branch, and_(Branch.project_id == RuntimeProject.project_id, Branch.mode == PRODUCTION))
+                .where(RuntimeProject.project_id == project_id)
+            ).one_or_none()
+            if row is None:
+                return None
+            # 发布序号和活动指针只从生产分支派生，不在项目表重复保存。
+            result = entity_dict(row[0])
+            result.update(publication_sequence=row[1], active_published_release_id=row[2])
+            return result
 
     def get(self, job_id: UUID | str) -> StoredJob | None:
-        with self.db.transaction() as connection:
-            sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB, (str(job_id),))
-            return cast(StoredJob | None, row_dict(sql_result))
+        with self.db.session() as session:
+            return cast(StoredJob | None, entity_dict(session.get(RuntimeJob, str(job_id))))
 
     def by_key(self, scope: str, key: str) -> StoredJob | None:
-        with self.db.transaction() as connection:
-            sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB_2, (scope, key))
-            return cast(StoredJob | None, row_dict(sql_result))
+        with self.db.session() as session:
+            job = session.scalar(
+                select(RuntimeJob).where(RuntimeJob.idempotency_scope == scope, RuntimeJob.idempotency_key == key)
+            )
+            return cast(StoredJob | None, entity_dict(job))
 
     def result_exists(self, job_id: UUID | str) -> bool:
         # 状态读取仅检查结果引用，不加载结果正文。
-        with self.db.transaction() as connection:
-            return connection.exec_driver_sql(SQL_RESULT_EXISTS, (str(job_id),)).scalar_one()
+        with self.db.session() as session:
+            return session.scalar(select(select(JobResult.job_id).where(JobResult.job_id == str(job_id)).exists()))
 
     def options_for(self, run_id: UUID | str) -> list[StoredJob]:
         # 查询只消费同一固定构建的已完成选项任务。
-        with self.db.transaction() as connection:
-            return cast(
-                list[StoredJob],
-                [dict(row) for row in connection.exec_driver_sql(SQL_OPTIONS_FOR_BUILD, (run_id,)).mappings()],
+        with self.db.session() as session:
+            jobs = session.scalars(
+                select(RuntimeJob)
+                .where(
+                    RuntimeJob.parent_run_id == str(run_id),
+                    RuntimeJob.kind == QUERY_OPTIONS,
+                    RuntimeJob.status == SUCCEEDED,
+                )
+                .order_by(RuntimeJob.created_at.desc())
             )
+            return [cast(StoredJob, entity_dict(job)) for job in jobs]
 
     def external_started(self, attempt_id: UUID | str) -> bool:
         # 取消时以持久 attempt 为准；无记录时不能证明外部执行已经停止。
-        with self.db.transaction() as connection:
-            return connection.exec_driver_sql(SQL_ATTEMPT_EXTERNAL, (attempt_id,)).scalar_one_or_none() != "PREPARING"
+        with self.db.session() as session:
+            return (
+                session.scalar(
+                    select(RuntimeAttempt.execution_stage).where(RuntimeAttempt.attempt_id == str(attempt_id))
+                )
+                != PREPARING
+            )
 
     def result(self, job_id: UUID | str) -> DatabaseRow | None:
-        with self.db.transaction() as connection:
-            sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB_RESULT, (str(job_id),))
-            return row_dict(sql_result)
+        with self.db.session() as session:
+            return entity_dict(session.get(JobResult, str(job_id)))
 
     def reserve(
         self,
@@ -370,106 +232,112 @@ class JobStore:
         project_id: str,
         request_json: JsonObject,
         *,
-        job_id: UUID | str | None=None,
-        fingerprint: str | None=None,
-        idempotency_scope: str | None=None,
-        idempotency_key: str | None=None,
-        parent_run_id: UUID | str | None=None,
-        input_set_id: str | None=None,
-        input_mode: str=DURABLE,
-        pinned_instance_id: str | None=None,
-        config_version: str="1",
-        toolchain_version: str="default",
-        schema_name: str | None=None,
-        profile_binding_id: str | None=None,
-        retry_policy: str="PREPARATION_ONLY",
-        max_attempts: int=3,
-        timeout_seconds: int=600,
-        write: bool=False,
-        expected_revision: int | None=None,
-        branch_id: str | None=None,
+        job_id: UUID | str | None = None,
+        fingerprint: str | None = None,
+        idempotency_scope: str | None = None,
+        idempotency_key: str | None = None,
+        parent_run_id: UUID | str | None = None,
+        input_set_id: str | None = None,
+        input_mode: str = DURABLE,
+        pinned_instance_id: str | None = None,
+        config_version: str = "1",
+        toolchain_version: str = "default",
+        schema_name: str | None = None,
+        profile_binding_id: str | None = None,
+        retry_policy: str = "PREPARATION_ONLY",
+        max_attempts: int = 3,
+        timeout_seconds: int = 600,
+        write: bool = False,
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
     ) -> StoredJob:
         # 幂等作用域先串行化；parent 锁统一先于项目行和子任务，避免清理受理穿透。
-        with self.db.fact_transaction() as connection:
-            return cast(StoredJob, self.reserve_in_transaction(
-                connection, kind, project_id, request_json,
-                job_id=job_id,
-                fingerprint=fingerprint,
-                idempotency_scope=idempotency_scope,
-                idempotency_key=idempotency_key,
-                parent_run_id=parent_run_id,
-                input_set_id=input_set_id,
-                input_mode=input_mode,
-                pinned_instance_id=pinned_instance_id,
-                config_version=config_version,
-                toolchain_version=toolchain_version,
-                schema_name=schema_name,
-                profile_binding_id=profile_binding_id,
-                retry_policy=retry_policy,
-                max_attempts=max_attempts,
-                timeout_seconds=timeout_seconds,
-                write=write,
-                expected_revision=expected_revision,
-                branch_id=branch_id,
-            ))
+        with self.db.fact_session() as session:
+            return cast(
+                StoredJob,
+                self.reserve_in_transaction(
+                    session,
+                    kind,
+                    project_id,
+                    request_json,
+                    job_id=job_id,
+                    fingerprint=fingerprint,
+                    idempotency_scope=idempotency_scope,
+                    idempotency_key=idempotency_key,
+                    parent_run_id=parent_run_id,
+                    input_set_id=input_set_id,
+                    input_mode=input_mode,
+                    pinned_instance_id=pinned_instance_id,
+                    config_version=config_version,
+                    toolchain_version=toolchain_version,
+                    schema_name=schema_name,
+                    profile_binding_id=profile_binding_id,
+                    retry_policy=retry_policy,
+                    max_attempts=max_attempts,
+                    timeout_seconds=timeout_seconds,
+                    write=write,
+                    expected_revision=expected_revision,
+                    branch_id=branch_id,
+                ),
+            )
 
     def reserve_in_transaction(
         self,
-        connection: Connection,
+        connection: Session,
         kind: str,
         project_id: str,
         request_json: JsonObject,
         *,
-        job_id: UUID | str | None=None,
-        fingerprint: str | None=None,
-        idempotency_scope: str | None=None,
-        idempotency_key: str | None=None,
-        parent_run_id: UUID | str | None=None,
-        input_set_id: str | None=None,
-        input_mode: str=DURABLE,
-        pinned_instance_id: str | None=None,
-        config_version: str="1",
-        toolchain_version: str="default",
-        schema_name: str | None=None,
-        profile_binding_id: str | None=None,
-        retry_policy: str="PREPARATION_ONLY",
-        max_attempts: int=3,
-        timeout_seconds: int=600,
-        write: bool=False,
-        expected_revision: int | None=None,
-        branch_id: str | None=None,
+        job_id: UUID | str | None = None,
+        fingerprint: str | None = None,
+        idempotency_scope: str | None = None,
+        idempotency_key: str | None = None,
+        parent_run_id: UUID | str | None = None,
+        input_set_id: str | None = None,
+        input_mode: str = DURABLE,
+        pinned_instance_id: str | None = None,
+        config_version: str = "1",
+        toolchain_version: str = "default",
+        schema_name: str | None = None,
+        profile_binding_id: str | None = None,
+        retry_policy: str = "PREPARATION_ONLY",
+        max_attempts: int = 3,
+        timeout_seconds: int = 600,
+        write: bool = False,
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
     ) -> StoredJob:
         # 幂等作用域先串行化；parent 锁统一先于项目行和子任务，避免清理受理穿透。
+        session = connection
         if idempotency_key is not None:
             idempotency_scope = idempotency_scope or kind
-            sql_result = connection.exec_driver_sql(
-                SQL_SELECT_PG_ADVISORY_XACT_LOCK_HASHTEXTEXTENDED, (idempotency_scope + ":" + idempotency_key,)
+            session.execute(
+                select(func.pg_advisory_xact_lock(func.hashtextextended(idempotency_scope + ":" + idempotency_key, 0)))
             )
         parent = None
         if parent_run_id is not None:
-            sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB_4, (str(parent_run_id),))
-            parent = row_dict(sql_result)
-            if not parent or parent["kind"] != BUILD_RUN or parent["project_id"] != project_id:
+            parent = session.get(RuntimeJob, str(parent_run_id), with_for_update=True, populate_existing=True)
+            if not parent or parent.kind != BUILD_RUN or parent.project_id != project_id:
                 raise ValueError("Parent must be a BUILD_RUN of this project")
-        sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_PROJECT, (project_id,))
-        project = row_dict(sql_result)
+        project = session.get(RuntimeProject, project_id, with_for_update=True, populate_existing=True)
         if not project:
             raise ValueError("Project is not registered")
         # 前置 manifest 校验之后若项目发生导入，拒绝混用旧输入与新配置。
         if expected_revision is not None and (
-            project["revision"] != expected_revision or project["config_version"] != config_version
+            project.revision != expected_revision or project.config_version != config_version
         ):
             raise StoreConflict("Project changed during request validation; retry")
         if input_set_id is None:
             if parent:
-                input_set_id = parent["output_set_id"]
+                input_set_id = parent.output_set_id
             elif kind in (DBT_COMMAND, MF_COMMAND):
-                input_set_id = project["current_output_set_id"] or project["source_set_id"]
+                input_set_id = project.current_output_set_id or project.source_set_id
         safe_request = _safe_request(request_json)
         encoded = json.dumps(
             [
-                {"input": fingerprint or safe_request, "branchId": branch_id} if branch_id else
-                fingerprint or safe_request,
+                {"input": fingerprint or safe_request, "branchId": branch_id}
+                if branch_id
+                else fingerprint or safe_request,
                 kind,
                 project_id,
                 str(parent_run_id) if parent_run_id else None,
@@ -485,89 +353,106 @@ class JobStore:
         )
         fingerprint = hashlib.sha256(encoded.encode()).hexdigest()
         if idempotency_key is not None:
-            sql_result = connection.exec_driver_sql(
-                SQL_SELECT_FROM_RUNTIME_JOB_2,
-                (idempotency_scope, idempotency_key),
+            prior = session.scalar(
+                select(RuntimeJob).where(
+                    RuntimeJob.idempotency_scope == idempotency_scope, RuntimeJob.idempotency_key == idempotency_key
+                )
             )
-            prior = row_dict(sql_result)
             if prior:
-                # 旧库摘要算法不同；迁移任务按原公开请求比较，保留旧幂等语义。
-                if (prior["error_detail"] or {}).get(LEGACY_IMPORT_DIGEST):
-                    comparable = {key: value for key, value in safe_request.items() if key != BINDING_FIELD}
-                    if (prior["kind"] == kind and prior["project_id"] == project_id
-                            and prior["request_json"] == comparable):
-                        return cast(StoredJob, prior)
-                if prior["request_fingerprint"] != fingerprint:
+                if prior.request_fingerprint != fingerprint:
                     raise StoreConflict("Idempotency key belongs to another request")
-                return cast(StoredJob, prior)
-        if parent and (parent["status"] != SUCCEEDED or parent["run_lifecycle"] != ACTIVE):
+                return cast(StoredJob, entity_dict(prior))
+        if parent and (parent.status != SUCCEEDED or parent.run_lifecycle != ACTIVE):
             raise CleanupBlocked("Run is not ready and active")
         if input_set_id is not None:
-            sql_result = connection.exec_driver_sql(SQL_SELECT_STATE_PROJECT_ID, (input_set_id,))
-            artifact = row_dict(sql_result)
-            if not artifact or artifact["state"] != SEALED or artifact["project_id"] != project_id:
+            artifact = session.get(ArtifactSet, input_set_id)
+            if not artifact or artifact.state != SEALED or artifact.project_id != project_id:
                 raise ValueError("Input artifact set is not available")
         elif parent:
             raise ValueError("Parent has no published artifact set")
-        if write and project["busy_job_id"] is not None:
+        if write and project.busy_job_id is not None:
             raise ProjectBusy("project_busy")
-        identifier = str(job_id or uuid4())
-        sql_result = connection.exec_driver_sql(
-            SQL_INSERT_INTO_RUNTIME_JOB,
-            (
-                identifier,
-                kind,
-                project_id,
-                parent_run_id,
-                idempotency_scope,
-                idempotency_key,
-                fingerprint,
-                Json(safe_request),
-                input_mode,
-                pinned_instance_id,
-                input_mode,
-                self.lease_seconds,
-                input_set_id,
-                config_version,
-                toolchain_version,
-                schema_name,
-                profile_binding_id,
-                ACTIVE if kind == BUILD_RUN else None,
-                timeout_seconds,
-                retry_policy,
-                max_attempts,
-            ),
-        )
-        result = row_dict(sql_result)
         # 发布类任务继承固定候选或父 run 的分支，普通任务保持无分支。
-        if parent and branch_id is not None and parent["branch_id"] != branch_id:
+        if parent and branch_id is not None and parent.branch_id != branch_id:
             raise ValueError("父任务与分支归属不匹配")
-        branch_id = parent["branch_id"] if parent else branch_id
+        branch_id = parent.branch_id if parent else branch_id
         if safe_request.get(RELEASE_FIELD):
-            sql_result = connection.exec_driver_sql(SQL_RELEASE_BRANCH, (project_id, safe_request[RELEASE_FIELD]))
-            release = row_dict(sql_result)
-            if not release or branch_id is not None and branch_id != release["branch_id"]:
+            release = session.scalar(
+                select(Release).where(
+                    Release.project_id == project_id, Release.release_id == safe_request[RELEASE_FIELD]
+                )
+            )
+            if not release or branch_id is not None and branch_id != release.branch_id:
                 raise ValueError("任务与发布分支归属不匹配")
-            branch_id = release["branch_id"]
-        if branch_id is not None:
-            sql_result = connection.exec_driver_sql(SQL_ASSIGN_BRANCH, (branch_id, identifier))
-            result = row_dict(sql_result)
+            branch_id = release.branch_id
+        job = RuntimeJob(
+            job_id=str(job_id or uuid4()),
+            kind=kind,
+            project_id=project_id,
+            branch_id=branch_id,
+            parent_run_id=str(parent_run_id) if parent_run_id is not None else None,
+            idempotency_scope=idempotency_scope,
+            idempotency_key=idempotency_key,
+            request_fingerprint=fingerprint,
+            request_json=safe_request,
+            input_mode=input_mode,
+            pinned_instance_id=pinned_instance_id,
+            input_lease_expires_at=func.clock_timestamp() + timedelta(seconds=self.lease_seconds)
+            if input_mode == VOLATILE
+            else None,
+            input_set_id=input_set_id,
+            config_version=config_version,
+            toolchain_version=toolchain_version,
+            schema_name=schema_name,
+            profile_binding_id=profile_binding_id,
+            run_lifecycle=ACTIVE if kind == BUILD_RUN else None,
+            deadline_at=func.clock_timestamp() + timedelta(seconds=timeout_seconds),
+            retry_policy=retry_policy,
+            max_attempts=max_attempts,
+        )
+        session.add(job)
+        # 先写任务并取得数据库默认值，再设置引用该任务的项目忙碌指针。
+        session.flush()
         if write:
-            sql_result = connection.exec_driver_sql(SQL_UPDATE_RUNTIME_PROJECT_SET_3, (identifier, project_id))
-        return cast(StoredJob, result)
+            project.busy_job_id = job.job_id
+            session.flush()
+        return cast(StoredJob, entity_dict(job))
 
     def requeue_options(self, job_id: UUID | str) -> bool:
         # 同步选项的明确终止失败可重试，沿用原截止时间和总尝试上限。
-        with self.db.fact_transaction() as connection:
-            sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB, (str(job_id),))
-            row = row_dict(sql_result)
-            if row and row["parent_run_id"]:
-                sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB_4, (row["parent_run_id"],))
-                parent = row_dict(sql_result)
-                if parent["run_lifecycle"] != ACTIVE:
+        with self.db.fact_session() as session:
+            job = session.get(RuntimeJob, str(job_id))
+            if job and job.parent_run_id:
+                parent = session.get(RuntimeJob, job.parent_run_id, with_for_update=True, populate_existing=True)
+                if parent.run_lifecycle != ACTIVE:
                     return False
-            sql_result = connection.exec_driver_sql(SQL_OPTIONS_RETRY, (str(job_id),))
-            return sql_result.rowcount == 1
+            result = session.execute(
+                update(RuntimeJob)
+                .where(
+                    RuntimeJob.job_id == str(job_id),
+                    RuntimeJob.kind == QUERY_OPTIONS,
+                    RuntimeJob.status == FAILED,
+                    RuntimeJob.attempt_no < RuntimeJob.max_attempts,
+                    RuntimeJob.deadline_at > func.clock_timestamp(),
+                    RuntimeJob.error_code != INVALID_QUERY,
+                    ~select(RuntimeAttempt.attempt_id)
+                    .where(
+                        RuntimeAttempt.job_id == RuntimeJob.job_id,
+                        RuntimeAttempt.execution_stage == EXTERNAL,
+                        RuntimeAttempt.stop_confirmed_at.is_(None),
+                    )
+                    .exists(),
+                )
+                .values(
+                    status=QUEUED,
+                    current_attempt_id=None,
+                    available_at=func.clock_timestamp(),
+                    finished_at=None,
+                    error_code=None,
+                    error_detail=None,
+                )
+            )
+            return result.rowcount == 1
 
     def claim(
         self,
@@ -579,59 +464,114 @@ class JobStore:
         kinds: list[str] | None = None,
     ) -> LeasedJob | None:
         # 短事务领取一个任务，跳过其他 worker 已锁住的任务；VOLATILE 输入必须仍有效。
-        with self.db.fact_transaction() as connection:
+        with self.db.fact_session() as session:
             versions = config_versions if config_versions is not None else [config_version]
-            sql_result = connection.exec_driver_sql(
-                SQL_SELECT_FROM_RUNTIME_JOB_3,
-                (versions, toolchain_version, kinds, kinds, str(worker_id)),
+            job = session.scalar(
+                select(RuntimeJob)
+                .where(
+                    RuntimeJob.status == QUEUED,
+                    RuntimeJob.available_at <= func.clock_timestamp(),
+                    RuntimeJob.deadline_at > func.clock_timestamp(),
+                    RuntimeJob.config_version.in_(versions),
+                    RuntimeJob.toolchain_version == toolchain_version,
+                    true() if kinds is None else RuntimeJob.kind.in_(kinds),
+                    or_(
+                        RuntimeJob.input_mode == DURABLE,
+                        and_(
+                            RuntimeJob.pinned_instance_id == str(worker_id),
+                            RuntimeJob.input_lease_expires_at > func.clock_timestamp(),
+                        ),
+                    ),
+                )
+                .order_by(RuntimeJob.available_at, RuntimeJob.created_at)
+                .limit(1)
+                .with_for_update(skip_locked=True)
             )
-            job = row_dict(sql_result)
             if not job:
-                return cast(LeasedJob | None, None)
+                return None
             attempt_id, token = str(uuid4()), str(uuid4())
-            sql_result = connection.exec_driver_sql(
-                SQL_INSERT_INTO_RUNTIME_ATTEMPT,
-                (attempt_id, job["job_id"], job["attempt_no"] + 1, str(worker_id), token, self.lease_seconds),
+            session.add(
+                RuntimeAttempt(
+                    attempt_id=attempt_id,
+                    job_id=job.job_id,
+                    attempt_no=job.attempt_no + 1,
+                    worker_id=str(worker_id),
+                    lease_token=token,
+                    lease_expires_at=func.clock_timestamp() + timedelta(seconds=self.lease_seconds),
+                )
             )
-            sql_result = connection.exec_driver_sql(
-                SQL_UPDATE_RUNTIME_JOB_SET,
-                (attempt_id, job["job_id"]),
-            )
-            result = dict(cast(DatabaseRow, row_dict(sql_result)))
+            # attempt 必须先落库，再变更 current_attempt_id 和触发构建状态投影。
+            session.flush()
+            job.status = RUNNING
+            job.attempt_no += 1
+            job.current_attempt_id = attempt_id
+            if job.started_at is None:
+                job.started_at = func.clock_timestamp()
+            session.flush()
+            result = entity_dict(job)
             result.update(attempt_id=attempt_id, lease_token=token)
-            return cast(LeasedJob | None, result)
+            return cast(LeasedJob, result)
 
-    def _authorized(self, connection: Connection, job_id: UUID | str, token: UUID | str) -> LeasedJob | None:
+    def _authorized(self, session: Session, job_id: UUID | str, token: UUID | str) -> LeasedJob | None:
         # 清理和子任务更新都先锁 parent；每次修改同时核对 current attempt、token 和数据库时间。
-        sql_result = connection.exec_driver_sql(SQL_SELECT_PARENT_RUN_ID_FROM, (str(job_id),))
-        reference = row_dict(sql_result)
-        if reference and reference["parent_run_id"]:
-            sql_result = connection.exec_driver_sql(SQL_SELECT_JOB_ID_FROM, (reference["parent_run_id"],))
-        sql_result = connection.exec_driver_sql(
-            SQL_SELECT_J_A,
-            (str(job_id), str(token)),
+        parent_run_id = session.scalar(select(RuntimeJob.parent_run_id).where(RuntimeJob.job_id == str(job_id)))
+        if parent_run_id:
+            session.execute(select(RuntimeJob.job_id).where(RuntimeJob.job_id == parent_run_id).with_for_update())
+        row = session.execute(
+            select(RuntimeJob, RuntimeAttempt)
+            .join(RuntimeAttempt, RuntimeAttempt.attempt_id == RuntimeJob.current_attempt_id)
+            .where(
+                RuntimeJob.job_id == str(job_id),
+                RuntimeJob.status == RUNNING,
+                RuntimeAttempt.state == EXECUTING,
+                RuntimeAttempt.lease_token == str(token),
+                RuntimeAttempt.lease_expires_at > func.clock_timestamp(),
+                RuntimeJob.deadline_at > func.clock_timestamp(),
+                or_(RuntimeJob.input_mode == DURABLE, RuntimeJob.input_lease_expires_at > func.clock_timestamp()),
+            )
+            .with_for_update(of=(RuntimeJob, RuntimeAttempt))
+            .execution_options(populate_existing=True)
+        ).one_or_none()
+        if row is None:
+            return None
+        job, attempt = row
+        result = entity_dict(job)
+        result.update(
+            attempt_id=attempt.attempt_id, execution_stage=attempt.execution_stage, lease_token=attempt.lease_token
         )
-        return cast(LeasedJob | None, row_dict(sql_result))
+        return cast(LeasedJob, result)
 
     def heartbeat(self, job_id: UUID | str, token: UUID | str) -> bool:
-        with self.db.transaction() as connection:
-            job = self._authorized(connection, job_id, token)
+        with self.db.session() as session:
+            job = self._authorized(session, job_id, token)
             if not job:
                 return False
-            connection.exec_driver_sql(
-                SQL_UPDATE_RUNTIME_ATTEMPT_SET,
-                (self.lease_seconds, job["attempt_id"]),
+            session.execute(
+                update(RuntimeAttempt)
+                .where(RuntimeAttempt.attempt_id == job["attempt_id"])
+                .values(
+                    heartbeat_at=func.clock_timestamp(),
+                    lease_expires_at=func.clock_timestamp() + timedelta(seconds=self.lease_seconds),
+                )
             )
             return True
 
-    def heartbeat_inputs(self, worker_id: UUID | str, job_ids: list[str] | None=None) -> int:
+    def heartbeat_inputs(self, worker_id: UUID | str, job_ids: list[str] | None = None) -> int:
         # 排队等待期也需要输入续租；已经过期的输入租约不能通过迟到心跳复活。
-        with self.db.transaction() as connection:
-            sql_result = connection.exec_driver_sql(
-                SQL_UPDATE_RUNTIME_JOB_SET_2,
-                (self.lease_seconds, str(worker_id), job_ids, job_ids),
+        with self.db.session() as session:
+            result = session.execute(
+                update(RuntimeJob)
+                .where(
+                    RuntimeJob.input_mode == VOLATILE,
+                    RuntimeJob.pinned_instance_id == str(worker_id),
+                    RuntimeJob.status.in_((QUEUED, RUNNING)),
+                    RuntimeJob.input_lease_expires_at > func.clock_timestamp(),
+                    RuntimeJob.deadline_at > func.clock_timestamp(),
+                    true() if job_ids is None else RuntimeJob.job_id.in_(job_ids),
+                )
+                .values(input_lease_expires_at=func.clock_timestamp() + timedelta(seconds=self.lease_seconds))
             )
-            return sql_result.rowcount
+            return result.rowcount
 
     def phase(
         self,
@@ -642,19 +582,22 @@ class JobStore:
         external: bool = False,
         external_execution_refs: JsonObject | None = None,
     ) -> bool:
-        with self.db.fact_transaction() as connection:
-            job = self._authorized(connection, job_id, token)
+        with self.db.fact_session() as session:
+            job = self._authorized(session, job_id, token)
             if not job:
                 return False
-            connection.exec_driver_sql(SQL_UPDATE_RUNTIME_JOB_SET_3, (phase, str(job_id)))
+            session.execute(update(RuntimeJob).where(RuntimeJob.job_id == str(job_id)).values(phase=phase))
             if job["request_json"].get("releaseId"):
-                from .publications import SQL_PHASE
-
-                connection.exec_driver_sql(SQL_PHASE, (phase, str(job_id)))
+                session.execute(
+                    update(Release)
+                    .where(Release.run_id == str(job_id), Release.state.in_((PREPARING, BUILDING, VALIDATING)))
+                    .values(state=phase)
+                )
             if external:
-                connection.exec_driver_sql(
-                    SQL_UPDATE_RUNTIME_ATTEMPT_SET_5,
-                    (Json(external_execution_refs or {}), job["attempt_id"]),
+                session.execute(
+                    update(RuntimeAttempt)
+                    .where(RuntimeAttempt.attempt_id == job["attempt_id"])
+                    .values(execution_stage=EXTERNAL, external_execution_refs=external_execution_refs or {})
                 )
             return True
 
@@ -662,138 +605,199 @@ class JobStore:
         self, job_id: UUID | str, token: UUID | str, set_id: str, *, project_digest: str | None = None
     ) -> bool:
         # 首次构建的源码在外部写入前固定，后续准备阶段重试可复用该集合。
-        with self.db.fact_transaction() as connection:
-            job = self._authorized(connection, job_id, token)
+        with self.db.fact_session() as session:
+            job = self._authorized(session, job_id, token)
             if not job:
                 return False
-            sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_ARTIFACT_SET, (set_id,))
-            source = row_dict(sql_result)
-            if not source or source["state"] != SEALED or source["project_id"] != job["project_id"]:
+            source = session.get(ArtifactSet, set_id)
+            if not source or source.state != SEALED or source.project_id != job["project_id"]:
                 raise ValueError("Invalid source artifact set")
             if job["input_set_id"] is not None and job["input_set_id"] != str(set_id):
                 raise ValueError("Job input is immutable after admission")
-            sql_result = connection.exec_driver_sql(SQL_UPDATE_RUNTIME_JOB_SET_4, (set_id, str(job_id)))
+            session.execute(update(RuntimeJob).where(RuntimeJob.job_id == str(job_id)).values(input_set_id=set_id))
             if project_digest is not None:
-                connection.exec_driver_sql(SQL_ATTACH_DIGEST, (Json({"projectDigest": project_digest}), str(job_id)))
+                session.execute(
+                    update(RuntimeJob)
+                    .where(RuntimeJob.job_id == str(job_id))
+                    .values(request_json=RuntimeJob.request_json.concat({"projectDigest": project_digest}))
+                )
             return True
 
-    def _release_project(self, connection: Connection, job_id: UUID | str) -> None:
+    def _release_project(self, session: Session, job_id: UUID | str) -> None:
         # 只有所有外部执行都确认结束，才释放通用写锁。
-        connection.exec_driver_sql(
-            SQL_UPDATE_RUNTIME_PROJECT_SET,
-            (str(job_id), str(job_id)),
+        session.execute(
+            update(RuntimeProject)
+            .where(
+                RuntimeProject.busy_job_id == str(job_id),
+                ~select(RuntimeAttempt.attempt_id)
+                .where(
+                    RuntimeAttempt.job_id == str(job_id),
+                    RuntimeAttempt.execution_stage == EXTERNAL,
+                    RuntimeAttempt.stop_confirmed_at.is_(None),
+                )
+                .exists(),
+            )
+            .values(busy_job_id=None)
         )
 
     def finish(
         self,
         job_id: UUID | str,
         token: UUID | str,
-        payload: JsonObject | None=None,
+        payload: JsonObject | None = None,
         *,
-        output_set_id: str | None=None,
-        stdout_tail: str="",
-        stderr_tail: str="",
-        exit_code: int=0,
-        output_truncated: bool=False,
-        seal: Callable[[str, Connection], None] | None=None,
-        publish: Callable[[Connection, StoredJob, str], None] | None=None,
+        output_set_id: str | None = None,
+        stdout_tail: str = "",
+        stderr_tail: str = "",
+        exit_code: int = 0,
+        output_truncated: bool = False,
+        seal: Callable[[str, Session], None] | None = None,
+        publish: Callable[[Session, StoredJob, str], None] | None = None,
     ) -> bool:
         # 发布产物、结果和终态共用一个事务；过期 worker 无权发布任何内容。
         encoded = json.dumps(payload or {}, ensure_ascii=False, separators=(",", ":"))
         if len(encoded.encode()) > self.max_result_bytes:
             raise ValueError("Job result exceeds configured size limit")
         try:
-            with self.db.fact_transaction() as connection:
-                job = self._authorized(connection, job_id, token)
+            with self.db.fact_session() as session:
+                job = self._authorized(session, job_id, token)
                 if not job:
                     return False
                 if job["kind"] == BUILD_RUN and output_set_id is None:
                     raise ValueError("BUILD_RUN requires a complete validated output artifact set")
                 # 命令已明确结束，若取消意图先提交，则只确认取消、不发布成功或部署。
-                cancelled = connection.exec_driver_sql(SQL_ENGINE_CANCEL, (str(job_id),)).scalar_one_or_none()
+                cancelled = session.scalar(select(Build.cancel_requested).where(Build.run_id == str(job_id)))
                 if cancelled:
-                    connection.exec_driver_sql(SQL_UPDATE_RUNTIME_ATTEMPT_SET_3, (True, True, job["attempt_id"]))
-                    connection.exec_driver_sql(SQL_UPDATE_RUNTIME_JOB_SET_6, ("CANCELLED", Json({}), str(job_id)))
-                    self._release_project(connection, job_id)
+                    session.execute(
+                        update(RuntimeAttempt)
+                        .where(RuntimeAttempt.attempt_id == job["attempt_id"])
+                        .values(
+                            state=FAILED,
+                            stop_confirmed_at=func.clock_timestamp(),
+                            finished_at=func.clock_timestamp(),
+                        )
+                    )
+                    session.execute(
+                        update(RuntimeJob)
+                        .where(RuntimeJob.job_id == str(job_id))
+                        .values(
+                            status=FAILED, error_code="CANCELLED", error_detail={}, finished_at=func.clock_timestamp()
+                        )
+                    )
+                    self._release_project(session, job_id)
                     return True
                 if output_set_id is not None:
                     if job["input_mode"] == VOLATILE:
                         raise ValueError("Volatile resources cannot publish durable project artifacts")
-                    sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_ARTIFACT_SET_2, (output_set_id,))
-                    output = row_dict(sql_result)
-                    if not output or output["producer_attempt_id"] != job["attempt_id"] or output["kind"] != EXECUTION:
+                    output = session.get(ArtifactSet, output_set_id, with_for_update=True, populate_existing=True)
+                    if not output or output.producer_attempt_id != job["attempt_id"] or output.kind != EXECUTION:
                         raise ValueError("Output must belong to the authorized attempt")
-                    if output["project_id"] != job["project_id"]:
+                    if output.project_id != job["project_id"]:
                         raise ValueError("Output belongs to a different project")
                     if job["kind"] == BUILD_RUN:
                         # 新构建的输出必须引用同一固定源码、摘要、配置及工具链。
                         if job["request_json"].get("buildId"):
-                            expected = {"source_set_id": job["input_set_id"],
-                                        "source_commit_sha": job["request_json"].get("commitSha"),
-                                        "project_digest": job["request_json"].get("projectDigest"),
-                                        "config_version": job["config_version"],
-                                        "toolchain_version": job["toolchain_version"]}
-                            if any(value is None or output[name] != value for name, value in expected.items()):
+                            expected = {
+                                "source_set_id": job["input_set_id"],
+                                "source_commit_sha": job["request_json"].get("commitSha"),
+                                "project_digest": job["request_json"].get("projectDigest"),
+                                "config_version": job["config_version"],
+                                "toolchain_version": job["toolchain_version"],
+                            }
+                            if any(value is None or getattr(output, name) != value for name, value in expected.items()):
                                 raise ValueError("build output does not match fixed source evidence")
-                        sql_result = connection.exec_driver_sql(SQL_SELECT_RELATIVE_PATH_FROM, (output_set_id,))
-                        files = {row["relative_path"] for row in sql_result.mappings()}
+                        files = set(
+                            session.scalars(
+                                select(ArtifactFile.relative_path).where(ArtifactFile.set_id == output_set_id)
+                            )
+                        )
                         if not REQUIRED_BUILD_FILES.issubset(files):
                             raise ValueError("BUILD_RUN output is missing required native artifacts")
-                        if not all(output["validation_json"].get(flag) is True for flag in REQUIRED_VALIDATION_FLAGS):
+                        if not all(output.validation_json.get(flag) is True for flag in REQUIRED_VALIDATION_FLAGS):
                             raise ValueError("BUILD_RUN output lacks successful validation evidence")
                     if seal is None:
                         from .artifacts import ArtifactStore
 
                         seal = ArtifactStore(self.db).seal
-                    seal(output_set_id, connection)
-                sql_result = connection.exec_driver_sql(
-                    SQL_INSERT_INTO_RUNTIME_JOB_RESULT,
-                    (
-                        str(job_id),
-                        job["attempt_id"],
-                        Json(payload or {}),
-                        stdout_tail.encode()[-self.max_diagnostic_bytes :].decode(errors="ignore"),
-                        stderr_tail.encode()[-self.max_diagnostic_bytes :].decode(errors="ignore"),
-                        exit_code,
-                        output_truncated
+                    seal(output_set_id, session)
+                session.add(
+                    JobResult(
+                        job_id=str(job_id),
+                        attempt_id=job["attempt_id"],
+                        payload_json=payload or {},
+                        stdout_tail=stdout_tail.encode()[-self.max_diagnostic_bytes :].decode(errors="ignore"),
+                        stderr_tail=stderr_tail.encode()[-self.max_diagnostic_bytes :].decode(errors="ignore"),
+                        exit_code=exit_code,
+                        output_truncated=output_truncated
                         or len(stdout_tail.encode()) > self.max_diagnostic_bytes
                         or len(stderr_tail.encode()) > self.max_diagnostic_bytes,
-                    ),
+                    )
                 )
-                # 业务发布与封存共用事务；兼容 BUILD_RUN 没有 releaseId 时仍只报告 READY。
+                session.flush()
+                # releaseId 候选在封存事务内发布；buildId 构建由任务终态触发器更新构建记录。
                 if job["kind"] == BUILD_RUN and job["request_json"].get("releaseId"):
                     if publish is None:
                         raise ValueError("Publication completion requires its transaction coordinator")
-                    publish(connection, job, cast(str, output_set_id))
+                    publish(session, job, cast(str, output_set_id))
                 # 封存校验可能耗时；提交前重新 fencing，失效时连同已封存文件状态一起回滚。
-                if not self._authorized(connection, job_id, token):
+                if not self._authorized(session, job_id, token):
                     raise _FinishLeaseLost
-                sql_result = connection.exec_driver_sql(
-                    SQL_UPDATE_RUNTIME_ATTEMPT_SET_2,
-                    (job["attempt_id"],),
+                session.execute(
+                    update(RuntimeAttempt)
+                    .where(RuntimeAttempt.attempt_id == job["attempt_id"])
+                    .values(
+                        state=SUCCEEDED, stop_confirmed_at=func.clock_timestamp(), finished_at=func.clock_timestamp()
+                    )
                 )
-                sql_result = connection.exec_driver_sql(
-                    SQL_UPDATE_RUNTIME_JOB_SET_5,
-                    (output_set_id, str(job_id)),
+                session.execute(
+                    update(RuntimeJob)
+                    .where(RuntimeJob.job_id == str(job_id))
+                    .values(
+                        status=SUCCEEDED,
+                        output_set_id=output_set_id,
+                        finished_at=func.clock_timestamp(),
+                        error_code=None,
+                        error_detail=None,
+                    )
                 )
                 if job["kind"] == RUN_CLEANUP:
-                    sql_result = connection.exec_driver_sql(SQL_UPDATE_RUNTIME_JOB_SET_8, (job["parent_run_id"],))
+                    session.execute(
+                        update(RuntimeJob)
+                        .where(RuntimeJob.job_id == job["parent_run_id"])
+                        .values(run_lifecycle=CLEANED)
+                    )
                     # schema 删除已经确认；保留任务/结果与幂等墓碑，将无引用文件交给 GC。
-                    sql_result = connection.exec_driver_sql(
-                        SQL_RELEASE_RUN_ARTIFACTS, (job["parent_run_id"], job["parent_run_id"])
+                    session.execute(
+                        update(RuntimeJob)
+                        .where(
+                            or_(
+                                RuntimeJob.job_id == job["parent_run_id"],
+                                RuntimeJob.parent_run_id == job["parent_run_id"],
+                            ),
+                            ~select(Build.build_id).where(Build.run_id == RuntimeJob.job_id).exists(),
+                            ~select(Build.build_id).where(Build.run_id == RuntimeJob.parent_run_id).exists(),
+                        )
+                        .values(input_set_id=None, output_set_id=None)
                     )
                 if job["kind"] == DBT_COMMAND and output_set_id is not None:
-                    sql_result = connection.exec_driver_sql(
-                        SQL_UPDATE_RUNTIME_PROJECT_SET_4,
-                        (
-                            output_set_id,
-                            job["project_id"],
-                            job["config_version"],
-                            job["input_set_id"],
-                            job["input_set_id"],
-                        ),
+                    # 保留 SQL NULL 等值比较语义；没有输入集合不代表匹配无源码的项目。
+                    session.execute(
+                        update(RuntimeProject)
+                        .where(
+                            RuntimeProject.project_id == job["project_id"],
+                            RuntimeProject.config_version == job["config_version"],
+                            or_(
+                                RuntimeProject.source_set_id
+                                == literal(job["input_set_id"], type_=RuntimeProject.source_set_id.type),
+                                RuntimeProject.source_set_id
+                                == select(ArtifactSet.source_set_id)
+                                .where(ArtifactSet.set_id == job["input_set_id"])
+                                .scalar_subquery(),
+                            ),
+                        )
+                        .values(current_output_set_id=output_set_id, revision=RuntimeProject.revision + 1)
                     )
-                self._release_project(connection, job_id)
+                self._release_project(session, job_id)
                 return True
         except _FinishLeaseLost:
             return False
@@ -810,157 +814,226 @@ class JobStore:
         # 错误详情也有字节预算，禁止在失败路径写入无限增长的异常堆栈。
         if len(json.dumps(detail or {}, ensure_ascii=False).encode()) > self.max_diagnostic_bytes:
             detail = {"message": "Diagnostic exceeded configured size limit"}
-        with self.db.fact_transaction() as connection:
-            job = self._authorized(connection, job_id, token)
+        with self.db.fact_session() as session:
+            job = self._authorized(session, job_id, token)
             if not job:
                 return False
-            connection.exec_driver_sql(
-                SQL_UPDATE_RUNTIME_ATTEMPT_SET_3,
-                (stopped, stopped, job["attempt_id"]),
+            session.execute(
+                update(RuntimeAttempt)
+                .where(RuntimeAttempt.attempt_id == job["attempt_id"])
+                .values(
+                    state=FAILED if stopped else EXPIRED_UNCONFIRMED,
+                    stop_confirmed_at=func.clock_timestamp() if stopped else None,
+                    finished_at=func.clock_timestamp(),
+                )
             )
-            connection.exec_driver_sql(
-                SQL_UPDATE_RUNTIME_JOB_SET_6,
-                (error_code, Json(detail or {}), str(job_id)),
+            session.execute(
+                update(RuntimeJob)
+                .where(RuntimeJob.job_id == str(job_id))
+                .values(
+                    status=FAILED, error_code=error_code, error_detail=detail or {}, finished_at=func.clock_timestamp()
+                )
             )
-            from .publications import SQL_FAIL
 
-            connection.exec_driver_sql(SQL_FAIL, (error_code, str(job_id)))
-            self._release_project(connection, job_id)
+            session.execute(
+                update(Release)
+                .where(Release.run_id == str(job_id), Release.state.not_in((PUBLISHED, SUPERSEDED)))
+                .values(state=FAILED, error_code=error_code)
+            )
+            self._release_project(session, job_id)
             return True
 
     def recover(self) -> int:
         # 恢复只处理过期租约/截止时间，健康实例的 RUNNING 任务不会被启动流程打断。
-        with self.db.fact_transaction() as connection:
-            sql_result = connection.exec_driver_sql(SQL_SELECT_J_FROM)
-            jobs = [dict(row) for row in sql_result.mappings()]
+        with self.db.fact_session() as session:
+            jobs = session.scalars(
+                select(RuntimeJob)
+                .where(
+                    RuntimeJob.status.in_((QUEUED, RUNNING)),
+                    or_(
+                        RuntimeJob.deadline_at <= func.clock_timestamp(),
+                        and_(
+                            RuntimeJob.input_mode == VOLATILE,
+                            RuntimeJob.input_lease_expires_at <= func.clock_timestamp(),
+                        ),
+                        select(RuntimeAttempt.attempt_id)
+                        .where(
+                            RuntimeAttempt.attempt_id == RuntimeJob.current_attempt_id,
+                            RuntimeAttempt.lease_expires_at <= func.clock_timestamp(),
+                        )
+                        .exists(),
+                    ),
+                )
+                .order_by(RuntimeJob.created_at)
+                .with_for_update(of=RuntimeJob, skip_locked=True)
+            ).all()
             for job in jobs:
-                sql_result = connection.exec_driver_sql(SQL_SELECT_CLOCK_TIMESTAMP_AS)
-                now = row_dict(sql_result)["now"]
-                attempt = None
-                if job["current_attempt_id"]:
-                    sql_result = connection.exec_driver_sql(
-                        SQL_SELECT_FROM_RUNTIME_ATTEMPT_2, (job["current_attempt_id"],)
-                    )
-                    attempt = row_dict(sql_result)
-                external = bool(attempt and attempt["execution_stage"] == EXTERNAL)
-                lost = job["input_mode"] == VOLATILE and job["input_lease_expires_at"] <= now
-                timed_out = job["deadline_at"] <= now
+                now = session.scalar(select(func.clock_timestamp()))
+                attempt = (
+                    session.get(RuntimeAttempt, job.current_attempt_id, with_for_update=True)
+                    if job.current_attempt_id
+                    else None
+                )
+                external = bool(attempt and attempt.execution_stage == EXTERNAL)
+                lost = job.input_mode == VOLATILE and job.input_lease_expires_at <= now
+                timed_out = job.deadline_at <= now
                 if attempt:
-                    sql_result = connection.exec_driver_sql(
-                        SQL_UPDATE_RUNTIME_ATTEMPT_SET_6,
-                        (EXPIRED_UNCONFIRMED if external else STOPPED, external, attempt["attempt_id"]),
-                    )
+                    attempt.state = EXPIRED_UNCONFIRMED if external else STOPPED
+                    attempt.finished_at = func.clock_timestamp()
+                    attempt.stop_confirmed_at = None if external else func.clock_timestamp()
+                    session.flush()
                 retry = (
                     not lost
                     and not timed_out
-                    and job["input_mode"] == DURABLE
-                    and job["attempt_no"] < job["max_attempts"]
-                    and job["retry_policy"] != NEVER
-                    and (not external or job["retry_policy"] == READ_ONLY)
+                    and job.input_mode == DURABLE
+                    and job.attempt_no < job.max_attempts
+                    and job.retry_policy != NEVER
+                    and (not external or job.retry_policy == READ_ONLY)
                 )
                 if retry:
-                    delay = 5 if job["attempt_no"] <= 1 else 15
-                    sql_result = connection.exec_driver_sql(
-                        SQL_UPDATE_RUNTIME_JOB_SET_9,
-                        (delay, job["job_id"]),
-                    )
+                    job.status = QUEUED
+                    job.current_attempt_id = None
+                    delay = 5 if job.attempt_no <= 1 else 15
+                    job.available_at = func.clock_timestamp() + timedelta(seconds=delay)
+                    session.flush()
                 else:
                     code = (
                         INPUT_LOST if lost else TIMEOUT if timed_out else OUTCOME_UNKNOWN if external else LEASE_EXPIRED
                     )
-                    sql_result = connection.exec_driver_sql(
-                        SQL_UPDATE_RUNTIME_JOB_SET_6,
-                        (code, Json({"externalOutcomeUnknown": external}), job["job_id"]),
+                    job.status = FAILED
+                    job.error_code = code
+                    job.error_detail = {"externalOutcomeUnknown": external}
+                    job.finished_at = func.clock_timestamp()
+                    # 先提交任务/attempt 修改到事务，再让发布状态和项目解锁读取最新状态。
+                    session.flush()
+                    session.execute(
+                        update(Release)
+                        .where(
+                            Release.run_id == job.job_id,
+                            Release.state.not_in((PUBLISHED, SUPERSEDED)),
+                        )
+                        .values(state=FAILED, error_code=code)
                     )
-                    from .publications import SQL_FAIL
-
-                    sql_result = connection.exec_driver_sql(SQL_FAIL, (code, job["job_id"]))
-                    self._release_project(connection, job["job_id"])
+                    self._release_project(session, job.job_id)
             return len(jobs)
 
     def confirm_stopped(self, attempt_id: UUID | str, token: UUID | str) -> bool:
         # 失效执行者仅可凭自己的 token 确认停止，不能改写公开结果。
-        with self.db.fact_transaction() as connection:
-            sql_result = connection.exec_driver_sql(
-                SQL_SELECT_JOB_ID_FROM_2,
-                (str(attempt_id), str(token)),
+        with self.db.fact_session() as session:
+            job_id = session.scalar(
+                select(RuntimeAttempt.job_id).where(
+                    RuntimeAttempt.attempt_id == str(attempt_id), RuntimeAttempt.lease_token == str(token)
+                )
             )
-            attempt = row_dict(sql_result)
-            if not attempt:
+            if not job_id:
                 return False
-            sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB_4, (attempt["job_id"],))
-            job = row_dict(sql_result)
-            sql_result = connection.exec_driver_sql(
-                SQL_UPDATE_RUNTIME_ATTEMPT_SET_4,
-                (str(attempt_id),),
+            job = session.get(RuntimeJob, job_id, with_for_update=True)
+            session.execute(
+                update(RuntimeAttempt)
+                .where(RuntimeAttempt.attempt_id == str(attempt_id), RuntimeAttempt.state == EXPIRED_UNCONFIRMED)
+                .values(state=STOPPED, stop_confirmed_at=func.clock_timestamp())
             )
-            if job["status"] in (SUCCEEDED, FAILED):
-                self._release_project(connection, job["job_id"])
+            if job.status in (SUCCEEDED, FAILED):
+                self._release_project(session, job_id)
             return True
 
-    def reserve_cleanup(self, parent_run_id: UUID | str, toolchain_version: str="default") -> StoredJob:
+    def reserve_cleanup(self, parent_run_id: UUID | str, toolchain_version: str = "default") -> StoredJob:
         # 与查询受理锁同一 parent；阻止所有排队/执行任务和任何未确认停止的历史 attempt。
-        with self.db.fact_transaction() as connection:
-            sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB_4, (str(parent_run_id),))
-            parent = row_dict(sql_result)
-            if not parent or parent["kind"] != BUILD_RUN:
+        parent_run_id = str(parent_run_id)
+        with self.db.fact_session() as session:
+            parent = session.get(RuntimeJob, parent_run_id, with_for_update=True)
+            if not parent or parent.kind != BUILD_RUN:
                 raise ValueError("Run does not exist")
-            # 首版保留发布历史，连同复用来源一起保护；旧 cleanup 接口不能绕过。
-            from .publications import SQL_PROTECTED_RUN
-
-            sql_result = connection.exec_driver_sql(SQL_PROTECTED_RUN, (str(parent_run_id), str(parent_run_id)))
-            if row_dict(sql_result):
+            # 发布历史、复用关系和 v3 当前部署共同保护物理 run。
+            protected = session.scalar(
+                select(
+                    or_(
+                        select(Release.release_id).where(Release.run_id == parent_run_id).exists(),
+                        select(ReleaseRelation.release_id)
+                        .where(ReleaseRelation.creator_run_id == parent_run_id)
+                        .exists(),
+                        select(DeploymentTarget.active_build_id)
+                        .join(
+                            Build,
+                            Build.build_id == DeploymentTarget.active_build_id,
+                        )
+                        .where(Build.run_id == parent_run_id)
+                        .exists(),
+                    )
+                )
+            )
+            if protected:
                 raise CleanupBlocked("run_cleanup_blocked")
-            # v3 当前部署也保护同一物理 run；历史目录本身不阻止显式物理清理。
-            if connection.exec_driver_sql(SQL_ENGINE_DEPLOYMENT_REFERENCE, (str(parent_run_id),)).first():
-                raise CleanupBlocked("run_cleanup_blocked")
-            sql_result = connection.exec_driver_sql(SQL_SELECT_FROM_RUNTIME_JOB_5, (str(parent_run_id),))
-            existing = row_dict(sql_result)
+            existing = session.scalar(
+                select(RuntimeJob).where(
+                    RuntimeJob.kind == RUN_CLEANUP,
+                    RuntimeJob.parent_run_id == parent_run_id,
+                )
+            )
             if existing:
-                if existing["status"] == FAILED:
-                    sql_result = connection.exec_driver_sql(
-                        SQL_SELECT_FROM_RUNTIME_ATTEMPT_3,
-                        (existing["job_id"],),
-                    )
-                    if row_dict(sql_result):
+                if existing.status == FAILED:
+                    if session.scalar(
+                        select(RuntimeAttempt.attempt_id)
+                        .where(
+                            RuntimeAttempt.job_id == existing.job_id,
+                            RuntimeAttempt.execution_stage == EXTERNAL,
+                            RuntimeAttempt.stop_confirmed_at.is_(None),
+                        )
+                        .limit(1)
+                    ):
                         raise CleanupBlocked("Cleanup outcome is still unknown")
-                    sql_result = connection.exec_driver_sql(
-                        SQL_UPDATE_RUNTIME_JOB_SET_10,
-                        (existing["job_id"],),
+                    existing.status = QUEUED
+                    existing.current_attempt_id = None
+                    existing.available_at = func.clock_timestamp()
+                    existing.deadline_at = func.clock_timestamp() + timedelta(minutes=10)
+                    existing.finished_at = None
+                    existing.error_code = None
+                    session.flush()
+                return cast(StoredJob, entity_dict(existing))
+            run_family = or_(RuntimeJob.job_id == parent_run_id, RuntimeJob.parent_run_id == parent_run_id)
+            if session.scalar(
+                select(
+                    or_(
+                        select(RuntimeJob.job_id).where(run_family, RuntimeJob.status.in_((QUEUED, RUNNING))).exists(),
+                        select(RuntimeAttempt.attempt_id)
+                        .join(RuntimeJob, RuntimeJob.job_id == RuntimeAttempt.job_id)
+                        .where(
+                            run_family,
+                            RuntimeAttempt.execution_stage == EXTERNAL,
+                            RuntimeAttempt.stop_confirmed_at.is_(None),
+                        )
+                        .exists(),
                     )
-                    return cast(StoredJob, row_dict(sql_result))
-                return cast(StoredJob, existing)
-            sql_result = connection.exec_driver_sql(
-                SQL_SELECT_FROM_RUNTIME_JOB_6,
-                (str(parent_run_id), str(parent_run_id)),
-            )
-            if row_dict(sql_result):
+                )
+            ):
                 raise CleanupBlocked("run_cleanup_blocked")
-            sql_result = connection.exec_driver_sql(
-                SQL_SELECT_FROM_RUNTIME_ATTEMPT,
-                (str(parent_run_id), str(parent_run_id)),
+            if not (parent.output_set_id or parent.input_set_id) and session.scalar(
+                select(RuntimeAttempt.attempt_id)
+                .where(
+                    RuntimeAttempt.job_id == parent_run_id,
+                    RuntimeAttempt.execution_stage == EXTERNAL,
+                )
+                .limit(1)
+            ):
+                raise CleanupBlocked("Restore source artifacts before cleaning a run that executed externally")
+            parent.run_lifecycle = CLEANING
+            session.flush()
+            cleanup = RuntimeJob(
+                job_id=str(uuid4()),
+                kind=RUN_CLEANUP,
+                project_id=parent.project_id,
+                parent_run_id=parent_run_id,
+                idempotency_scope=CLEANUP_SCOPE,
+                idempotency_key=parent_run_id,
+                request_fingerprint=parent.request_fingerprint,
+                config_version=parent.config_version,
+                toolchain_version=parent.toolchain_version,
+                schema_name=parent.schema_name,
+                profile_binding_id=parent.profile_binding_id,
+                input_set_id=parent.output_set_id or parent.input_set_id,
+                deadline_at=func.clock_timestamp() + timedelta(minutes=10),
+                retry_policy=PREPARATION_ONLY,
             )
-            if row_dict(sql_result):
-                raise CleanupBlocked("run_cleanup_blocked")
-            if not (parent["output_set_id"] or parent["input_set_id"]):
-                sql_result = connection.exec_driver_sql(SQL_EXTERNAL_ATTEMPT, (str(parent_run_id),))
-                if row_dict(sql_result):
-                    raise CleanupBlocked("Restore source artifacts before cleaning a run that executed externally")
-            sql_result = connection.exec_driver_sql(SQL_UPDATE_RUNTIME_JOB_SET_7, (str(parent_run_id),))
-            sql_result = connection.exec_driver_sql(
-                SQL_INSERT_INTO_RUNTIME_JOB_2,
-                (
-                    str(uuid4()),
-                    parent["project_id"],
-                    str(parent_run_id),
-                    CLEANUP_SCOPE,
-                    str(parent_run_id),
-                    parent["request_fingerprint"],
-                    parent["config_version"],
-                    parent["toolchain_version"],
-                    parent["schema_name"],
-                    parent["profile_binding_id"],
-                    parent["output_set_id"] or parent["input_set_id"],
-                ),
-            )
-            return cast(StoredJob, row_dict(sql_result))
+            session.add(cleanup)
+            session.flush()
+            return cast(StoredJob, entity_dict(cleanup))

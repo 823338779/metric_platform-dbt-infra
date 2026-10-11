@@ -6,7 +6,6 @@ from dbt_metricflow_service.models.payloads import JsonObject
 
 from ..models.queries import QueryRequest
 
-DEFAULT_TIMEZONE = "Asia/Shanghai"
 TIME_FIELDS = ("start_time", "end_time")
 BOUNDARY_POLICY = "metricflow_granularity_alignment"
 
@@ -16,7 +15,7 @@ def normalize_query_time(request: QueryRequest, timezone: str) -> QueryRequest:
     values = {}
     for field in TIME_FIELDS:
         value = getattr(request, field)
-        # 旧平台已经发送业务日历值，只有带 offset 的新输入需要转换。
+        # 无 offset 的输入表示业务日历时间，带 offset 的输入转换到固定业务时区。
         values[field] = value.astimezone(zone).replace(tzinfo=None) if value and value.tzinfo else value
     return request.model_copy(update=values)
 

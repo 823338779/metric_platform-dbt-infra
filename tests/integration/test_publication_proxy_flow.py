@@ -58,7 +58,7 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
         toolchain_version=uuid4().hex,
     )
     runtime = Runtime(settings)
-    runtime.db.migrate()
+    runtime.db.initialize()
     store = BuildStore(runtime.db)
     store.register_binding(str(repo), "engine", "1", {"profileBindingId": "postgres", "environments": ["PRODUCTION"]})
     builds = BuildService(store, runtime.toolchain, 180)

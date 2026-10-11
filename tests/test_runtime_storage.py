@@ -24,7 +24,7 @@ def store():
     if not dsn:
         pytest.skip("SERVICE_TEST_DATABASE_URL 未设置")
     db = Database(dsn)
-    db.migrate()
+    db.initialize()
     db.check()
     jobs = JobStore(db)
     global VERSION
@@ -184,7 +184,7 @@ def test_finish_rechecks_lease_after_artifact_sealing(store, tmp_path):
 
     def seal_then_expire(set_id, connection):
         artifacts.seal(set_id, connection)
-        connection.exec_driver_sql(
+        connection.connection().exec_driver_sql(
             "UPDATE runtime_attempt SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE attempt_id=%s",
             (attempt["attempt_id"],),
         )

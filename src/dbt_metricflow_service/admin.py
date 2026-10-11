@@ -1,4 +1,4 @@
-"""部署与迁移管理入口；只读旧库，连接信息从服务配置和环境变量加载。"""
+"""数据库初始化与运行时管理入口；连接信息从服务配置和环境变量加载。"""
 from __future__ import annotations
 
 import argparse
@@ -16,14 +16,12 @@ from dbt_metricflow_service.storage.jobs import JobStore
 from dbt_metricflow_service.storage.postgres import Database
 from dbt_metricflow_service.storage.rows import row_dict
 
-# 管理命令及历史格式常量集中定义，所有请求正文均经公开模型验证。
-MIGRATE = "migrate"
+# 管理命令及输入格式常量集中定义，所有请求正文均经公开模型验证。
+INIT_DB = "init-db"
 REGISTER_BINDINGS = "register-bindings"
 RECONCILE = "reconcile-attempt"
 GC = "gc"
 BUILD = "build"
-MIGRATE_HISTORY = "migrate-history"
-IMPORT_PUBLICATION = "import-publication"
 BINDING_KEYS = frozenset({"repository", "executionBinding", "configVersion", "config"})
 IDENTITY_KEYS = ("repository", "executionBinding", "configVersion")
 SQL_ATTEMPT = "SELECT lease_token,state FROM runtime_attempt WHERE attempt_id=%s"
@@ -44,14 +42,14 @@ def _project_id(value: str) -> str:
 def _json(path: Path, maximum: int) -> JsonObject | list:
     # 控制文件不会作为产物保存，读取前仍校验链接与长度。
     if any(_is_link(item) for item in (path, *path.parents)):
-        raise ValueError("legacy input cannot contain linked paths")
+        raise ValueError("input cannot contain linked paths")
     with path.open("rb") as stream:
         content = stream.read(maximum + 1)
     if len(content) > maximum:
-        raise ValueError("legacy JSON file size limit exceeded")
+        raise ValueError("JSON file size limit exceeded")
     value = json.loads(content)
     if not isinstance(value, (dict, list)):
-        raise ValueError("legacy JSON structure is invalid")
+        raise ValueError("JSON structure is invalid")
     return value
 
 
@@ -92,17 +90,11 @@ def reconcile_attempt(db: Database, attempt_id: str, *, confirm_external_stopped
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="PostgreSQL 运行时管理及旧记录只读迁移")
+    parser = argparse.ArgumentParser(description="PostgreSQL 数据库初始化与运行时管理")
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser(MIGRATE)
+    commands.add_parser(INIT_DB)
     build = commands.add_parser(BUILD)
     build.add_argument("--file", type=Path, required=True)
-    history = commands.add_parser(MIGRATE_HISTORY)
-    history.add_argument("--bindings", type=Path, required=True)
-    history.add_argument("--dry-run", action="store_true")
-    publication_import = commands.add_parser(IMPORT_PUBLICATION)
-    publication_import.add_argument("--file", type=Path, required=True)
-    publication_import.add_argument("--dry-run", action="store_true")
     bindings = commands.add_parser(REGISTER_BINDINGS)
     bindings.add_argument("path", type=Path)
     reconcile = commands.add_parser(RECONCILE)
@@ -112,29 +104,18 @@ def main(argv: list[str] | None = None) -> None:
     gc.add_argument("--older-than-hours", type=int, default=24)
     gc.add_argument("--limit", type=int, default=100)
     args = parser.parse_args(argv)
-    # 管理操作与服务启动读取同一配置，避免迁移和运行连接到不同数据库。
+    # 管理操作与服务启动读取同一配置，避免初始化和运行连接到不同数据库。
     settings = Settings.from_file()
     if not settings.database_url:
         parser.error("SERVICE_DATABASE_URL is required")
     db = Database(settings.database_url)
     try:
-        if args.command == MIGRATE:
-            db.migrate()
-            result = {"migrated": True}
+        if args.command == INIT_DB:
+            db.initialize()
+            result = {"initialized": True}
         else:
             db.check()
-            if args.command == IMPORT_PUBLICATION:
-                from dbt_metricflow_service.storage.publication_import import import_publication
-
-                result = import_publication(db, _artifacts(db, settings),
-                                            _json(args.file, settings.max_artifact_file_bytes), dry_run=args.dry_run)
-            elif args.command == MIGRATE_HISTORY:
-                from dbt_metricflow_service.storage.migration import migrate_history
-
-                with db.transaction() as connection:
-                    result = migrate_history(connection, _json(args.bindings, settings.max_artifact_file_bytes),
-                                             dry_run=args.dry_run)
-            elif args.command == BUILD:
+            if args.command == BUILD:
                 from dbt_metricflow_service.application.builds import BuildService
                 from dbt_metricflow_service.models.builds import BuildRequest
                 from dbt_metricflow_service.storage.builds import BuildStore

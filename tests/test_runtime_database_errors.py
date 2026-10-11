@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from sqlalchemy import event
 from sqlalchemy.exc import DBAPIError, IntegrityError, TimeoutError
 
 from dbt_metricflow_service.api.app import create_app
@@ -74,21 +75,29 @@ async def test_heartbeat_failure_cancels_unconfirmed_execution(runtime_pair, mon
         await asyncio.gather(execution, return_exceptions=True)
 
 
-def test_gc_only_swallows_foreign_key_violation(runtime_pair, monkeypatch):
-    from dbt_metricflow_service.storage import artifacts
-
+def test_gc_only_swallows_foreign_key_violation(runtime_pair):
     runtimes, project = runtime_pair
     runtime = runtimes[0]
     source_id = runtime.jobs.project(project)["source_set_id"]
-    # Simulate a reference racing the eligibility check; retain real DELETE/FK behavior.
-    monkeypatch.setattr(artifacts, "SQL_GC_ELIGIBLE",
-                        "SELECT true AS eligible FROM (SELECT " + ",".join(["%s"] * 8) + ") AS inputs")
-    assert runtime.artifacts.delete_unreferenced(source_id) is False
-    assert runtime.artifacts.metadata(source_id)["state"] == "SEALED"
-    # An unrelated integrity violation must not be mistaken for a protected reference.
-    monkeypatch.setattr(artifacts, "SQL_DELETE_SET",
-                        "INSERT INTO runtime_schema_version(version) SELECT 5 WHERE %s IS NOT NULL")
-    with pytest.raises(IntegrityError) as failure:
-        runtime.artifacts.delete_unreferenced(source_id)
-    assert failure.value.orig.pgcode == "23505"
-    assert runtime.artifacts.metadata(source_id)["state"] == "SEALED"
+    unique_violation = False
+
+    def inject_failure(connection, cursor, statement, parameters, context, executemany):
+        # 模拟引用检查后的竞争，DELETE 仍由真实 PostgreSQL 外键拒绝。
+        if statement.startswith("SELECT") and "EXISTS" in statement and "runtime_project" in statement:
+            return "SELECT false", ()
+        if unique_violation and statement.startswith("DELETE FROM runtime_artifact_set"):
+            return "INSERT INTO engine_change_counter(singleton,value) VALUES (true,0)", ()
+        return statement, parameters
+
+    event.listen(runtime.db.engine, "before_cursor_execute", inject_failure, retval=True)
+    try:
+        assert runtime.artifacts.delete_unreferenced(source_id) is False
+        assert runtime.artifacts.metadata(source_id)["state"] == "SEALED"
+        # 无关的唯一键冲突仍必须向外传播，且整个删除事务应回滚。
+        unique_violation = True
+        with pytest.raises(IntegrityError) as failure:
+            runtime.artifacts.delete_unreferenced(source_id)
+        assert failure.value.orig.pgcode == "23505"
+        assert runtime.artifacts.metadata(source_id)["state"] == "SEALED"
+    finally:
+        event.remove(runtime.db.engine, "before_cursor_execute", inject_failure)

@@ -17,7 +17,7 @@ from ..models.builds import BuildStatus, ErrorView
 from ..models.queries import OptionsTaskView, QueryMode, QueryView, ResultPage
 from ..platform.models import PlatformQueryRequest
 from ..platform.options import map_options
-from ..platform.query_time import DEFAULT_TIMEZONE, canonical_query, normalize_query_time, query_time_metadata
+from ..platform.query_time import canonical_query, normalize_query_time, query_time_metadata
 from ..platform.results import result_page
 from ..storage.builds import digest
 from ..storage.jobs import CleanupBlocked, StoreConflict
@@ -184,7 +184,7 @@ class QueryService:
 
     def submit(self, build_id: UUID | str, request: QueryRequest, caller: str) -> QueryView:
         build = self._build(build_id)
-        timezone = build["config_snapshot"].get("businessTimezone", DEFAULT_TIMEZONE)
+        timezone = build["config_snapshot"]["businessTimezone"]
         request = normalize_query_time(request, timezone)
         body = canonical_query(request, timezone)
         prior, fingerprint = self._prior(build, body, caller, QUERY)
@@ -264,9 +264,7 @@ class QueryService:
                 "state": self._state(row),
                 "mode": body["publicRequest"]["mode"],
                 "commit_sha": build["commit_sha"],
-                "business_timezone": body.get(
-                    "businessTimezone", build["config_snapshot"].get("businessTimezone", DEFAULT_TIMEZONE)
-                ),
+                "business_timezone": body["businessTimezone"],
                 "normalized_time_range": body["normalizedTimeRange"],
                 "result_available": row["status"] == "SUCCEEDED" and self.jobs.result_exists(row["job_id"]),
                 "error": self._error(row, build),

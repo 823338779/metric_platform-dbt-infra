@@ -20,7 +20,7 @@ def store():
     if not dsn:
         pytest.skip("需要独立 SERVICE_TEST_DATABASE_URL")
     db = Database(dsn)
-    db.migrate()
+    db.initialize()
     db.check()
     yield PublicationStore(db)
     db.close()
@@ -44,10 +44,10 @@ def test_candidate_sequence_and_idempotency(store):
         store.get_release(PROJECT_PREFIX + uuid4().hex, rows[0]["release_id"])
 
 
-def test_migration_keeps_default_output_separate(store):
+def test_initialization_keeps_default_output_separate(store):
     project = PROJECT_PREFIX + uuid4().hex
     JobStore(store.db).register_project(project)
-    store.db.migrate()
+    store.db.initialize()
     row = JobStore(store.db).project(project)
     assert row["current_output_set_id"] is None
     assert row["active_published_release_id"] is None

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Unpack
 from uuid import UUID
 
-from sqlalchemy import Connection
+from sqlalchemy.orm import Session
 
 from dbt_metricflow_service.models.payloads import JsonObject
 from dbt_metricflow_service.storage.jobs import JobStore
@@ -21,7 +21,7 @@ def complete_job(
     payload: JsonObject | None = None,
     **kwargs: Unpack[CompletionOptions],
 ) -> bool:
-    def publish(connection: Connection, job: StoredJob, output_set_id: str) -> None:
+    def publish(connection: Session, job: StoredJob, output_set_id: str) -> None:
         PublicationStore(jobs.db).publish_in_transaction(
             connection, job_id=job_id, attempt_token=token,
             release_id=job["request_json"]["releaseId"], output_set_id=output_set_id,

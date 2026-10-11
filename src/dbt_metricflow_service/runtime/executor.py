@@ -140,7 +140,7 @@ class RuntimeExecutor:
             if job["kind"] in {METRIC_QUERY, QUERY_OPTIONS, RUN_CLEANUP}:
                 body = job["request_json"]
                 if job["kind"] == METRIC_QUERY:
-                    body = {"mode": QUERY_MODE, "request": body.get("engineRequest", body)}
+                    body = {"mode": QUERY_MODE, "request": body["engineRequest"]}
                 elif job["kind"] == RUN_CLEANUP:
                     body = {"mode": CLEANUP_MODE, "schema": cast(str, job["schema_name"])}
                     parent_id = UUID(job["parent_run_id"])

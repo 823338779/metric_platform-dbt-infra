@@ -4,7 +4,7 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any, NotRequired, TypeAlias, TypedDict
 
-from sqlalchemy import Connection
+from sqlalchemy.orm import Session
 
 from ..models.payloads import JsonObject
 
@@ -16,7 +16,7 @@ class StoredBuild(TypedDict):
     """engine_build 完整记录，包含可选的执行生命周期关联列。"""
 
     build_id: str  # 一次构建的公开身份。
-    run_id: str | None  # 内部执行任务，历史来源不完整时可为空。
+    run_id: str  # 受理构建时原子创建的内部执行任务。
     repository: str  # 规范仓库地址。
     branch_name: str | None  # 构建来源分支。
     environment: str  # 预览或正式执行环境。
@@ -36,7 +36,6 @@ class StoredBuild(TypedDict):
     output_set_id: str | None  # 完整构建产物集合。
     catalog_digest: str | None  # 封存目录字节摘要。
     error_code: str | None  # 稳定错误码。
-    source_incomplete: bool  # 历史来源证据是否不足。
     version: int  # 构建事实版本。
     created_at: datetime  # 受理时间。
     updated_at: datetime  # 最近更新时间。
@@ -118,4 +117,4 @@ class CompletionOptions(TypedDict, total=False):
     stderr_tail: str  # 脱敏错误输出尾部。
     exit_code: int  # 已确认的子进程退出码。
     output_truncated: bool  # 诊断输出是否被截断。
-    seal: Callable[[str, Connection], None] | None  # 同事务封存产物的回调。
+    seal: Callable[[str, Session], None] | None  # 同事务封存产物的回调。

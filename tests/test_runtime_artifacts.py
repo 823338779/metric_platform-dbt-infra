@@ -36,7 +36,7 @@ def store():
     if not dsn:
         pytest.skip("SERVICE_TEST_DATABASE_URL is required for PostgreSQL artifact tests")
     database = Database(dsn)
-    database.migrate()
+    database.initialize()
     yield ArtifactStore(database)
     database.close()
 
@@ -155,7 +155,7 @@ def test_worker_capture_is_invisible_until_transaction_seals(store, project, att
     set_id = store.capture(*project, kind="EXECUTION", producer_attempt_id=attempt)
     with pytest.raises(ValueError, match="SEALED"):
         store.materialize(set_id, tmp_path / "before")
-    with store.database.transaction() as connection:
+    with store.database.session() as connection:
         store.seal(set_id, connection)
     store.materialize(set_id, tmp_path / "after")
     assert (tmp_path / "after" / TARGET_PATH).read_bytes() == MANIFEST_BYTES

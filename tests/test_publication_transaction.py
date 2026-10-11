@@ -8,7 +8,7 @@ import pytest
 from dbt_metricflow_service.runtime.completion import complete_job
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.jobs import CleanupBlocked, JobStore
-from dbt_metricflow_service.storage.publications import SQL_ATTACH_RUN, PublicationStore
+from dbt_metricflow_service.storage.publications import PublicationStore
 from tests.test_publication_storage import store as store
 
 BUILD = "BUILD_RUN"
@@ -26,7 +26,9 @@ def prepared(store, tmp_path, project=None):
     release = store.create_candidate(project, request, uuid4().hex)
     job = jobs.reserve(BUILD, project, {**request, "releaseId": release["release_id"]}, toolchain_version=toolchain)
     with store.db.transaction() as connection:
-        connection.exec_driver_sql(SQL_ATTACH_RUN, (job["job_id"], release["release_id"]))
+        connection.exec_driver_sql(
+            "UPDATE runtime_release SET run_id=%s WHERE release_id=%s", (job["job_id"], release["release_id"]),
+        )
     job = jobs.claim(str(uuid4()), toolchain_version=toolchain)
     directory = tmp_path / uuid4().hex
     target = directory / "target"
@@ -43,7 +45,8 @@ def prepared(store, tmp_path, project=None):
                                          "project_digest": request["projectDigest"],
                                          "config_version": request["configVersion"],
                                          "toolchain_version": toolchain,
-                                         "validation_json": {**FLAGS, "publicationValidated": True},
+                                         "validation_json": {**FLAGS, "publicationValidated": True,
+                                                             "buildMode": "FULL_BUILD"},
                                          "catalog_json": catalog})
     return jobs, job, release, output, artifacts
 
@@ -143,7 +146,7 @@ def test_candidate_and_job_share_transaction(store):
     branches = BranchStore(store.db)
     before = branches.production(project)
     key = uuid4().hex
-    with pytest.raises(ValueError, match="after insert"), store.db.transaction() as connection:
+    with pytest.raises(ValueError, match="after insert"), store.db.session() as connection:
         release = store.create_candidate_in_transaction(connection, project, {}, key)
         job = jobs.reserve_in_transaction(connection, BUILD, project, {"releaseId": release["release_id"]})
         raise ValueError("after insert")

@@ -1,49 +1,36 @@
-"""Alembic coordinator; callers own the connection and its transaction."""
+"""当前结构的显式初始化；连接及事务由调用方管理。"""
 
 from pathlib import Path
 
-from alembic import command
-from alembic.config import Config
-from alembic.runtime.migration import MigrationContext
-from alembic.script import ScriptDirectory
-from sqlalchemy import Connection
+from sqlalchemy import Connection, inspect
 
-from .legacy_schema import UNSUPPORTED, legacy_version
+from .entities import Base
 
-
-def alembic_config(connection: Connection) -> Config:
-    config = Config()
-    config.set_main_option("script_location", str(Path(__file__).with_name("alembic")).replace("%", "%%"))
-    config.attributes["connection"] = connection
-    config.attributes["schema"] = connection.exec_driver_sql("SELECT current_schema()").scalar_one()
-    return config
+SCHEMA_FILE = Path(__file__).with_suffix(".sql")
+REQUIRED_TABLES = frozenset(Base.metadata.tables)
+NOT_INITIALIZED = "Runtime database is not initialized; run dbt-service-admin init-db on an empty schema"
+CURRENT_SCHEMA = "SELECT current_schema()"
+INITIALIZATION_LOCK = "SELECT pg_advisory_xact_lock(609302026)"
 
 
-def _versions(connection: Connection, config: Config) -> tuple[tuple[str, ...], str]:
-    scripts = ScriptDirectory.from_config(config)
-    heads = scripts.get_heads()
-    if len(heads) != 1:
-        raise RuntimeError(UNSUPPORTED)
-    context = MigrationContext.configure(connection, opts={"version_table_schema": config.attributes["schema"]})
-    current = context.get_current_heads()
-    known = {revision.revision for revision in scripts.walk_revisions()}
-    if len(current) > 1 or any(revision not in known for revision in current):
-        raise RuntimeError(UNSUPPORTED)
-    return current, heads[0]
+def _tables(connection: Connection) -> set[str]:
+    # 只检查当前 schema，避免 search_path 中其他 schema 的同名表掩盖缺失。
+    schema = connection.exec_driver_sql(CURRENT_SCHEMA).scalar_one()
+    return set(inspect(connection).get_table_names(schema=schema)) & REQUIRED_TABLES
 
 
 def check(connection: Connection) -> None:
-    config = alembic_config(connection)
-    current, head = _versions(connection, config)
-    if current != (head,) or legacy_version(connection) != 5:
-        raise RuntimeError(f"{UNSUPPORTED}; run dbt-service-admin migrate")
+    if _tables(connection) != REQUIRED_TABLES:
+        raise RuntimeError(NOT_INITIALIZED)
 
 
-def migrate(connection: Connection) -> None:
-    connection.exec_driver_sql("SELECT pg_advisory_xact_lock(609302026)")
-    config = alembic_config(connection)
-    current, _ = _versions(connection, config)
-    if current and legacy_version(connection) != 5:
-        raise RuntimeError(UNSUPPORTED)
-    command.upgrade(config, "head")
+def initialize(connection: Connection) -> None:
+    # 串行化初始化；已建库直接返回，部分结构不尝试修补或升级。
+    connection.exec_driver_sql(INITIALIZATION_LOCK)
+    existing = _tables(connection)
+    if existing == REQUIRED_TABLES:
+        return
+    if existing:
+        raise RuntimeError(NOT_INITIALIZED)
+    connection.exec_driver_sql(SCHEMA_FILE.read_text(encoding="utf-8"), execution_options={"no_parameters": True})
     check(connection)

@@ -8,16 +8,24 @@ import stat
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from uuid import uuid4
 
-import psycopg2
 import yaml
-from psycopg2.extras import Json
-from sqlalchemy import Connection
+from sqlalchemy import delete, exists, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from dbt_metricflow_service.execution.artifacts import _is_link
 from dbt_metricflow_service.models.payloads import JsonObject
+from dbt_metricflow_service.storage.entities import (
+    ArtifactFile,
+    ArtifactSet,
+    Branch,
+    Release,
+    RuntimeAttempt,
+    RuntimeJob,
+    RuntimeProject,
+)
 from dbt_metricflow_service.storage.postgres import Database
-from dbt_metricflow_service.storage.rows import row_dict
+from dbt_metricflow_service.storage.rows import entity_dict
 
 # 快照边界限定数据库占用，以及还原时单文件解压的最大内存。
 MAX_FILE_BYTES = 64 * 1024 * 1024
@@ -49,39 +57,8 @@ TARGET_FILES = frozenset({
     "sources.json",
 })
 TARGET_SUBDIRECTORIES = frozenset({"compiled", "run"})
-SQL_INSERT_SET = """
-INSERT INTO runtime_artifact_set
- (set_id,project_id,producer_attempt_id,kind,state,source_set_id,source_commit_sha,project_digest,
-  config_version,toolchain_version,format_version,content_digest,file_count,raw_bytes,
-  validation_json,catalog_json,metadata)
-VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-"""
-SQL_INSERT_FILE = """
-INSERT INTO runtime_artifact_file
- (set_id,relative_path,content,codec,raw_sha256,raw_size,stored_size,media_type,executable)
-VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-"""
-SQL_SET = "SELECT * FROM runtime_artifact_set WHERE set_id=%s"
-SQL_FILES = "SELECT * FROM runtime_artifact_file WHERE set_id=%s ORDER BY relative_path"
-SQL_FILE = "SELECT * FROM runtime_artifact_file WHERE set_id=%s AND relative_path=%s"
-SQL_DIGEST = "UPDATE runtime_artifact_set SET content_digest=%s WHERE set_id=%s"
-FOR_UPDATE = " FOR UPDATE"
-FOR_SHARE = " FOR SHARE"
-SQL_SEAL = "UPDATE runtime_artifact_set SET state=%s,sealed_at=clock_timestamp() WHERE set_id=%s"
-SQL_GC_LOCK = "SELECT set_id FROM runtime_artifact_set WHERE set_id=%s FOR UPDATE"
-SQL_GC_ELIGIBLE = """
-SELECT NOT EXISTS(SELECT 1 FROM runtime_job WHERE input_set_id=%s OR output_set_id=%s)
- AND NOT EXISTS(SELECT 1 FROM runtime_project WHERE source_set_id=%s OR current_output_set_id=%s)
- AND NOT EXISTS(SELECT 1 FROM runtime_artifact_set WHERE source_set_id=%s)
- AND NOT EXISTS(SELECT 1 FROM runtime_release WHERE artifact_set_id=%s)
- AND NOT EXISTS(SELECT 1 FROM runtime_branch WHERE base_input_set_id=%s)
- AND NOT EXISTS(SELECT 1 FROM runtime_attempt a JOIN runtime_artifact_set s
-   ON a.attempt_id=s.producer_attempt_id WHERE s.set_id=%s
-   AND a.state IN ('EXECUTING','EXPIRED_UNCONFIRMED')) AS eligible
-"""
-SQL_DELETING = "UPDATE runtime_artifact_set SET state='DELETING' WHERE set_id=%s"
-SQL_DELETE_FILES = "DELETE FROM runtime_artifact_file WHERE set_id=%s"
-SQL_DELETE_SET = "DELETE FROM runtime_artifact_set WHERE set_id=%s"
+DELETING = "DELETING"
+LIVE_ATTEMPT_STATES = ("EXECUTING", "EXPIRED_UNCONFIRMED")
 
 
 def _relative(value: str) -> PurePosixPath:
@@ -242,14 +219,20 @@ class ArtifactStore:
             files.append({"relative_path": relative, "path": path, "raw_size": size,
                           "raw_sha256": None, "executable": bool(path.stat().st_mode & stat.S_IXUSR)})
         set_id = str(uuid4())
-        with self.database.transaction() as connection:
-            connection.exec_driver_sql(SQL_INSERT_SET, (
-                set_id, project_id, producer_attempt_id, kind, STAGING, metadata.get("source_set_id"),
-                metadata.get("source_commit_sha"), metadata.get("project_digest"),
-                metadata.get("config_version", "1"), metadata.get("toolchain_version", "1"),
-                metadata.get("format_version", "1"), "", len(files), total,
-                Json(metadata.get("validation_json", {})), Json(metadata.get("catalog_json", {})), Json(metadata),
-            ))
+        with self.database.session() as session:
+            artifact_set = ArtifactSet(
+                set_id=set_id, project_id=project_id, producer_attempt_id=producer_attempt_id,
+                kind=kind, state=STAGING, source_set_id=metadata.get("source_set_id"),
+                source_commit_sha=metadata.get("source_commit_sha"), project_digest=metadata.get("project_digest"),
+                config_version=metadata.get("config_version", "1"),
+                toolchain_version=metadata.get("toolchain_version", "1"),
+                format_version=metadata.get("format_version", "1"), content_digest="", file_count=len(files),
+                raw_bytes=total, validation_json=metadata.get("validation_json", {}),
+                catalog_json=metadata.get("catalog_json", {}), metadata_json=metadata,
+            )
+            session.add(artifact_set)
+            # 先写父集合，随后逐文件 flush，保持外键顺序与有界内存。
+            session.flush()
             for item in files:
                 # 有界读取可发现检查与读取之间增长的文件，不无限制读入内存。
                 with item["path"].open("rb") as stream:
@@ -257,35 +240,38 @@ class ArtifactStore:
                 if len(content) != item["raw_size"]:
                     raise ValueError("artifact file changed during capture")
                 item["raw_sha256"] = hashlib.sha256(content).hexdigest()
-                connection.exec_driver_sql(SQL_INSERT_FILE, (
-                    set_id, item["relative_path"], psycopg2.Binary(content), RAW, item["raw_sha256"],
-                    len(content), len(content), mimetypes.guess_type(item["relative_path"])[0] or DEFAULT_MEDIA_TYPE,
-                    item["executable"],
+                session.add(ArtifactFile(
+                    set_id=set_id, relative_path=item["relative_path"], content=content, codec=RAW,
+                    raw_sha256=item["raw_sha256"], raw_size=len(content), stored_size=len(content),
+                    media_type=mimetypes.guess_type(item["relative_path"])[0] or DEFAULT_MEDIA_TYPE,
+                    executable=item["executable"],
                 ))
-            connection.exec_driver_sql(SQL_DIGEST, (_digest(files), set_id))
+                session.flush()
+            artifact_set.content_digest = _digest(files)
+            session.flush()
             if producer_attempt_id is None:
-                self.seal(set_id, connection)
+                self.seal(set_id, session)
         return set_id
 
     def metadata(self, set_id: str) -> JsonObject:
-        with self.database.transaction() as connection:
-            sql_result = connection.exec_driver_sql(SQL_SET, (set_id,))
-            row = row_dict(sql_result)
+        with self.database.session() as session:
+            row = entity_dict(session.get(ArtifactSet, set_id))
             if row is None:
                 raise ValueError("artifact set does not exist")
-            return {**row["metadata"], **dict(row)}
+            return {**row["metadata"], **row}
 
-    def seal(self, set_id: str, connection: Connection) -> None:
+    def seal(self, set_id: str, session: Session) -> None:
         # 调用方负责租约校验；同一事务锁定集合并核对完整内容后才能发布。
-        sql_result = connection.exec_driver_sql(SQL_SET + FOR_UPDATE, (set_id,))
-        row = row_dict(sql_result)
+        entity = session.get(ArtifactSet, set_id, with_for_update=True, populate_existing=True)
+        row = entity_dict(entity)
         if row is None or row["state"] not in {STAGING, SEALED}:
             raise ValueError("artifact set cannot be sealed")
-        sql_result = connection.exec_driver_sql(SQL_FILES, (set_id,))
-        files = [dict(row) for row in sql_result.mappings()]
+        files = [entity_dict(file) for file in session.scalars(
+            select(ArtifactFile).where(ArtifactFile.set_id == set_id).order_by(ArtifactFile.relative_path))]
         self._validate(row, files)
         if row["state"] == STAGING:
-            sql_result = connection.exec_driver_sql(SQL_SEAL, (SEALED, set_id))
+            session.execute(update(ArtifactSet).where(ArtifactSet.set_id == set_id)
+                               .values(state=SEALED, sealed_at=func.clock_timestamp()))
 
     def _validate(self, metadata: JsonObject, files: list[JsonObject]) -> None:
         _check_paths([row["relative_path"] for row in files])
@@ -300,13 +286,11 @@ class ArtifactStore:
     def read_file(self, set_id: str, relative_path: str) -> bytes:
         # 仅读取指定文件即可进行 API 前置校验，不必还原整个项目目录。
         relative_path = _relative(relative_path).as_posix()
-        with self.database.transaction() as connection:
-            sql_result = connection.exec_driver_sql(SQL_SET + FOR_SHARE, (set_id,))
-            metadata = row_dict(sql_result)
+        with self.database.session() as session:
+            metadata = entity_dict(session.get(ArtifactSet, set_id, with_for_update={"read": True}))
             if metadata is None or metadata["state"] != SEALED:
                 raise ValueError("only SEALED artifact files can be read")
-            sql_result = connection.exec_driver_sql(SQL_FILE, (set_id, relative_path))
-            row = row_dict(sql_result)
+            row = entity_dict(session.get(ArtifactFile, (set_id, relative_path)))
             if row is None:
                 raise ValueError("artifact file does not exist")
             return _decode(row, self.max_file_bytes)
@@ -318,13 +302,12 @@ class ArtifactStore:
             raise ValueError("artifact destination cannot contain links")
         if destination.exists() and (not destination.is_dir() or any(destination.iterdir())):
             raise ValueError("artifact destination must be an empty directory")
-        with self.database.transaction() as connection:
-            sql_result = connection.exec_driver_sql(SQL_SET + FOR_SHARE, (set_id,))
-            metadata = row_dict(sql_result)
+        with self.database.session() as session:
+            metadata = entity_dict(session.get(ArtifactSet, set_id, with_for_update={"read": True}))
             if metadata is None or metadata["state"] != SEALED:
                 raise ValueError("only SEALED artifact sets can be materialized")
-            sql_result = connection.exec_driver_sql(SQL_FILES, (set_id,))
-            files = [dict(row) for row in sql_result.mappings()]
+            files = [entity_dict(file) for file in session.scalars(
+                select(ArtifactFile).where(ArtifactFile.set_id == set_id).order_by(ArtifactFile.relative_path))]
             self._validate(metadata, files)
             destination.mkdir(parents=True, exist_ok=True)
             for row in files:
@@ -338,16 +321,24 @@ class ArtifactStore:
     def delete_unreferenced(self, set_id: str) -> bool:
         # 引用外键与集合行锁共同阻止 GC 删除正在发布或仍被任务引用的版本。
         try:
-            with self.database.transaction() as connection:
-                sql_result = connection.exec_driver_sql(SQL_GC_LOCK, (set_id,))
-                if row_dict(sql_result) is None:
+            with self.database.session() as session:
+                if session.get(ArtifactSet, set_id, with_for_update=True) is None:
                     return False
-                sql_result = connection.exec_driver_sql(SQL_GC_ELIGIBLE, (set_id,) * 8)
-                if not row_dict(sql_result)["eligible"]:
+                referenced = or_(
+                    exists().where(or_(RuntimeJob.input_set_id == set_id, RuntimeJob.output_set_id == set_id)),
+                    exists().where(or_(RuntimeProject.source_set_id == set_id,
+                                       RuntimeProject.current_output_set_id == set_id)),
+                    exists().where(ArtifactSet.source_set_id == set_id),
+                    exists().where(Release.artifact_set_id == set_id),
+                    exists().where(Branch.base_input_set_id == set_id),
+                    exists().where(RuntimeAttempt.attempt_id == ArtifactSet.producer_attempt_id,
+                                   ArtifactSet.set_id == set_id, RuntimeAttempt.state.in_(LIVE_ATTEMPT_STATES)),
+                )
+                if session.scalar(select(referenced)):
                     return False
-                sql_result = connection.exec_driver_sql(SQL_DELETING, (set_id,))
-                sql_result = connection.exec_driver_sql(SQL_DELETE_FILES, (set_id,))
-                sql_result = connection.exec_driver_sql(SQL_DELETE_SET, (set_id,))
+                session.execute(update(ArtifactSet).where(ArtifactSet.set_id == set_id).values(state=DELETING))
+                session.execute(delete(ArtifactFile).where(ArtifactFile.set_id == set_id))
+                session.execute(delete(ArtifactSet).where(ArtifactSet.set_id == set_id))
                 return True
         except IntegrityError as error:
             if error.orig.pgcode == "23503":

@@ -5,19 +5,19 @@ from types import SimpleNamespace
 import pytest
 
 from dbt_metricflow_service.api.app import create_app
+from dbt_metricflow_service.models.builds import BuildRequest
 from dbt_metricflow_service.platform.bindings import ProjectBinding, resolve_commit
-from dbt_metricflow_service.storage import history_models as models
 from tests.test_platform_bindings import git
 from tests.test_platform_bindings import repository as repository
+from tests.test_v3_contract import build_body
 
 
 def test_fixed_commit_request_rejects_moving_refs_and_environment_overrides():
-    assert hasattr(models, "FixedCommitRequest")
-    request = models.FixedCommitRequest(commitSha="a" * 40, idempotencyKey="one")
+    request = BuildRequest.model_validate(build_body())
     assert request.commit_sha == "a" * 40
     for fields in ({"commitSha": "main"}, {"remote": "untrusted"}, {"changes": []}):
         with pytest.raises(ValueError):
-            models.FixedCommitRequest.model_validate({"commitSha": "a" * 40, "idempotencyKey": "one", **fields})
+            BuildRequest.model_validate(build_body(**fields))
 
 
 def test_resolve_fixed_commit_outside_main(repository, tmp_path):

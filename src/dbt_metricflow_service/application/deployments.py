@@ -51,7 +51,7 @@ class DeploymentService:
             if prior["request_digest"] != fingerprint:
                 raise ServiceError("IDEMPOTENCY_CONFLICT", "deployment input differs", 409)
             return attempt_view(prior)
-        if build["build_status"] != "SUCCEEDED" or build["source_incomplete"]:
+        if build["build_status"] != "SUCCEEDED":
             raise ServiceError("BUILD_NOT_READY", "a successful build with source evidence is required", 409)
         if build["branch_name"] and request.branch_name != build["branch_name"]:
             raise ServiceError("SOURCE_MISMATCH", "deployment branch differs from build source")

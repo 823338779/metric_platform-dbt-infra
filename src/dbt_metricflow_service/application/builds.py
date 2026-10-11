@@ -110,8 +110,7 @@ class BuildService:
         elif row.get("run_lifecycle") in {"CLEANED", "CLEANING"}:
             reason = REMOVED
         elif (
-            row["source_incomplete"]
-            or row["toolchain_version"] != self.toolchain
+            row["toolchain_version"] != self.toolchain
             or self.config_version is not None
             and row["config_version"] != self.config_version
         ):

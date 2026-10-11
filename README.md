@@ -9,12 +9,12 @@
 | `models` | `/v3` 请求响应与封存资源模型；无 I/O |
 | `api` | 唯一 HTTP 装配、鉴权、参数和错误转换 |
 | `application` | builds、deployments、catalog、queries 四个具体用例服务；不持有 Runtime |
-| `storage` | PostgreSQL 短事务、任务/产物存储、变化流和历史迁移 |
+| `storage` | PostgreSQL 短事务、任务/产物存储、变化流和新库初始化 |
 | `runtime` | 同进程 worker、租约恢复、完成事务、执行工作目录 |
 | `platform` | 固定 Git 读取、完整工程构建、原生目录与查询适配 |
 | `execution` / `adapters` | 进程内引擎调用、通用命令控制、脱敏及底层引擎适配 |
 
-无额外 Repository/Port/Facade 镜像层。历史 SQL、历史模型和原始封存 schema 留在 storage/models 内，仅用于历史读取、迁移和物理引用保护。
+无额外 Repository/Port/Facade 镜像层。持久化通过 SQLAlchemy ORM 实现，封存产物与物理引用保护由具体 Store 和数据库约束维护。
 
 ## 启动
 
@@ -24,12 +24,12 @@
 uv sync --frozen --all-groups
 $env:SERVICE_DATABASE_URL = "postgresql://user:password@localhost/dbt_service"
 $env:SERVICE_TOKEN = "由部署环境提供的服务凭据"
-uv run --frozen dbt-service-admin migrate
+uv run --frozen dbt-service-admin init-db
 uv run --frozen dbt-service-admin register-bindings bindings.json
 uv run --frozen dbt-metricflow-service
 ```
 
-普通启动只检查数据库 schema，不自动执行迁移。API 和 worker 同进程运行；已受理任务在数据库中，不依赖 Agent 在线。配置读取顺序：环境变量 > `SERVICE_CONFIG_FILE` 指定文件（默认 `config/service.yaml`）> 默认值。文件内相对路径相对配置文件。
+普通启动只检查数据库 schema，不自动建表。API 和 worker 同进程运行；已受理任务在数据库中，不依赖 Agent 在线。配置读取顺序：环境变量 > `SERVICE_CONFIG_FILE` 指定文件（默认 `config/service.yaml`）> 默认值。文件内相对路径相对配置文件。
 
 dbt 命令通过 `dbtRunner.invoke()` 直接执行，MetricFlow 验证和查询调用 Python API，均不启动引擎 CLI 子进程。
 这些调用在线程中运行并共用进程级串行锁，避免 dbt 全局配置和连接相互影响；HTTP 和租约心跳保持异步。
@@ -107,18 +107,17 @@ uv run --frozen dbt-service-admin build --file build-request.json
 
 其他列表默认 50、最多 200，统一 `items/nextCursor`。错误统一为 `error`，包含 `code/message/retryable/phase/buildId`。完整协议以 `/openapi.json` 为准；健康及版本接口仍是 `/health/live`、`/health/ready`、`/v1/versions`。
 
-## 升级与运维
+## 初始化与运维
 
 这是整体协议替换。旧 `/v1` 业务路由、所有 `/v2/projects`、独立 validation、同步选项和分支登记入口均已移除，不提供兼容路由。调用方需另行迁移，不能混用新旧部署。
 
-升级前停止旧受理并排空任务，备份元数据库和目标仓库。执行 migrate 后，用旧 projectId 到真实 repository 的 JSON 映射迁移历史，禁止使用统一默认仓库：
+部署使用空的 PostgreSQL 数据库，执行以下命令创建完整表结构、约束和触发器：
 
 ```powershell
-uv run --frozen dbt-service-admin migrate-history --bindings history-bindings.json --dry-run
-uv run --frozen dbt-service-admin migrate-history --bindings history-bindings.json
+uv run --frozen dbt-service-admin init-db
 ```
 
-迁移给旧构建确定性分配 buildId，保持旧封存字节与关联不变。来源冲突返回报告且不写入；来源不完整只保留历史，不允许部署或查数。旧 validation 仅保留审计。`import-publication` 只用于旧版外部身份迁入旧审计表，不是构建发布接口。
+初始化直接执行 storage/schema.sql，重复执行不会重建已完整初始化的表；部分表缺失时拒绝自动修补。服务启动只检查当前 schema 的业务表是否齐全。不提供数据库迁移、历史数据导入或旧身份映射。
 
 对结果未知的执行，人工核实目标仓库停止后才释放保护：
 
@@ -130,6 +129,9 @@ uv run --frozen dbt-service-admin gc --older-than-hours 24 --limit 100
 gc 只回收无引用产物，没有历史自动 TTL。新变化流不自动裁剪；消费端提交本地投影与游标应使用同一事务。
 
 ## 验证
+
+持久化使用 SQLAlchemy ORM：实体、短 Session 和具体 Store 的职责及事务规则见
+[storage 说明](src/dbt_metricflow_service/storage/README.md)。schema.sql 定义新库的表结构、约束和触发器。
 
 自有 Python 代码的函数参数和返回值须完整标注，现有 Ruff 命令会检查缺失标注。
 依赖优先使用具体类型，回调使用 `Callable`，可空值显式使用 `| None`；分页与线程辅助函数保留泛型参数。

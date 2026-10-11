@@ -9,11 +9,9 @@ import pytest
 from sqlalchemy import event
 
 from dbt_metricflow_service.models.deployments import DeploymentKey
-from dbt_metricflow_service.storage.deployments import SQL_LOCK_TARGET, DeploymentStore
-from dbt_metricflow_service.storage.migration import migrate_history
+from dbt_metricflow_service.storage.deployments import DeploymentStore
 from tests.schema_helpers import isolated_database
 from tests.test_publication_storage import store as store
-from tests.test_publication_transaction import prepared
 from tests.test_v3_build_acceptance import CALLER, request, service
 from tests.test_v3_deployments import deployment_service
 
@@ -46,7 +44,7 @@ def test_observation_does_not_overwrite_concurrent_deployment(store, head):
 
 def test_pending_scan_reaches_beyond_first_unresolved_batch():
     with isolated_database() as db:
-        db.migrate()
+        db.initialize()
         app = service(SimpleNamespace(db=db))
         for _ in range(101):
             app.submit(request(branchName="feature/" + uuid4().hex, deploymentPolicy="ON_SUCCESS"), CALLER)
@@ -55,25 +53,6 @@ def test_pending_scan_reaches_beyond_first_unresolved_batch():
         second = deployments.pending()
         assert len(first) == len(second) == 100
         assert len({row["build_id"] for row in first + second}) == 101
-
-
-def test_migrated_terminal_snapshot_has_new_object_version(store, tmp_path):
-    from dbt_metricflow_service.runtime.completion import complete_job
-
-    jobs, job, release, output, artifacts = prepared(store, tmp_path)
-    assert complete_job(jobs, job["job_id"], job["lease_token"], output_set_id=output)
-    with store.db.transaction() as connection:
-        report = migrate_history(connection, {job["project_id"]: "https://git.example.com/legacy.git"})
-        identifier = report["mapping"][release["release_id"]]
-        rows = connection.exec_driver_sql(
-            "SELECT object_version,summary FROM engine_change WHERE object_id=%s ORDER BY sequence",
-            (identifier,),
-        ).mappings().all()
-    projection = rows[0]
-    for row in rows[1:]:
-        assert row["object_version"] > projection["object_version"]
-        projection = row
-    assert projection["summary"]["build_status"] == "SUCCEEDED"
 
 
 def test_build_acceptance_and_observation_have_consistent_lock_order(store, monkeypatch):
@@ -93,7 +72,8 @@ def test_build_acceptance_and_observation_have_consistent_lock_order(store, monk
         return original(self, *args, **kwargs)
 
     def after_statement(conn, cursor, statement, parameters, context, executemany):
-        if current_thread().name.startswith("observer") and statement == SQL_LOCK_TARGET:
+        if (current_thread().name.startswith("observer") and statement.lstrip().startswith("SELECT")
+                and "engine_deployment_target" in statement and "FOR UPDATE" in statement):
             observer_locked.set()
 
     def observe():

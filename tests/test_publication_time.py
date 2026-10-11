@@ -25,7 +25,7 @@ def test_equivalent_offsets_share_idempotent_query_and_business_calendar(store, 
     assert saved["request_json"]["businessTimezone"] == "Asia/Shanghai"
 
 
-def test_legacy_naive_calendar_is_preserved(store, tmp_path):
+def test_naive_business_calendar_is_preserved(store, tmp_path):
     service, job, release = query_service(store, tmp_path)
     request = PublishedQueryRequest(
         idempotencyKey=uuid4().hex,
@@ -64,27 +64,3 @@ def test_query_error_identifies_invalid_dimension(store, tmp_path):
     with pytest.raises(PublicationError) as caught:
         service.submit(release["build_id"], request, "platform")
     assert caught.value.error.code == "INVALID_DIMENSION_OPTION"
-
-
-def test_historical_snapshot_without_timezone_retries_without_rewriting_engine(store, tmp_path):
-    from psycopg2.extras import Json
-
-    service, job, release = query_service(store, tmp_path)
-    request = PublishedQueryRequest(
-        idempotencyKey=uuid4().hex,
-        mode="QUERY",
-        metricResourceIds=["metric.sample.orders"],
-        startTime="2026-10-01T00:00:00",
-    )
-    accepted = service.submit(release["build_id"], request, "platform")
-    saved = service.jobs.get(accepted.query_id)["request_json"]
-    saved.pop("businessTimezone")
-    with store.db.transaction() as connection:
-        connection.exec_driver_sql(
-            "UPDATE runtime_job SET request_json=%s WHERE job_id=%s", (Json(saved), accepted.query_id)
-        )
-    equivalent = PublishedQueryRequest.model_validate(
-        {**request.model_dump(by_alias=True), "startTime": "2026-09-30T16:00:00Z"}
-    )
-    assert service.submit(release["build_id"], equivalent, "platform") == accepted
-    assert service.jobs.get(accepted.query_id)["request_json"] == saved
