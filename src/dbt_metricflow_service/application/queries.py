@@ -17,7 +17,7 @@ from dbt_metricflow_service.models.queries import (
 )
 from dbt_metricflow_service.storage.records import StoredBuild
 
-from ..platform.dimensions import map_available_dimensions
+from ..platform.dimensions import DimensionBinding, map_available_dimensions
 from ..platform.query_time import canonical_query, normalize_query_time, query_time_metadata
 from .errors import ServiceError
 from .query_plan import compile_query
@@ -62,7 +62,7 @@ class QueryService:
 
     def _available_dimensions(
         self, build: StoredBuild, selected: list[str], catalog: JsonObject,
-    ) -> tuple[AvailableDimensions, dict[str, str]]:
+    ) -> tuple[AvailableDimensions, dict[str, DimensionBinding]]:
         indexed = self._metrics(catalog, selected)
         native = self.execute(build, {"mode": "OPTIONS", "metrics": [indexed[key]["name"] for key in selected]})
         return map_available_dimensions(build["build_id"], selected, catalog, native)
@@ -76,7 +76,7 @@ class QueryService:
         catalog = self.catalogs.read_build(build)
         indexed = self._metrics(catalog, body["metricResourceIds"])
         dimensions: list[DimensionOption] = []
-        mapping: dict[str, str] = {}
+        mapping: dict[str, DimensionBinding] = {}
         if request.group_by or request.filters or request.dimension_option_id:
             available, mapping = self._available_dimensions(build, body["metricResourceIds"], catalog)
             dimensions = available["dimensions"]

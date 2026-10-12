@@ -11,6 +11,24 @@ from metricflow_semantics.errors.error_classes import InvalidQueryException
 from dbt_metricflow_service.platform.models import PlatformQueryRequest, QueryMode
 
 ALLOWED_OPERATORS = frozenset({"=", "!=", ">", ">=", "<", "<=", "IN"})
+TIME_TYPE = "time"
+METRIC_TIME = "metric_time"
+PATH_SEPARATOR = "__"
+GRAIN_TOKENS = "grainTokens"
+
+
+def _verified_grains(engine: Any, metrics: tuple[str, ...], base: str) -> dict[str, str]:
+    # 对当前指标集合逐一 explain，不能把某个日期字段的能力套到其他 join 路径。
+    tokens = {}
+    for granularity in TimeGranularity:
+        token = PATH_SEPARATOR.join((base, granularity.value))
+        request = MetricFlowQueryRequest.create(metric_names=list(metrics), group_by_names=[token])
+        try:
+            engine.explain(request)
+        except (InvalidQueryException, ValueError):
+            continue
+        tokens[granularity.value] = token
+    return tokens
 
 
 def available_dimensions(engine: Any, metrics: tuple[str, ...]) -> dict[str, Any]:
@@ -23,15 +41,21 @@ def available_dimensions(engine: Any, metrics: tuple[str, ...]) -> dict[str, Any
         "token": dimension.dunder_name, "name": dimension.name,
         "type": getattr(dimension.type, "value", str(dimension.type)),
     } for dimension in engine.list_dimensions(metric_names=list(metrics))]
-    time_dimensions = []
-    for granularity in TimeGranularity:
-        token = f"metric_time__{granularity.value}"
-        request = MetricFlowQueryRequest.create(metric_names=list(metrics), group_by_names=[token])
-        try:
-            engine.explain(request)
-        except (InvalidQueryException, ValueError):
+    verified = {METRIC_TIME: _verified_grains(engine, metrics, METRIC_TIME)}
+    for dimension in dimensions:
+        if dimension["type"] != TIME_TYPE:
             continue
-        time_dimensions.append({"token": token, "granularity": granularity.value})
+        base = dimension["token"]
+        prefix, _, suffix = base.rpartition(PATH_SEPARATOR)
+        # 原生 metric_time 带默认粒度；字段自身名为 day 时不能误删字段名。
+        if suffix != dimension["name"] and suffix in {grain.value for grain in TimeGranularity}:
+            base = prefix
+        if base not in verified:
+            verified[base] = _verified_grains(engine, metrics, base)
+        dimension[GRAIN_TOKENS] = verified[base]
+    time_dimensions = [
+        {"token": token, "granularity": grain} for grain, token in verified[METRIC_TIME].items()
+    ]
     return {
         "metrics": [{"name": name} for name in metrics],
         "dimensions": dimensions, "timeDimensions": time_dimensions,
@@ -45,6 +69,10 @@ def validate_query(request: PlatformQueryRequest, available: dict[str, Any]) -> 
     metrics = {item["name"] for item in available["metrics"]}
     dimensions = {item["token"] for item in available["dimensions"]}
     time_dimensions = {item["token"] for item in available["timeDimensions"]}
+    # 命名日期维度的粒度保留在对应选项上，验证时纳入允许的原生 token。
+    time_dimensions.update(
+        token for item in available["dimensions"] for token in item.get(GRAIN_TOKENS, {}).values()
+    )
     if not request.metrics or not set(request.metrics) <= metrics:
         raise ValueError("指标不可查询")
     if not set(request.group_by) <= dimensions | time_dimensions:

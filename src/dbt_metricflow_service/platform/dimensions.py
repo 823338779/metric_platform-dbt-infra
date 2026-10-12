@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from dataclasses import dataclass
 
 from ..models.artifacts import ResourceKind
 from ..models.payloads import AvailableDimensions, DimensionOption, JsonObject
@@ -9,6 +10,7 @@ from ..models.payloads import AvailableDimensions, DimensionOption, JsonObject
 UTF8 = "utf-8"
 PATH_SEPARATOR = "__"
 DISPLAY_SEPARATOR = " → "
+GRAIN_TOKENS = "grainTokens"
 GRAIN_LABELS = {
     "second": "秒",
     "minute": "分钟",
@@ -21,13 +23,21 @@ GRAIN_LABELS = {
 }
 
 
+@dataclass(frozen=True)
+class DimensionBinding:
+    """公开选项的私有执行绑定，不向客户端暴露原生路径。"""
+
+    token: str  # 未指定粒度、过滤或取值时使用的默认原生字段。
+    grain_tokens: dict[str, str]  # 引擎已核实的粒度到原生字段映射。
+
+
 def map_available_dimensions(
     build_id: str, metric_ids: list[str], catalog: JsonObject, native: JsonObject
-) -> tuple[AvailableDimensions, dict[str, str]]:
+) -> tuple[AvailableDimensions, dict[str, DimensionBinding]]:
     indexed = {item["resourceId"]: item for item in catalog["resources"]}
     selected = sorted(set(metric_ids))
     output: list[DimensionOption] = []
-    mapping: dict[str, str] = {}
+    mapping: dict[str, DimensionBinding] = {}
     # 原生路径只保存在服务映射内；每个 join 路径保持独立选项身份。
     for entry in [*native["dimensions"], *native["timeDimensions"]]:
         token = entry["token"]
@@ -36,6 +46,7 @@ def map_available_dimensions(
         if option_id in mapping:
             continue
         grain = entry.get("granularity")
+        grain_tokens = entry.get(GRAIN_TOKENS, {grain: token} if grain else {})
         candidates = [
             item
             for item in indexed.values()
@@ -55,10 +66,10 @@ def map_available_dimensions(
                 "displayName": label,
                 "dimensionType": "time" if grain else entry.get("type", "unknown"),
                 "valueType": "datetime" if grain else entry.get("valueType", "unknown"),
-                "granularities": [grain] if grain else [],
+                "granularities": list(grain_tokens),
                 "operators": [] if grain else native["allowedFilters"],
             }
         )
-        mapping[option_id] = token
+        mapping[option_id] = DimensionBinding(token, grain_tokens)
     response: AvailableDimensions = {"buildId": str(build_id), "metricResourceIds": selected, "dimensions": output}
     return response, mapping

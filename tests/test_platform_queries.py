@@ -64,3 +64,32 @@ def test_decimal_result_preserves_precision() -> None:
     )
     result = serialize_rows(table, limit=10)
     assert result["rows"] == [["123456789.123456789"]]
+
+
+def test_time_dimensions_advertise_only_verified_grains_on_their_own_join_path():
+    class TimeEngine(FakeEngine):
+        def list_dimensions(self, metric_names):
+            return [
+                SimpleNamespace(dunder_name="metric_time__day", name="metric_time", type="time"),
+                SimpleNamespace(dunder_name="order__day", name="day", type="time"),
+                SimpleNamespace(dunder_name="return__day", name="day", type="time"),
+            ]
+
+        def explain(self, request):
+            if request.group_by_names[0] not in {
+                "metric_time__day", "metric_time__month", "order__day__month", "return__day__year",
+            }:
+                raise ValueError("unsupported grain")
+            return object()
+
+    available = available_dimensions(TimeEngine(), ("revenue", "orders"))
+    assert [entry["grainTokens"] for entry in available["dimensions"]] == [
+        {"day": "metric_time__day", "month": "metric_time__month"},
+        {"month": "order__day__month"},
+        {"year": "return__day__year"},
+    ]
+    # 已验证的命名日期维度粒度同样可用于分组和排序。
+    validate_query(PlatformQueryRequest(
+        runId="a" * 32, mode="QUERY", metrics=["revenue"],
+        groupBy=["order__day__month"], orderBy=["-order__day__month"],
+    ), available)
