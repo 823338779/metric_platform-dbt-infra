@@ -131,7 +131,21 @@ class RuntimeExecutor:
         job = await self._prepare_build_source(job)
         project = attempt / PROJECT_DIRECTORY
         await _thread(self.artifacts.materialize, cast(str, job["input_set_id"]), project)
-        return await execute_publication(self, job, attempt, project)
+        from contextlib import nullcontext
+
+        from ..models.execution import ExecutionSnapshot
+        from ..platform.execution_profile import materialized_profile
+        from ..storage.execution_targets import ExecutionTargetStore
+        targets = ExecutionTargetStore(self.jobs.db)
+        while not await _thread(targets.claim, job["job_id"], job["lease_token"]):
+            if not await _thread(self.jobs.heartbeat, job["job_id"], job["lease_token"]):
+                raise ExecutionError(ERROR_LEASE_LOST)
+            await asyncio.sleep(0.25)
+        raw = job["request_json"].get("execution")
+        profile = (materialized_profile(ExecutionSnapshot.model_validate(raw), attempt, self.settings, project)
+                   if raw else nullcontext(self.settings.profiles_dir))
+        with profile as profiles:
+            return await execute_publication(self, job, attempt, project, profiles=profiles)
 
     async def _prepare_build_source(self, job: LeasedJob) -> LeasedJob:
         """受理之后获取固定源码；所有慢 I/O 均在短事务之外。"""
@@ -197,11 +211,12 @@ class RuntimeExecutor:
             )
 
     async def _metricflow(
-        self, job: LeasedJob, project: Path, body: JsonObject,
+        self, job: LeasedJob, project: Path, body: JsonObject, profiles: Path | None = None,
     ) -> JsonObject:
         # 请求作为内存对象交给执行线程，结果也不经过临时控制文件。
         environment = build_engine_environment(
-            project, self.settings.profiles_dir, cast(str, job["schema_name"]), cast(str, job["profile_binding_id"]),
+            project, profiles or self.settings.profiles_dir, cast(str, job["schema_name"]),
+            cast(str, job["profile_binding_id"]),
         )
         external = job["kind"] == RUN_CLEANUP
         result = await run_metricflow(

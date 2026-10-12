@@ -52,3 +52,21 @@ class DeploymentTargetView(DeploymentKey):
     observed_head_sha: str | None = Field(default=None, description="最近观察远端 head")
     head_observed_at: datetime | None = Field(default=None, description="远端观察时间")
     source_state: str = Field(default="UNDEPLOYED", description="远端观察结果，不替代部署终态")
+
+
+class SnapshotDeploymentKey(DeploymentKey):
+    environment: str = Field(alias="environmentId", description="外部环境 UUID，与源码无绑定")
+
+    @field_validator("environment")
+    @classmethod
+    def valid_environment(cls, value: str) -> str:
+        return str(UUID(value))
+
+
+class SnapshotDeploymentAttemptView(DeploymentAttemptView):
+    environment: str = Field(alias="environmentId", description="外部环境 UUID")
+
+
+class SnapshotDeploymentTargetView(DeploymentTargetView):
+    environment: str = Field(alias="environmentId", description="外部环境 UUID")
+    latest_attempt: SnapshotDeploymentAttemptView | None = Field(default=None, description="该来源最新部署意图")

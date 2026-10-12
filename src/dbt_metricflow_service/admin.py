@@ -18,6 +18,7 @@ from dbt_metricflow_service.storage.rows import row_dict
 
 # 管理命令及输入格式常量集中定义，所有请求正文均经公开模型验证。
 INIT_DB = "init-db"
+UPGRADE_DB = "upgrade-db"
 REGISTER_BINDINGS = "register-bindings"
 RECONCILE = "reconcile-attempt"
 GC = "gc"
@@ -93,6 +94,7 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="PostgreSQL 数据库初始化与运行时管理")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser(INIT_DB)
+    commands.add_parser(UPGRADE_DB)
     build = commands.add_parser(BUILD)
     build.add_argument("--file", type=Path, required=True)
     bindings = commands.add_parser(REGISTER_BINDINGS)
@@ -113,6 +115,11 @@ def main(argv: list[str] | None = None) -> None:
         if args.command == INIT_DB:
             db.initialize()
             result = {"initialized": True}
+        elif args.command == UPGRADE_DB:
+            from dbt_metricflow_service.storage.schema import upgrade
+            with db.transaction() as connection:
+                upgrade(connection)
+            result = {"upgraded": True}
         else:
             db.check()
             if args.command == BUILD:

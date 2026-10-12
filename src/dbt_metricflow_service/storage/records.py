@@ -17,7 +17,10 @@ class StoredBuild(TypedDict):
     repository: str  # 规范仓库地址。
     branch_name: str | None  # 构建来源分支。
     environment: str  # 预览或正式执行环境。
-    execution_binding: str  # 受控执行绑定名称。
+    protocol_version: int  # 构建输入协议版本。
+    environment_id: str | None  # 外部环境身份。
+    physical_target_key: str | None  # 完整物理写入目标摘要。
+    execution_binding: str | None  # 受控执行绑定名称。
     config_version: str  # 固定配置版本。
     toolchain_version: str  # 固定引擎工具链版本。
     caller: str  # 可信调用来源。

@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import func, or_, select, tuple_, update
 
 from dbt_metricflow_service.models.builds import BuildRequest
+from dbt_metricflow_service.models.execution import SNAPSHOT_TARGET, SnapshotBuildRequest, physical_target_key
 from dbt_metricflow_service.models.payloads import JsonObject
 from dbt_metricflow_service.storage.postgres import Database
 from dbt_metricflow_service.storage.records import DatabaseRow, StoredBuild
@@ -91,6 +92,17 @@ class BuildStore:
             return cast(StoredBuild, {**entity_dict(row[0]), "run_lifecycle": row[1]}) if row else None
 
     def accept(self, request: BuildRequest, caller: str, toolchain: str, timeout: int) -> StoredBuild:
+        return self._accept(request, caller, toolchain, timeout, request.config_version)
+
+    def accept_snapshot(
+        self, request: SnapshotBuildRequest, caller: str, toolchain: str, timeout: int, runtime_config_version: str,
+    ) -> StoredBuild:
+        return self._accept(request, caller, toolchain, timeout, runtime_config_version)
+
+    def _accept(
+        self, request: BuildRequest | SnapshotBuildRequest, caller: str, toolchain: str,
+        timeout: int, runtime_config_version: str,
+    ) -> StoredBuild:
         from .deployments import DeploymentStore
 
         body = request.model_dump(mode=JSON_MODE, by_alias=True)
@@ -110,17 +122,45 @@ class BuildStore:
                 if prior.request_digest != fingerprint:
                     raise StoreConflict("idempotency key already binds another input")
                 return cast(StoredBuild, entity_dict(prior))
-            binding = session.get(
-                ExecutionBinding,
-                (
-                    request.repository,
-                    request.execution_binding,
-                    request.config_version,
-                ),
-            )
-            if binding is None or request.environment not in binding.config_json.get("environments", []):
-                raise ValueError("repository and execution binding are not allowed")
-            config = binding.config_json
+            snapshot = request.execution if isinstance(request, SnapshotBuildRequest) else None
+            if snapshot:
+                config = snapshot.model_dump(mode=JSON_MODE, by_alias=True)
+                environment, binding_name = str(snapshot.environment_id), None
+                config_version, schema_name = str(snapshot.config_version), snapshot.schema_name
+                profile_target = SNAPSHOT_TARGET
+            else:
+                binding = session.get(ExecutionBinding, (request.repository, request.execution_binding,
+                                                        request.config_version))
+                if binding is None or request.environment not in binding.config_json.get("environments", []):
+                    raise ValueError("repository and execution binding are not allowed")
+                config = binding.config_json
+                environment, binding_name = request.environment, request.execution_binding
+                config_version, schema_name = request.config_version, request.schema_name
+                profile_target = config["profileBindingId"]
+            # 归属由已有构建快照证明；同版本输入不可变，旧协议目标不明确时保守拒绝重叠。
+            target_key = physical_target_key(snapshot) if snapshot else None
+            if snapshot:
+                session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(target_key, 0))))
+                other = session.scalar(select(Build.build_id).where(
+                    Build.physical_target_key == target_key, Build.environment_id != str(snapshot.environment_id),
+                ).limit(1))
+                if other:
+                    raise StoreConflict("EXECUTION_TARGET_CONFLICT")
+                version = session.scalar(select(Build).where(
+                    Build.environment_id == str(snapshot.environment_id), Build.config_version == config_version,
+                ).limit(1))
+                if version and version.config_snapshot != config:
+                    raise StoreConflict("EXECUTION_SNAPSHOT_CONFLICT")
+                legacy = session.scalar(select(Build.build_id)
+                                        .join(RuntimeJob, Build.run_id == RuntimeJob.job_id).where(
+                    Build.protocol_version == 3, RuntimeJob.schema_name == schema_name,
+                ).limit(1))
+                if legacy:
+                    raise StoreConflict("EXECUTION_TARGET_UNVERIFIED")
+            elif session.scalar(select(Build.build_id).join(RuntimeJob, Build.run_id == RuntimeJob.job_id).where(
+                Build.protocol_version == 4, RuntimeJob.schema_name == schema_name,
+            ).limit(1)):
+                raise StoreConflict("EXECUTION_TARGET_CONFLICT")
             build_id, run_id = str(uuid4()), uuid4()
             # 队列表的 project 列是内部执行容器；每次构建独立，不是公开业务项目。
             project = PROJECT_PREFIX + build_id
@@ -128,7 +168,7 @@ class BuildStore:
                 RuntimeProject(
                     project_id=project,
                     binding_config=config,
-                    config_version=request.config_version,
+                    config_version=runtime_config_version,
                 )
             )
             session.flush()
@@ -139,20 +179,25 @@ class BuildStore:
                 project,
                 payload,
                 job_id=str(run_id),
-                config_version=request.config_version,
+                config_version=runtime_config_version,
                 toolchain_version=toolchain,
-                profile_binding_id=config["profileBindingId"],
-                schema_name=request.schema_name,
+                profile_binding_id=profile_target,
+                schema_name=schema_name,
                 timeout_seconds=timeout,
             )
+            session.get(RuntimeJob, job["job_id"]).physical_target_key = target_key or digest(
+                [profile_target, schema_name])
             build = Build(
                 build_id=build_id,
                 run_id=job["job_id"],
                 repository=request.repository,
                 branch_name=request.branch_name,
-                environment=request.environment,
-                execution_binding=request.execution_binding,
-                config_version=request.config_version,
+                environment=environment,
+                protocol_version=4 if snapshot else 3,
+                environment_id=str(snapshot.environment_id) if snapshot else None,
+                physical_target_key=physical_target_key(snapshot) if snapshot else None,
+                execution_binding=binding_name,
+                config_version=config_version,
                 toolchain_version=toolchain,
                 caller=caller,
                 idempotency_key=request.idempotency_key,
@@ -202,11 +247,19 @@ class BuildStore:
         return rows, build_id + ":" + str(rows[-1]["sequence"] if rows else after)
 
     def list(
-        self, repository: str, branch_name: str | None = None, cursor: str | None = None, limit: int = 50,
+        self, repository: str | None, branch_name: str | None = None, cursor: str | None = None, limit: int = 50,
+        *, environment_id: str | None = None, status: str | None = None,
     ) -> tuple[list[StoredBuild], str | None]:
-        scope = [repository, branch_name]
+        scope = ([repository, branch_name] if environment_id is None
+                 else [environment_id, repository, branch_name, status])
         after = read_cursor(scope, cursor, limit, version=HISTORY_CURSOR_VERSION)
-        statement = BUILD_VIEW.where(Build.repository == repository)
+        statement = BUILD_VIEW.where(Build.protocol_version == (4 if environment_id else 3))
+        if repository is not None:
+            statement = statement.where(Build.repository == repository)
+        if environment_id is not None:
+            statement = statement.where(Build.environment_id == environment_id)
+        if status is not None:
+            statement = statement.where(Build.build_status == status)
         if branch_name is not None:
             statement = statement.where(Build.branch_name == branch_name)
         if after is not None:

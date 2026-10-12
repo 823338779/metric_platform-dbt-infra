@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import tempfile
@@ -28,7 +29,10 @@ PROFILES_FILENAME = "profiles.yml"
 GENERATED_PROFILES_DIR = "profiles"
 PROFILE_TARGET_KEY, PROFILE_OUTPUTS_KEY, ADAPTER_TYPE_KEY = "target", "outputs", "type"
 WRITE_MODE = "wb"
+EXECUTION_INSTANCES = "EXECUTION_INSTANCES"
+EXECUTION_CREDENTIALS = "EXECUTION_CREDENTIALS"
 CONFIG_KEYS = frozenset({
+    EXECUTION_INSTANCES, EXECUTION_CREDENTIALS,
     "SERVICE_HOST", "SERVICE_PORT",  "DBT_PROFILES_DIR", "COMMAND_TIMEOUT_SECONDS",
     "MAX_OUTPUT_BYTES",   
     "SERVICE_DATABASE_URL", "SERVICE_TEMP_ROOT", "WORKER_CONCURRENCY", "JOB_LEASE_SECONDS",
@@ -111,6 +115,11 @@ class Settings:
     server_host: str = "0.0.0.0"
     server_port: int = 8000
 
+    # 物理实例身份与地址别名，仅为基础设施准入，不含环境落点配置。
+    execution_instances: JsonObject = field(default_factory=dict)
+    # 允许使用的凭据引用到受保护环境变量名的映射，不包含明文值。
+    execution_credentials: JsonObject = field(default_factory=dict, repr=False)
+
     def __post_init__(self) -> None:
         # 监听配置错误应在创建服务前暴露。
         if not self.server_host or not 1 <= self.server_port <= 65535:
@@ -148,7 +157,8 @@ class Settings:
             if not isinstance(config, dict) or not config.keys() <= CONFIG_KEYS:
                 raise ValueError("服务配置必须是配置项映射，且不能包含未知配置项")
             if any(value is not None and type(value) not in (str, int)
-                   for key, value in config.items() if key != INLINE_PROFILES_KEY):
+                   for key, value in config.items()
+                   if key not in (INLINE_PROFILES_KEY, EXECUTION_INSTANCES, EXECUTION_CREDENTIALS)):
                 raise ValueError("服务配置值只能是字符串、整数或 null")
         profiles = config.get(INLINE_PROFILES_KEY)
         if profiles is not None:
@@ -172,7 +182,15 @@ class Settings:
             configured = Path(value(name, default))
             return (configured if name in os.environ else base_dir / configured).resolve()
 
+        def mapping(name: str) -> JsonObject:
+            data = json.loads(os.environ[name]) if name in os.environ else config.get(name, {})
+            if not isinstance(data, dict):
+                raise ValueError("execution infrastructure mapping must be an object")
+            return data
+
         settings = cls(
+            execution_instances=mapping(EXECUTION_INSTANCES),
+            execution_credentials=mapping(EXECUTION_CREDENTIALS),
             profiles_dir=path("DBT_PROFILES_DIR", DEFAULT_PROFILES_DIR),
             command_timeout_seconds=int(
                 value("COMMAND_TIMEOUT_SECONDS", str(DEFAULT_COMMAND_TIMEOUT_SECONDS))

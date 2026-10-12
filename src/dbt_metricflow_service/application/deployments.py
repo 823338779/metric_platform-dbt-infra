@@ -13,7 +13,13 @@ from dbt_metricflow_service.storage.deployments import DeploymentStore
 from dbt_metricflow_service.storage.records import StoredBuild, StoredDeploymentAttempt, StoredDeploymentTarget
 
 from ..models.builds import Page
-from ..models.deployments import DeploymentAttemptView, DeploymentKey, DeploymentTargetView
+from ..models.deployments import (
+    DeploymentAttemptView,
+    DeploymentKey,
+    DeploymentTargetView,
+    SnapshotDeploymentKey,
+    SnapshotDeploymentTargetView,
+)
 from ..storage.builds import digest
 from ..storage.deployments import TERMINAL, attempt_view
 from ..storage.jobs import StoreConflict
@@ -54,7 +60,8 @@ class DeploymentService:
             raise ServiceError("BUILD_NOT_READY", "a successful build with source evidence is required", 409)
         if build["branch_name"] and request.branch_name != build["branch_name"]:
             raise ServiceError("SOURCE_MISMATCH", "deployment branch differs from build source")
-        if (build["environment"] == "PRODUCTION") != (request.branch_name == "main"):
+        if (build.get("protocol_version", 3) == 3
+                and ((build["environment"] == "PRODUCTION") != (request.branch_name == "main"))):
             raise ServiceError("INVALID_TARGET", "branch and environment do not match")
         try:
             return attempt_view(self.store.submit(build, caller, request, fingerprint))
@@ -62,9 +69,10 @@ class DeploymentService:
             raise ServiceError("TARGET_CONFLICT", str(error), 409) from error
 
     def current(self, key: DeploymentKey) -> DeploymentTargetView:
+        model = SnapshotDeploymentTargetView if isinstance(key, SnapshotDeploymentKey) else DeploymentTargetView
         target = self.store.current(key)
         if target is None:
-            return DeploymentTargetView(**key.model_dump())
+            return model(**key.model_dump())
         active = self.builds.get(target["active_build_id"]) if target["active_build_id"] else None
         try:
             head = self.head_reader(key.repository, key.branch_name)
@@ -90,7 +98,7 @@ class DeploymentService:
         fields["active_commit_sha"] = active["commit_sha"] if active and target["active_build_id"] else None
         latest = self.store.attempt(key, target["desired_generation"])
         fields["latest_attempt"] = attempt_view(latest) if latest else None
-        return DeploymentTargetView(**fields)
+        return model(**fields)
 
     def reconcile(self, key: DeploymentKey, generation: int) -> DeploymentAttemptView:
         attempt = self.store.attempt(key, generation)
@@ -151,7 +159,8 @@ class DeploymentService:
     def reconcile_pending(self) -> None:
         # 调度由 runtime 调用；每次有界扫描，重启后仍读取同一持久意图。
         for attempt in self.store.pending():
-            key = DeploymentKey(**{name: attempt[name] for name in DeploymentKey.model_fields})
+            model = DeploymentKey if attempt["environment"] in ("PREVIEW", "PRODUCTION") else SnapshotDeploymentKey
+            key = model(**{name: attempt[name] for name in DeploymentKey.model_fields})
             self.reconcile(key, attempt["generation"])
 
     def list(

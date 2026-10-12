@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Query
 
 from dbt_metricflow_service.application.deployments import DeploymentService
 
+from ..application.errors import ServiceError
 from ..models.builds import Environment, Page
 from ..models.deployments import DeploymentAttemptView, DeploymentKey, DeploymentRequest, DeploymentTargetView
 
@@ -18,6 +19,10 @@ def router(service: DeploymentService, guard: Callable[..., Awaitable[str]]) -> 
 
     @routes.post("", response_model=DeploymentAttemptView, status_code=202)
     def submit(request: DeploymentRequest, caller: str=dependency) -> DeploymentAttemptView:
+        # 在受理意图之前核对协议，防止旧响应序列化失败后仍写入新环境部署。
+        build = service.build_service.load(request.build_id)
+        if build.get("protocol_version", 3) != 3:
+            raise ServiceError("PROTOCOL_VERSION_MISMATCH", "use the original build deployment protocol", 409)
         return service.submit(request, caller)
 
     @routes.get("/current", response_model=DeploymentTargetView)

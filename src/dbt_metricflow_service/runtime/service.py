@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from contextlib import nullcontext
 from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -14,13 +15,14 @@ from dbt_metricflow_service.execution.embedded import run_serialized
 from dbt_metricflow_service.execution.metricflow import MetricFlowRequest, MetricFlowResult, invoke_metricflow
 from dbt_metricflow_service.execution.models import JobStatus
 from dbt_metricflow_service.models.payloads import JsonObject
+from dbt_metricflow_service.platform.execution_profile import ExecutionConfigurationError
 from dbt_metricflow_service.runtime.executor import build_engine_environment
 from dbt_metricflow_service.runtime.workspace import materialized_workspace
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.jobs import CleanupBlocked, JobStore
 from dbt_metricflow_service.storage.postgres import Database
-from dbt_metricflow_service.storage.records import StoredBuild
+from dbt_metricflow_service.storage.records import StoredBuild, StoredJob
 
 if TYPE_CHECKING:
     from dbt_metricflow_service.application.deployments import DeploymentService
@@ -68,18 +70,31 @@ class Runtime:
                     self.artifacts, cast(str, build["output_set_id"]), self.settings.temp_root,
                     str(uuid4()), str(uuid4()),
                 ) as project:
-                    environment = build_engine_environment(
-                        project, self.settings.profiles_dir,
-                        cast(str, parent["schema_name"]), cast(str, parent["profile_binding_id"]),
-                    )
-                    return invoke_metricflow(
-                        parent["project_id"], MetricFlowRequest(environment, payload),
-                        self.settings.max_output_bytes,
-                    )
+                    from ..models.execution import ExecutionSnapshot
+                    from ..platform.execution_profile import materialized_profile
+                    profile = (materialized_profile(ExecutionSnapshot.model_validate(build["config_snapshot"]),
+                                                    self.settings.temp_root, self.settings, project)
+                               if build.get("protocol_version", 3) == 4 else nullcontext(self.settings.profiles_dir))
+                    with profile as profiles:
+                        return invoke_with_profile(profiles, parent, project)
+
+        def invoke_with_profile(profiles: Path, parent: StoredJob, project: Path) -> MetricFlowResult:
+            environment = build_engine_environment(
+                project, profiles,
+                cast(str, parent["schema_name"]), cast(str, parent["profile_binding_id"]),
+            )
+            return invoke_metricflow(
+                parent["project_id"], MetricFlowRequest(environment, payload),
+                self.settings.max_output_bytes,
+            )
 
         try:
             # 先取得引擎串行槽位，再占用清理保护连接，避免排队请求耗尽连接池。
             result, timed_out = asyncio.run(run_serialized(invoke, self.settings.command_timeout_seconds, before_start))
+        except ExecutionConfigurationError as error:
+            # 凭据或实例清单是运行基础设施，恢复配置后可重试同一个构建查询。
+            raise ServiceError(error.code, "execution configuration unavailable", 503, retryable=True,
+                               build_id=build["build_id"]) from error
         except CleanupBlocked as error:
             raise ServiceError("PHYSICAL_OBJECTS_REMOVED", "build is being cleaned", 410,
                                build_id=build["build_id"]) from error

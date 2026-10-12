@@ -122,7 +122,7 @@ uv run --frozen dbt-service-admin build --file build-request.json
 uv run --frozen dbt-service-admin init-db
 ```
 
-初始化直接执行 storage/schema.sql，重复执行不会重建已完整初始化的表；部分表缺失时拒绝自动修补。服务启动只检查当前 schema 的业务表是否齐全。不提供数据库迁移、历史数据导入或旧身份映射。本次删除旧发布、分支和通用任务结果表，旧库不能依靠重复执行 init-db 升级；部署新版需使用按当前 schema.sql 初始化的新库。
+空库初始化执行 storage/schema.sql 和增量迁移；重复 init-db 不重建已有表，也不隐式升级。已运行 v3 构建协议的数据库使用下面的 upgrade-db 增量升级，保留已有构建、部署和产物。更早的旧发布协议数据库仍不支持自动迁移。服务启动只检查结构，缺少新列时明确要求升级。
 
 持久化保留构建、部署、异步任务及执行尝试、构建日志和必要的产物快照。成功任务不再保存通用结果和诊断副本；目录只保存封存文件，元数据只保存独立的版本、来源和验证字段。完整构建每次独立执行，不保留旧发布基线和默认输出复用机制。执行产物仅保留恢复工程所需文件及 manifest、semantic_manifest、catalog、published_catalog；compiled/run、run_results、sources 和额外验证证据文件只在构建期间使用。
 
@@ -163,3 +163,41 @@ uv run --frozen pytest -q tests/integration/test_publication_proxy_flow.py
 ```
 
 测试覆盖完整构建、部署、四种查询、固定 schema 覆盖与不安全模板失败，创建独立测试 schema；该证据不代表 StarRocks 已做真实集成验证。
+
+## 外部执行快照与环境隔离（v4）
+
+环境由指标平台等调用方管理。本服务不提供环境配置 CRUD 或环境注册表；每次 `POST /v4/builds` 必须携带 repository、branchName、idempotencyKey 和完整 execution 快照。execution 包含 environmentId、configVersion、connection、credentialRef、catalog、schema、threads、businessTimezone。branchName 与环境无绑定，main 和 feature 分支使用相同规则。configVersion 是外部版本，worker 匹配仍使用 SERVICE_CONFIG_VERSION。
+
+```powershell
+uv run --frozen dbt-service-admin upgrade-db
+```
+
+升级前停止接收新写入并排空正在执行的任务，再执行事务化增量迁移并重启服务；勿通过清库迁移。v3 API/旧执行绑定继续兼容，v3 元信息读取 v4 build 返回版本不匹配。`GET /v4/builds` 必须携带 environmentId；可选 repository、branchName、buildStatus、cursor、limit。详情、日志和取消位于 `/v4/builds/{buildId}`、`/logs`、`/cancel`。`/v4/deployments` 与 `/current` 以 repository/environmentId/branchName 定位部署。目录与查询仍使用固定 buildId 的 v3 API，内部按该 build 的快照创建临时 profile。
+
+部署配置示例（可在服务 YAML 中写映射，也可用同名环境变量写 JSON）：
+
+```yaml
+EXECUTION_INSTANCES:
+  warehouse:
+    type: starrocks
+    hosts: [localhost, 127.0.0.1]
+    port: 9030
+EXECUTION_CREDENTIALS:
+  warehouse-readwrite:
+    userEnv: DBT_ENV_SECRET_WAREHOUSE_USER
+    passwordEnv: DBT_ENV_SECRET_WAREHOUSE_PASSWORD
+```
+
+secret 值通过受保护的环境变量注入。profile 只写 dbt `env_var` 引用，执行后销毁且不封存。实例清单不含环境、catalog/schema；不得为同一物理实例登记多个不同 instanceId，否则无法证明跨别名的物理隔离。
+
+StarRocks 的 profile.catalog 指定 catalog，profile.schema 指定 database；profile.database 留空，避免 source 继承后被误识别成外部 catalog。模型的 catalog/database 覆盖必须仍指向同一物理目标。PostgreSQL 的 catalog 映射为 dbname，DuckDB 的 catalog 必须等于清单中绝对文件路径的文件名（去后缀）。不存在或不可写的外部 catalog 会导致构建失败；不能把更换 catalog 字段当成已验证的适配器写入能力。
+
+物理归属从不可变构建事实核验，已使用的目标不能交给另一环境。同一环境并发构建串行写入同一目标；租约过期或外部停止情况未知时保留写入保护，直到现有 reconcile 流程确认停止。旧 v3 记录未保存可靠 catalog 信息，遇到与旧 schema 重叠的快照构建会保守拒绝。
+
+真实隔离验收需设置 `ENVIRONMENT_ISOLATION_E2E=1`、`SERVICE_TEST_DATABASE_URL`（专用服务测试库）、`ENVIRONMENT_TEST_REPOSITORY`、`DBT_ENV_SECRET_ISOLATION_USER`、`DBT_ENV_SECRET_ISOLATION_PASSWORD`；可选 `ENVIRONMENT_TEST_HOST/PORT/BRANCH`。使用已有真实仓库和只读原始数据，测试创建唯一 `env_e2e_*` schema，保留构建事实便于审计：
+
+```powershell
+uv run --frozen pytest -q -s tests/integration/test_execution_environment_isolation.py
+```
+
+测试核对两个 schema 的实际表内容、相同源码 SHA、固定 build 查询、环境 A 重建后环境 B 不变，以及旧配置快照不变。清理这些专用 schema 和测试数据库应在确认不再需要验收记录后单独执行。

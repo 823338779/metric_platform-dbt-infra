@@ -9,6 +9,7 @@ from dbt_metricflow_service.storage.builds import BuildStore
 from dbt_metricflow_service.storage.records import StoredBuild, StoredDeploymentAttempt
 
 from ..models.builds import BuildStatus, BuildView, ErrorView, LogPage, Page
+from ..models.execution import ExecutionSnapshot, SnapshotBuildRequest, SnapshotBuildView
 from ..storage.deployments import DeploymentStore, attempt_view
 from ..storage.jobs import StoreConflict
 from .errors import ServiceError
@@ -28,6 +29,40 @@ class BuildService:
         self.timeout = timeout
         # 实例只报告其可执行的版本；存量配置快照本身仍然保留。
         self.config_version = config_version
+
+    def submit_snapshot(self, request: SnapshotBuildRequest, caller: str) -> SnapshotBuildView:
+        try:
+            row = self.store.accept_snapshot(request, caller, self.toolchain, self.timeout, self.config_version or "1")
+        except StoreConflict as error:
+            code = str(error) if str(error).startswith("EXECUTION_") else "IDEMPOTENCY_CONFLICT"
+            raise ServiceError(code, str(error), 409) from error
+        return self.snapshot_view(row["build_id"])
+
+    def snapshot_view(self, build_id: UUID | str) -> SnapshotBuildView:
+        row = self.load(build_id)
+        initial = DeploymentStore(self.store.db).initial(row["build_id"])
+        return self.view(row, initial, snapshot=True)
+
+    def cancel_snapshot(self, build_id: UUID | str, caller: str) -> tuple[SnapshotBuildView, int]:
+        self.load(build_id)
+        try:
+            status = self.store.cancel(str(build_id))
+        except StoreConflict as error:
+            raise ServiceError("BUILD_TERMINAL", str(error), 409, build_id=str(build_id)) from error
+        return self.snapshot_view(build_id), status
+
+    def list_by_environment(
+        self, environment_id: UUID, repository: str | None, branch_name: str | None,
+        status: BuildStatus | None, cursor: str | None, limit: int,
+    ) -> Page[SnapshotBuildView]:
+        try:
+            rows, following = self.store.list(repository, branch_name, cursor, limit,
+                                               environment_id=str(environment_id), status=status)
+        except ValueError as error:
+            raise ServiceError("INVALID_CURSOR", str(error)) from error
+        initials = DeploymentStore(self.store.db).initials([row["build_id"] for row in rows])
+        return Page[SnapshotBuildView](items=[self.view(row, initials.get(row["build_id"]), snapshot=True)
+                                              for row in rows], next_cursor=following)
 
     def submit(self, request: BuildRequest, caller: str) -> BuildView:
         try:
@@ -51,7 +86,7 @@ class BuildService:
 
     def cancel(self, build_id: UUID | str, caller: str) -> tuple[BuildView, int]:
         # caller 已由入口验证；取消没有新的外部任务身份。
-        self.load(build_id)
+        self.get(build_id)
         try:
             status = self.store.cancel(str(build_id))
         except StoreConflict as error:
@@ -96,13 +131,15 @@ class BuildService:
             return REMOVED
         if (
             row["toolchain_version"] != self.toolchain
-            or self.config_version is not None
+            or row.get("protocol_version", 3) == 3 and self.config_version is not None
             and row["config_version"] != self.config_version
         ):
             return ENVIRONMENT_MISSING
         return None
 
-    def view(self, row: StoredBuild, initial: StoredDeploymentAttempt | None) -> BuildView:
+    def view(
+        self, row: StoredBuild, initial: StoredDeploymentAttempt | None, *, snapshot: bool = False,
+    ) -> BuildView | SnapshotBuildView:
         # 目录能力与物理执行能力独立；响应组装不再隐含数据库读取。
         catalog = row["build_status"] == BuildStatus.SUCCEEDED and bool(row["output_set_id"])
         reason = self.query_unavailable_reason(row)
@@ -123,4 +160,12 @@ class BuildService:
             if row["error_code"]
             else None,
         )
+        if snapshot:
+            legacy = row.get("protocol_version", 3) == 3
+            fields.update(environment=None, execution_binding=None,
+                          legacy_environment=row["environment"] if legacy else None,
+                          execution=None if legacy else ExecutionSnapshot.model_validate(row["config_snapshot"]))
+            return SnapshotBuildView(**fields)
+        if row.get("protocol_version", 3) != 3:
+            raise ServiceError("PROTOCOL_VERSION_MISMATCH", "use v4 for this build metadata", 409)
         return BuildView(**fields)

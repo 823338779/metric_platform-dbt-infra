@@ -151,7 +151,7 @@ def requires_source_freshness(node: JsonObject) -> bool:
 
 
 async def execute_publication(
-    executor: RuntimeExecutor, job: LeasedJob, attempt: Path, project: Path
+    executor: RuntimeExecutor, job: LeasedJob, attempt: Path, project: Path, *, profiles: Path | None = None,
 ) -> ExecutionResult:
     """全量构建和完整验证使用同一个受租约控制的命令执行器。"""
     from ..execution.models import CommandSpec
@@ -161,10 +161,11 @@ async def execute_publication(
 
     target = project / TARGET
     request = job["request_json"]
+    profiles = profiles or executor.settings.profiles_dir
     settings = executor.settings
     environment = build_engine_environment(
         project,
-        settings.profiles_dir,
+        profiles,
         cast(str, job["schema_name"]),
         cast(str, job["profile_binding_id"]),
     )
@@ -172,7 +173,7 @@ async def execute_publication(
         "--project-dir",
         str(project),
         "--profiles-dir",
-        str(settings.profiles_dir),
+        str(profiles),
         "--target",
         cast(str, job["profile_binding_id"]),
         "--target-path",
@@ -204,6 +205,11 @@ async def execute_publication(
     await command(PARSE, NO_PARTIAL_PARSE)
     await asyncio.to_thread(validate_bound_manifest, target, cast(str, job["schema_name"]))
 
+    if request.get("execution"):
+        from ..models.execution import ExecutionSnapshot
+        from .execution_profile import validate_execution_manifest
+        await asyncio.to_thread(validate_execution_manifest, target,
+                                ExecutionSnapshot.model_validate(request["execution"]))
     await command(COMPILE)
     compiled = json.loads((target / MANIFEST_FILE).read_text(encoding=UTF8))
     dialect = compiled["metadata"]["adapter_type"]
@@ -223,6 +229,12 @@ async def execute_publication(
         if not fresh_sources <= passed:
             raise ValueError("source freshness 证明不完整或未通过")
 
+    if request.get("execution"):
+        from ..models.execution import ExecutionSnapshot
+        from .execution_profile import validate_execution_manifest
+        await asyncio.to_thread(validate_execution_manifest, target,
+                                ExecutionSnapshot.model_validate(request["execution"]))
+
     # 每次执行全部模型和测试，并在封存前核对完整覆盖。
     await command(BUILD)
     result_path = target / RESULTS_FILE
@@ -230,7 +242,8 @@ async def execute_publication(
     if len(raw_results) > settings.max_artifact_file_bytes:
         raise ValueError("构建步骤证明超限")
     await command(DOCS, GENERATE)
-    probe = await executor._metricflow(job, project, {"mode": "PROBE"})
+    probe = (await executor._metricflow(job, project, {"mode": "PROBE"}, profiles=profiles)
+             if request.get("execution") else await executor._metricflow(job, project, {"mode": "PROBE"}))
     manifest = json.loads((target / MANIFEST_FILE).read_text(encoding=UTF8))
     physical_catalog = json.loads((target / CATALOG_FILE).read_text(encoding=UTF8))
     results = json.loads(raw_results)

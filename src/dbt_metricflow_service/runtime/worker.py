@@ -11,6 +11,7 @@ from sqlalchemy.exc import DBAPIError as DatabaseError
 from sqlalchemy.exc import TimeoutError as PoolTimeout
 
 from dbt_metricflow_service.models.payloads import JsonObject
+from dbt_metricflow_service.platform.execution_profile import ExecutionConfigurationError
 from dbt_metricflow_service.runtime.executor import ERROR_COMMAND_FAILED, ExecutionError, RuntimeExecutor
 from dbt_metricflow_service.storage.records import LeasedJob, StoredBuild
 
@@ -104,6 +105,10 @@ class Worker:
             await self._fail(job, code, detail={EXTERNAL_OUTCOME_UNKNOWN: external}, stopped=not external)
             if self._stopping:
                 raise
+        except ExecutionConfigurationError as error:
+            # 保留固定配置错误码，并依照已持久外部执行证据决定是否释放目标。
+            external = await asyncio.to_thread(self.runtime.jobs.external_started, job["attempt_id"])
+            await self._fail(job, error.code, detail={EXTERNAL_OUTCOME_UNKNOWN: external}, stopped=not external)
         except ExecutionError as error:
             code = INTERRUPTED if error.code == ERROR_COMMAND_FAILED and not error.stopped else error.code
             detail = {**error.payload, EXTERNAL_OUTCOME_UNKNOWN: not error.stopped}
@@ -116,6 +121,13 @@ class Worker:
                              stopped=not external)
             logger.warning(FAILURE_LOG, type(error).__name__)
         finally:
+            from ..storage.execution_targets import ExecutionTargetStore
+            if job.get("physical_target_key"):
+                try:
+                    await asyncio.to_thread(ExecutionTargetStore(self.runtime.db).release,
+                                            job["job_id"], job["lease_token"], True)
+                except (DatabaseError, PoolTimeout, RuntimeError):
+                    logger.warning(FAILURE_LOG, "target release deferred to persisted attempt evidence")
             heartbeat.cancel()
             await asyncio.gather(heartbeat, return_exceptions=True)
 
