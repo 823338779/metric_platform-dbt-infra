@@ -11,16 +11,9 @@ UTF8 = "utf-8"
 PATH_SEPARATOR = "__"
 DISPLAY_SEPARATOR = " → "
 GRAIN_TOKENS = "grainTokens"
-GRAIN_LABELS = {
-    "second": "秒",
-    "minute": "分钟",
-    "hour": "小时",
-    "day": "日",
-    "week": "周",
-    "month": "月",
-    "quarter": "季度",
-    "year": "年",
-}
+METRIC_TIME = "metric_time"
+TIME_TYPE = "time"
+DATETIME_TYPE = "datetime"
 
 
 @dataclass(frozen=True)
@@ -38,25 +31,34 @@ def map_available_dimensions(
     selected = sorted(set(metric_ids))
     output: list[DimensionOption] = []
     mapping: dict[str, DimensionBinding] = {}
+    # 指标时间的各粒度归入基础选项，不再作为独立维度暴露。
+    entries = [dict(entry) for entry in native["dimensions"]]
+    time_tokens = {entry["granularity"]: entry["token"] for entry in native["timeDimensions"]}
+    metric_time = next((entry for entry in entries if entry.get("name") == METRIC_TIME), None)
+    if metric_time is None and time_tokens:
+        metric_time = {
+            "token": next(iter(time_tokens.values())), "name": METRIC_TIME,
+            "type": TIME_TYPE, "valueType": DATETIME_TYPE, "operators": [],
+        }
+        entries.append(metric_time)
+    if metric_time is not None:
+        metric_time[GRAIN_TOKENS] = {**time_tokens, **metric_time.get(GRAIN_TOKENS, {})}
     # 原生路径只保存在服务映射内；每个 join 路径保持独立选项身份。
-    for entry in [*native["dimensions"], *native["timeDimensions"]]:
+    for entry in entries:
         token = entry["token"]
         canonical = json.dumps([str(build_id), selected, token], separators=(",", ":"))
         option_id = hashlib.sha256(canonical.encode(UTF8)).hexdigest()
         if option_id in mapping:
             continue
-        grain = entry.get("granularity")
-        grain_tokens = entry.get(GRAIN_TOKENS, {grain: token} if grain else {})
+        grain_tokens = entry.get(GRAIN_TOKENS, {})
         candidates = [
             item
             for item in indexed.values()
             if item["kind"] == ResourceKind.DIMENSION and item["name"] == entry.get("name")
         ]
-        resource_id = candidates[0]["resourceId"] if len(candidates) == 1 and not grain else None
+        resource_id = candidates[0]["resourceId"] if len(candidates) == 1 else None
         label = candidates[0]["displayName"] if resource_id else entry.get("name", token)
-        if grain:
-            label = "指标时间（" + GRAIN_LABELS.get(grain, grain) + "）"
-        elif PATH_SEPARATOR in token:
+        if PATH_SEPARATOR in token and entry.get("name") != METRIC_TIME:
             # 可见路径用于区分多种 join 选项；执行仍只接收不可伪造的选项映射。
             label += "（" + DISPLAY_SEPARATOR.join(token.split(PATH_SEPARATOR)[:-1]) + "）"
         output.append(
@@ -64,10 +66,10 @@ def map_available_dimensions(
                 "optionId": option_id,
                 "resourceId": resource_id,
                 "displayName": label,
-                "dimensionType": "time" if grain else entry.get("type", "unknown"),
-                "valueType": "datetime" if grain else entry.get("valueType", "unknown"),
+                "dimensionType": entry.get("type", "unknown"),
+                "valueType": entry.get("valueType", "unknown"),
                 "granularities": list(grain_tokens),
-                "operators": [] if grain else native["allowedFilters"],
+                "operators": entry.get("operators", native["allowedFilters"]),
             }
         )
         mapping[option_id] = DimensionBinding(token, grain_tokens)

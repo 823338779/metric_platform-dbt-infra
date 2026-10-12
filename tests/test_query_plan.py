@@ -77,7 +77,9 @@ def test_base_time_option_changes_grouping_and_order_with_selected_grain(grain):
         "allowedFilters": ["="],
     }
     available, mapping = map_available_dimensions(RUN, ["metric.revenue"], {"resources": []}, native)
+    assert len(available["dimensions"]) == 1
     option = available["dimensions"][0]
+    assert option["displayName"] == "metric_time"
     assert option["granularities"] == ["day", "month"]
     selection = {"optionId": option["optionId"], **({"grain": grain} if grain else {})}
     request = QueryRequest(
@@ -93,3 +95,24 @@ def test_base_time_option_changes_grouping_and_order_with_selected_grain(grain):
     with pytest.raises(ServiceError) as failure:
         compile_query(request, RUN, RESOURCES, available["dimensions"], mapping)
     assert failure.value.error.code == "INVALID_DIMENSION_OPTION"
+
+
+def test_metric_time_grains_form_one_option_even_without_a_native_base_dimension():
+    native = {
+        "dimensions": [
+            {"token": "order__region", "name": "region", "type": "categorical"},
+            {"token": "return__region", "name": "region", "type": "categorical"},
+        ],
+        "timeDimensions": [
+            {"token": "metric_time__day", "granularity": "day"},
+            {"token": "metric_time__month", "granularity": "month"},
+        ],
+        "allowedFilters": ["="],
+    }
+    available, mapping = map_available_dimensions(RUN, ["metric.revenue"], {"resources": []}, native)
+    assert len(available["dimensions"]) == 3
+    option = available["dimensions"][-1]
+    assert option["displayName"] == "metric_time"
+    assert option["granularities"] == ["day", "month"]
+    assert option["operators"] == []
+    assert mapping[option["optionId"]].grain_tokens["month"] == "metric_time__month"
