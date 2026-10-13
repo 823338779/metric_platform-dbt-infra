@@ -18,13 +18,9 @@ from dbt_metricflow_service.storage.rows import row_dict
 
 # 管理命令及输入格式常量集中定义，所有请求正文均经公开模型验证。
 INIT_DB = "init-db"
-UPGRADE_DB = "upgrade-db"
-REGISTER_BINDINGS = "register-bindings"
 RECONCILE = "reconcile-attempt"
 GC = "gc"
 BUILD = "build"
-BINDING_KEYS = frozenset({"repository", "executionBinding", "configVersion", "config"})
-IDENTITY_KEYS = ("repository", "executionBinding", "configVersion")
 SQL_ATTEMPT = "SELECT lease_token,state FROM runtime_attempt WHERE attempt_id=%s"
 SQL_GC = """SELECT set_id FROM runtime_artifact_set
  WHERE created_at < clock_timestamp() - %s * interval '1 hour' ORDER BY created_at LIMIT %s"""
@@ -54,30 +50,6 @@ def _json(path: Path, maximum: int) -> JsonObject | list:
     return value
 
 
-def register_bindings(db: Database, settings: Settings, path: Path) -> list[str]:
-    """登记仓库允许使用的不可变执行配置，无业务项目注册。"""
-    from dbt_metricflow_service.models.builds import ConfigSnapshot
-    from dbt_metricflow_service.storage.builds import BuildStore
-
-    records = _json(path, settings.max_artifact_file_bytes)
-    if not isinstance(records, list):
-        raise ValueError("bindings must be a list")
-    parsed = []
-    for record in records:
-        if not isinstance(record, dict) or set(record) != BINDING_KEYS:
-            raise ValueError("binding fields are invalid")
-        config = ConfigSnapshot.model_validate(record["config"])
-        if any(not isinstance(record[key], str) or not record[key] for key in IDENTITY_KEYS):
-            raise ValueError("binding identity is required")
-        parsed.append((record, config))
-    # 输入整体校验后再登记，每个版本不可被后续命令静默覆盖。
-    store = BuildStore(db)
-    for record, config in parsed:
-        store.register_binding(record["repository"], record["executionBinding"], record["configVersion"],
-                               config.model_dump(mode="json", by_alias=True, exclude_none=True))
-    return [record["executionBinding"] for record, _ in parsed]
-
-
 def reconcile_attempt(db: Database, attempt_id: str, *, confirm_external_stopped: bool) -> bool:
     """运维核实外部执行结束后释放保护；不提供自动判定或 HTTP 入口。"""
     if not confirm_external_stopped:
@@ -94,11 +66,8 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="PostgreSQL 数据库初始化与运行时管理")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser(INIT_DB)
-    commands.add_parser(UPGRADE_DB)
     build = commands.add_parser(BUILD)
     build.add_argument("--file", type=Path, required=True)
-    bindings = commands.add_parser(REGISTER_BINDINGS)
-    bindings.add_argument("path", type=Path)
     reconcile = commands.add_parser(RECONCILE)
     reconcile.add_argument("attempt_id")
     reconcile.add_argument("--confirm-external-stopped", action="store_true", required=True)
@@ -115,24 +84,19 @@ def main(argv: list[str] | None = None) -> None:
         if args.command == INIT_DB:
             db.initialize()
             result = {"initialized": True}
-        elif args.command == UPGRADE_DB:
-            from dbt_metricflow_service.storage.schema import upgrade
-            with db.transaction() as connection:
-                upgrade(connection)
-            result = {"upgraded": True}
         else:
             db.check()
             if args.command == BUILD:
                 from dbt_metricflow_service.application.builds import BuildService
-                from dbt_metricflow_service.models.builds import BuildRequest
+                from dbt_metricflow_service.models.execution import SnapshotBuildRequest
+                from dbt_metricflow_service.platform.execution_profile import validate_execution_target
                 from dbt_metricflow_service.storage.builds import BuildStore
 
                 service = BuildService(BuildStore(db), settings.toolchain_version or current_toolchain(),
-                                       settings.command_timeout_seconds)
-                request = BuildRequest.model_validate(_json(args.file, settings.max_artifact_file_bytes))
-                result = service.submit(request, "admin").model_dump(mode="json", by_alias=True)
-            elif args.command == REGISTER_BINDINGS:
-                result = register_bindings(db, settings, args.path)
+                                       settings.command_timeout_seconds, settings.config_version)
+                request = SnapshotBuildRequest.model_validate(_json(args.file, settings.max_artifact_file_bytes))
+                validate_execution_target(request.execution, settings)
+                result = service.submit_snapshot(request, "admin").model_dump(mode="json", by_alias=True)
             elif args.command == RECONCILE:
                 result = {"confirmed": reconcile_attempt(db, args.attempt_id,
                                                         confirm_external_stopped=args.confirm_external_stopped)}

@@ -6,13 +6,13 @@ from sqlalchemy import select
 
 from dbt_metricflow_service.storage.deployments import DeploymentStore
 from dbt_metricflow_service.storage.entities import DeploymentAttempt
+from tests.test_build_acceptance import CALLER, request, service
 from tests.test_publication_storage import store as store
-from tests.test_v3_build_acceptance import CALLER, request, service
 
 
 def test_pending_skips_locked_attempts_and_persists_scan_time(store):
     app = service(store)
-    build = app.submit(request(branchName="orm/" + uuid4().hex, deploymentPolicy="ON_SUCCESS"), CALLER)
+    build = app.submit_snapshot(request(branchName="orm/" + uuid4().hex, deploymentPolicy="ON_SUCCESS"), CALLER)
     deployments = DeploymentStore(store.db)
     # 占住其他候选的行锁，使认领结果不依赖测试库已有记录的数量和先后顺序。
     with store.db.session() as session:

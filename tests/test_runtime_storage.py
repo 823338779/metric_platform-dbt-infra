@@ -152,12 +152,16 @@ def test_finish_rolls_back_artifacts_and_job_on_failure(store, tmp_path, failure
     row = reserve(store, name)
     from dbt_metricflow_service.storage.entities import ArtifactSet, Build
     build_id = str(uuid4())
+    from dbt_metricflow_service.models.execution import physical_target_key
+    from tests.test_execution_snapshot_storage import snapshot
+    execution = snapshot()
     with store.db.fact_session() as session:
         session.add(Build(
             build_id=build_id, run_id=row["job_id"], repository="https://example.test/project.git",
-            environment="PREVIEW", execution_binding="test", config_version="1",
+            environment=str(execution.environment_id), environment_id=str(execution.environment_id),
+            physical_target_key=physical_target_key(execution), config_version="1",
             toolchain_version=VERSION, caller="test", idempotency_key=str(uuid4()),
-            request_digest="test", request_json={}, config_snapshot={},
+            request_digest="test", request_json={}, config_snapshot=execution.model_dump(mode="json", by_alias=True),
         ))
     attempt = claim(store)
     (tmp_path / "dbt_project.yml").write_text("name: lease_test\n", encoding="utf-8")

@@ -24,7 +24,7 @@ from ..platform.source import is_ancestor, remote_head
 from ..runtime.service import Runtime
 from ..storage.builds import BuildStore
 from ..storage.deployments import DeploymentStore
-from . import builds, builds_v4, catalog, deployments, deployments_v4, queries
+from . import builds, catalog, deployments, queries
 from .auth import mutation_guard
 from .errors import register_exception_handlers
 from .limits import RequestBodyLimitMiddleware
@@ -60,9 +60,8 @@ def create_app(settings: Settings) -> FastAPI:
     app.add_middleware(RequestBodyLimitMiddleware)
     register_exception_handlers(app)
     guard = mutation_guard(settings)
-    for routes in (builds.router(build_service, guard), deployments.router(deployment_service, guard),
-                   catalog.router(catalog_service), queries.router(query_service, guard),
-                   builds_v4.router(build_service, guard, settings), deployments_v4.router(deployment_service, guard)):
+    for routes in (builds.router(build_service, guard, settings), deployments.router(deployment_service, guard),
+                   catalog.router(catalog_service), queries.router(query_service, guard)):
         app.include_router(routes)
 
     # 显式保留开放响应契约，避免返回类型注解额外启用响应模型校验。
@@ -74,12 +73,12 @@ def create_app(settings: Settings) -> FastAPI:
     async def ready() -> dict[str, str]:
         await asyncio.to_thread(runtime.db.check)
         if (not all(shutil.which(command) for command in COMMANDS)
-                or not settings.execution_instances and not (settings.profiles_dir / "profiles.yml").is_file()
+                or not settings.execution_instances
                 or not os.access(settings.temp_root, os.W_OK)):
             raise ServiceError("EXECUTION_ENVIRONMENT_UNAVAILABLE", "engine prerequisites are unavailable", 503)
         return {"status": "ready"}
 
-    @app.get("/v1/versions", response_model=None)
+    @app.get("/versions", response_model=None)
     async def versions() -> dict[str, str]:
         return {"service": __version__, **{package: version(package) for package in VERSION_DISTRIBUTIONS}}
 

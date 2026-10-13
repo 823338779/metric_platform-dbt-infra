@@ -14,7 +14,7 @@ from ..models.queries import AvailableDimensionsRequest, AvailableDimensionsView
 
 def router(service: QueryService, guard: Callable[..., Awaitable[str]]) -> APIRouter:
     dependency = Depends(guard)
-    routes = APIRouter(prefix="/v3/query")
+    routes = APIRouter(prefix="/query")
 
     @routes.post("/available-dimensions", response_model=AvailableDimensionsView)
     def available_dimensions(

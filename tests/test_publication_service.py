@@ -10,26 +10,24 @@ from dbt_metricflow_service.runtime.executor import RuntimeExecutor
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.builds import BuildStore
-from dbt_metricflow_service.storage.jobs import JobStore, StoreConflict
+from dbt_metricflow_service.storage.jobs import JobStore
+from tests.test_build_acceptance import request
 from tests.test_platform_bindings import digest, git
 from tests.test_platform_bindings import repository as repository
 from tests.test_publication_storage import store as store
-from tests.test_v3_build_acceptance import request
 
 
 def setup(store, repository):
     builds = BuildStore(store.db)
-    builds.register_binding(str(repository), "warehouse", "1",
-        {"environments": ["PREVIEW"], "profileBindingId": "postgres"})
     app = BuildService(builds, uuid4().hex, 60)
-    body = request(repository=str(repository), commitSha=git(repository, "rev-parse", "HEAD"))
+    body = request(commitSha=git(repository, "rev-parse", "HEAD")).model_copy(update={"repository": str(repository)})
     return app, body
 
 
 async def test_submit_fixes_input_and_reserves_run_atomically(store, repository, tmp_path):
     app, body = setup(store, repository)
-    first = app.submit(body, "test")
-    assert app.submit(body, "test").build_id == first.build_id
+    first = app.submit_snapshot(body, "test")
+    assert app.submit_snapshot(body, "test").build_id == first.build_id
     jobs = JobStore(store.db)
     job = jobs.claim(uuid4().hex, toolchain_version=app.toolchain)
     assert job["status"] == "RUNNING" and job["input_set_id"] is None
@@ -42,25 +40,27 @@ async def test_submit_fixes_input_and_reserves_run_atomically(store, repository,
     (repository / "models/a.sql").write_text("select 2 as value\n", encoding="utf-8")
     git(repository, "commit", "-am", "moved remote")
     with pytest.raises(ServiceError):
-        app.submit(body.model_copy(update={"commit_sha": git(repository, "rev-parse", "HEAD")}), "test")
-    assert app.submit(body, "test").build_id == first.build_id
+        app.submit_snapshot(body.model_copy(update={"commit_sha": git(repository, "rev-parse", "HEAD")}), "test")
+    assert app.submit_snapshot(body, "test").build_id == first.build_id
     assert jobs.get(job["job_id"])["input_set_id"] == fixed["input_set_id"]
 
 
 def test_concurrent_fixed_commit_requests_create_one_run(store, repository, tmp_path):
     app, body = setup(store, repository)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(pool.map(lambda _: app.submit(body, "test"), range(2)))
+        results = list(pool.map(lambda _: app.submit_snapshot(body, "test"), range(2)))
     assert len({row.build_id for row in results}) == 1
-    assert len(app.list(str(repository)).items) == 1
+    assert len(app.list_by_environment(body.execution.environment_id, str(repository), None, None, None, 50).items) == 1
 
 
 def test_binding_change_during_snapshot_rejects_candidate(store, repository, tmp_path):
     app, body = setup(store, repository)
-    first = app.submit(body, "test")
+    first = app.submit_snapshot(body, "test")
     # 新协议从配置版本入口拒绝修改，无需等到慢 Git 读取结束才发现漂移。
-    with pytest.raises(StoreConflict):
-        app.store.register_binding(str(repository), "warehouse", "1",
-            {"environments": ["PREVIEW"], "profileBindingId": "other"})
-    assert app.submit(body, "test").build_id == first.build_id
-    assert app.store.get(first.build_id)["config_snapshot"]["profileBindingId"] == "postgres"
+    changed = body.model_copy(update={"idempotency_key": uuid4().hex,
+        "execution": body.execution.model_copy(update={"threads": 3})})
+    with pytest.raises(ServiceError) as conflict:
+        app.submit_snapshot(changed, "test")
+    assert conflict.value.error.code == "EXECUTION_SNAPSHOT_CONFLICT"
+    assert app.submit_snapshot(body, "test").build_id == first.build_id
+    assert app.store.get(first.build_id)["config_snapshot"] == body.execution.model_dump(mode="json", by_alias=True)

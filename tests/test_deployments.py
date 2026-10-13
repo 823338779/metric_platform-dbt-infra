@@ -4,8 +4,8 @@ from uuid import uuid4
 
 from dbt_metricflow_service.application.catalog import CatalogService
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
+from tests.test_build_acceptance import CALLER, request, service
 from tests.test_publication_storage import store as store
-from tests.test_v3_build_acceptance import CALLER, request, service
 
 
 def deployment_service(store, head):
@@ -24,12 +24,12 @@ def deployment_service(store, head):
 def test_newer_failed_intent_still_fences_older(store):
     app = service(store)
     branch = "feature/" + uuid4().hex
-    first = app.submit(request(branchName=branch, deploymentPolicy="ON_SUCCESS"), CALLER)
-    second = app.submit(request(branchName=branch, deploymentPolicy="ON_SUCCESS"), CALLER)
+    first = app.submit_snapshot(request(branchName=branch, deploymentPolicy="ON_SUCCESS"), CALLER)
+    second = app.submit_snapshot(request(branchName=branch, deploymentPolicy="ON_SUCCESS"), CALLER)
     deploy = deployment_service(store, "a" * 40)
     from dbt_metricflow_service.models.deployments import DeploymentKey
 
-    key = DeploymentKey(repository=first.repository, environment=first.environment, branchName=branch)
+    key = DeploymentKey(repository=first.repository, environment=str(first.execution.environment_id), branchName=branch)
     with store.db.transaction() as connection:
         connection.exec_driver_sql(
             "UPDATE runtime_job SET status='FAILED',error_code='TEST_FAILURE' WHERE job_id=%s",
@@ -46,8 +46,10 @@ def test_missing_ref_disables_but_network_error_does_not(store):
     from dbt_metricflow_service.storage.deployments import DeploymentStore
 
     app = service(store)
-    build = app.submit(request(branchName="feature/" + uuid4().hex, deploymentPolicy="ON_SUCCESS"), CALLER)
-    key = DeploymentKey(repository=build.repository, environment=build.environment, branchName=build.branch_name)
+    build = app.submit_snapshot(request(branchName="feature/" + uuid4().hex, deploymentPolicy="ON_SUCCESS"), CALLER)
+    key = DeploymentKey(
+        repository=build.repository, environment=str(build.execution.environment_id), branchName=build.branch_name
+    )
     with store.db.transaction() as connection:
         connection.exec_driver_sql(
             "UPDATE engine_deployment_target SET active_build_id=%s WHERE repository=%s AND branch_name=%s",
@@ -71,14 +73,16 @@ def test_independent_deploy_retry_and_recreated_branch_require_new_intent(store,
     from dbt_metricflow_service.application.deployments import DeploymentService
     from dbt_metricflow_service.models.deployments import DeploymentKey, DeploymentRequest
     from dbt_metricflow_service.storage.deployments import DeploymentStore
-    from tests.test_v3_catalog_queries import ready_build
+    from tests.test_catalog_queries import ready_build
 
     app, build, jobs, artifacts = ready_build(store, tmp_path)
     observed = [build.commit_sha]
     deploy = DeploymentService(
         DeploymentStore(store.db), lambda *_: observed[0], builds=app, catalogs=CatalogService(app.store, artifacts)
     )
-    key = DeploymentKey(repository=build.repository, environment=build.environment, branchName=build.branch_name)
+    key = DeploymentKey(
+        repository=build.repository, environment=str(build.execution.environment_id), branchName=build.branch_name
+    )
     body = DeploymentRequest(
         buildId=build.build_id, branchName=build.branch_name, expectedTargetVersion=0, idempotencyKey=uuid4().hex
     )
@@ -107,7 +111,7 @@ def test_deploy_cannot_bypass_missing_execution_environment(store, tmp_path):
     from dbt_metricflow_service.application.deployments import DeploymentService
     from dbt_metricflow_service.models.deployments import DeploymentKey, DeploymentRequest
     from dbt_metricflow_service.storage.deployments import DeploymentStore
-    from tests.test_v3_catalog_queries import ready_build
+    from tests.test_catalog_queries import ready_build
 
     app, build, jobs, artifacts = ready_build(store, tmp_path)
     app.toolchain = "unavailable"
@@ -123,6 +127,8 @@ def test_deploy_cannot_bypass_missing_execution_environment(store, tmp_path):
         ),
         CALLER,
     )
-    key = DeploymentKey(repository=build.repository, environment=build.environment, branchName=build.branch_name)
+    key = DeploymentKey(
+        repository=build.repository, environment=str(build.execution.environment_id), branchName=build.branch_name
+    )
     assert deploy.reconcile(key, attempt.generation).reason == "EXECUTION_ENVIRONMENT_UNAVAILABLE"
     assert deploy.current(key).active_build_id is None

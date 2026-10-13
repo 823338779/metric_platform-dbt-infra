@@ -9,7 +9,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 logger = logging.getLogger(__name__)
 DEFAULT_MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024
 ENGINE_WRITE_PATH = re.compile(
-    r"^/v3/(builds|deployments|builds/[^/]+/cancel|query(?:/available-dimensions)?)$"
+    r"^/(builds|deployments|builds/[^/]+/cancel|query(?:/available-dimensions)?)$"
 )
 
 

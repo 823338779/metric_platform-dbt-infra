@@ -6,19 +6,19 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from dbt_metricflow_service.models.builds import BuildRequest
+from dbt_metricflow_service.models.execution import SnapshotBuildRequest as BuildRequest
 from dbt_metricflow_service.platform.build import prepare_publication_project
 from dbt_metricflow_service.runtime.executor import RuntimeExecutor
 
 
-@pytest.mark.parametrize("extra", [{}, {"schemaName": None}, {"schemaName": ""}])
+@pytest.mark.parametrize("extra", [{}, {"schema": None}, {"schema": ""}])
 def test_request_requires_fixed_schema(extra):
-    from tests.test_v3_contract import build_body
+    from tests.test_build_contract import build_body
 
     body = build_body()
-    body.pop("schemaName", None)
+    body["execution"].pop("schema", None)
     with pytest.raises(ValidationError):
-        BuildRequest.model_validate({**body, **extra})
+        BuildRequest.model_validate({**body, "execution": {**body["execution"], **extra}})
 
 
 def test_project_does_not_inject_run_alias(tmp_path):
@@ -53,6 +53,8 @@ def test_programmatic_cleanup_never_initializes_warehouse(tmp_path, monkeypatch)
 
 
 def test_caller_supplies_fixed_schema():
-    from tests.test_v3_contract import build_body
+    from tests.test_build_contract import build_body
 
-    assert BuildRequest.model_validate(build_body(schemaName="external_analytics")).schema_name == "external_analytics"
+    body = build_body()
+    body["execution"]["schema"] = "external_analytics"
+    assert BuildRequest.model_validate(body).execution.schema_name == "external_analytics"

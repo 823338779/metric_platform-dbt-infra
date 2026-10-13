@@ -16,8 +16,9 @@ from dbt_metricflow_service.application.catalog import CatalogService
 from dbt_metricflow_service.application.deployments import DeploymentService
 from dbt_metricflow_service.application.errors import ServiceError
 from dbt_metricflow_service.application.queries import QueryService
-from dbt_metricflow_service.models.builds import BuildRequest
 from dbt_metricflow_service.models.deployments import DeploymentKey
+from dbt_metricflow_service.models.execution import ExecutionSnapshot
+from dbt_metricflow_service.models.execution import SnapshotBuildRequest as BuildRequest
 from dbt_metricflow_service.models.queries import AvailableDimensionsRequest, QueryRequest
 from dbt_metricflow_service.platform.source import is_ancestor, remote_head
 from dbt_metricflow_service.runtime.executor import ExecutionError, RuntimeExecutor
@@ -26,12 +27,13 @@ from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.builds import BuildStore
 from dbt_metricflow_service.storage.deployments import DeploymentStore
 from dbt_metricflow_service.storage.entities import ArtifactFile
-from tests.integration.helpers import FIXTURE, PROFILES, git
+from tests.integration.helpers import FIXTURE, git
 
 
 async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
     if os.getenv("PLATFORM_TEST_POSTGRES") != "1" or not os.getenv("SERVICE_TEST_DATABASE_URL"):
         pytest.skip("需要独立 PostgreSQL 与真实工具链环境")
+
     # 真实构建、验证和查询必须调用 SDK，禁止重新引入引擎 CLI 子进程。
     async def forbidden_child(*args, **kwargs):
         raise AssertionError("engine execution must stay in process")
@@ -51,7 +53,22 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
     git(repo, "commit", "-m", "fixture")
     profiles = tmp_path / "profiles"
     profiles.mkdir()
-    (profiles / "profiles.yml").write_text(PROFILES)
+    host, port = os.environ["PLATFORM_TEST_PGHOST"], int(os.environ["PLATFORM_TEST_PGPORT"])
+    monkeypatch.setenv("DBT_ENV_SECRET_FIXTURE_USER", os.environ["PLATFORM_TEST_PGUSER"])
+    monkeypatch.setenv("DBT_ENV_SECRET_FIXTURE_PASSWORD", os.environ["PLATFORM_TEST_PGPASSWORD"])
+    schema = "fixed_test_" + uuid4().hex
+    snapshot = ExecutionSnapshot.model_validate(
+        {
+            "environmentId": str(uuid4()),
+            "configVersion": 1,
+            "connection": {"type": "postgres", "instanceId": "fixture", "host": host, "port": port},
+            "credentialRef": "fixture",
+            "catalog": os.environ["PLATFORM_TEST_PGDATABASE"],
+            "schema": schema,
+            "threads": 2,
+            "businessTimezone": "UTC",
+        }
+    )
     settings = Settings(
         profiles,
         180,
@@ -59,11 +76,14 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
         database_url=os.environ["SERVICE_TEST_DATABASE_URL"],
         temp_root=tmp_path / "runtime",
         toolchain_version=uuid4().hex,
+        execution_instances={"fixture": {"type": "postgres", "hosts": [host], "port": port}},
+        execution_credentials={
+            "fixture": {"userEnv": "DBT_ENV_SECRET_FIXTURE_USER", "passwordEnv": "DBT_ENV_SECRET_FIXTURE_PASSWORD"}
+        },
     )
     runtime = Runtime(settings)
     runtime.db.initialize()
     store = BuildStore(runtime.db)
-    store.register_binding(str(repo), "engine", "1", {"profileBindingId": "postgres", "environments": ["PRODUCTION"]})
     builds = BuildService(store, runtime.toolchain, 180)
     catalogs = CatalogService(store, runtime.artifacts)
     queries = QueryService(builds, catalogs, runtime.execute_query)
@@ -74,63 +94,69 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
         builds=builds,
         catalogs=catalogs,
     )
-    schema = "fixed_test_" + uuid4().hex
-    target = DeploymentKey(repository=str(repo), branchName="main", environment="PRODUCTION")
+    target = DeploymentKey(repository=str(repo), branchName="main", environment=str(snapshot.environment_id))
 
     async def execute(kind):
         job = runtime.jobs.claim(str(uuid4()), toolchain_version=runtime.toolchain, kinds=[kind])
         assert job
         result = await RuntimeExecutor(settings, runtime.jobs, runtime.artifacts).execute(job)
-        assert runtime.jobs.finish(
-            job["job_id"], job["lease_token"], output_set_id=result.output_set_id
-        )
+        assert runtime.jobs.finish(job["job_id"], job["lease_token"], output_set_id=result.output_set_id)
         return result
 
     async def build():
-        view = builds.submit(
+        view = builds.submit_snapshot(
             BuildRequest(
-                repository=str(repo),
+                repository="https://fixture.invalid/metrics.git",
                 branchName="main",
                 commitSha=git(repo, "rev-parse", "HEAD"),
-                environment="PRODUCTION",
-                executionBinding="engine",
-                configVersion="1",
-                schemaName=schema,
+                execution=snapshot,
                 deploymentPolicy="ON_SUCCESS",
                 idempotencyKey=uuid4().hex,
-            ),
+            ).model_copy(update={"repository": str(repo)}),
             "integration",
         )
         await execute("BUILD_RUN")
-        assert builds.get(view.build_id).build_status == "SUCCEEDED"
+        assert builds.snapshot_view(view.build_id).build_status == "SUCCEEDED"
         assert deployments.reconcile(target, view.initial_deployment["generation"]).deployment_status == "DEPLOYED"
         return view
 
     async def query(build_id, **fields):
-        result = await asyncio.to_thread(
-            queries.submit, build_id, QueryRequest(**fields), "integration"
-        )
+        result = await asyncio.to_thread(queries.submit, build_id, QueryRequest(**fields), "integration")
         assert result.build_id == build_id
         return result
 
     try:
         first = await build()
         with runtime.db.session() as session:
-            paths = set(session.scalars(select(ArtifactFile.relative_path).where(
-                ArtifactFile.set_id == store.get(first.build_id)["output_set_id"],
-            )))
-        assert {"target/manifest.json", "target/semantic_manifest.json", "target/catalog.json",
-                "target/published_catalog.json"}.issubset(paths)
+            paths = set(
+                session.scalars(
+                    select(ArtifactFile.relative_path).where(
+                        ArtifactFile.set_id == store.get(first.build_id)["output_set_id"],
+                    )
+                )
+            )
+        assert {
+            "target/manifest.json",
+            "target/semantic_manifest.json",
+            "target/catalog.json",
+            "target/published_catalog.json",
+        }.issubset(paths)
         assert not any(path.startswith(("target/compiled/", "target/run/")) for path in paths)
-        assert not {"target/run_results.json", "target/sources.json", "target/publication_evidence.json",
-                    "target/publication_state.json"}.intersection(paths)
+        assert not {
+            "target/run_results.json",
+            "target/sources.json",
+            "target/publication_evidence.json",
+            "target/publication_state.json",
+        }.intersection(paths)
         assert yaml.safe_load(project_file.read_text(encoding="utf-8"))["target-path"] == "custom-target"
         resources = catalogs.list(first.build_id).model_dump(mode="json", by_alias=True)["items"]
         metric = next(item["resourceId"] for item in resources if item["kind"] == "METRIC")
         dataset = next(item["resourceId"] for item in resources if "PREVIEW" in item["capabilities"])
         result = await asyncio.to_thread(
-            queries.available_dimensions, first.build_id,
-            AvailableDimensionsRequest(metricResourceIds=[metric]), "integration"
+            queries.available_dimensions,
+            first.build_id,
+            AvailableDimensionsRequest(metricResourceIds=[metric]),
+            "integration",
         )
         dimensions = result.dimensions
         dimension = next(item["optionId"] for item in dimensions if item["dimensionType"] != "time")
@@ -156,7 +182,8 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
         }
         assert all(item["mode"] == "BUILT" for item in after["relationBindings"])
         completed = await asyncio.to_thread(
-            queries.submit, first.build_id,
+            queries.submit,
+            first.build_id,
             QueryRequest(mode="QUERY", metricResourceIds=[metric]),
             "integration",
         )
@@ -179,18 +206,15 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
         unsafe.write_text("{{ run_query('drop table protected') }}")
         git(repo, "add", ".")
         git(repo, "commit", "-m", "unsafe-candidate")
-        rejected = builds.submit(
+        rejected = builds.submit_snapshot(
             BuildRequest(
-                repository=str(repo),
+                repository="https://fixture.invalid/metrics.git",
                 branchName="main",
                 commitSha=git(repo, "rev-parse", "HEAD"),
-                environment="PRODUCTION",
-                executionBinding="engine",
-                configVersion="1",
-                schemaName=schema,
+                execution=snapshot,
                 deploymentPolicy="ON_SUCCESS",
                 idempotencyKey=uuid4().hex,
-            ),
+            ).model_copy(update={"repository": str(repo)}),
             "integration",
         )
         job = runtime.jobs.claim(str(uuid4()), toolchain_version=runtime.toolchain, kinds=["BUILD_RUN"])
@@ -208,9 +232,13 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
         runtime.jobs.reserve_cleanup(first_run)
         await execute("RUN_CLEANUP")
         with runtime.db.transaction() as connection:
-            assert connection.exec_driver_sql(
-                "SELECT 1 FROM pg_namespace WHERE nspname=%s", (first_schema,),
-            ).first() is not None
+            assert (
+                connection.exec_driver_sql(
+                    "SELECT 1 FROM pg_namespace WHERE nspname=%s",
+                    (first_schema,),
+                ).first()
+                is not None
+            )
         assert catalogs.list(first.build_id).items
         assert catalogs.resource(first.build_id, dataset, "source")["content"]
         with pytest.raises(ServiceError):

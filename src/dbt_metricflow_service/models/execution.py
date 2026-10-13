@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, field_validator
 
-from .builds import SHA_PATTERN, BuildView, Contract, DeploymentPolicy, Environment, Origin, validate_branch
+from .builds import SHA_PATTERN, BuildView, Contract, DeploymentPolicy, Origin, validate_branch
 
 IDENTIFIER_PATTERN = r"^[a-z][a-z0-9_]{0,62}$"
 SNAPSHOT_TARGET = "execution"
@@ -72,10 +72,7 @@ class SnapshotBuildRequest(Contract):
 
 
 class SnapshotBuildView(BuildView):
-    environment: Environment | None = Field(default=None, exclude=True, description="仅内部兼容旧枚举")
-    execution_binding: str | None = Field(default=None, exclude=True, description="旧执行绑定，不用于新构建")
-    execution: ExecutionSnapshot | None = Field(default=None, description="新构建的不可变执行快照")
-    legacy_environment: Environment | None = Field(default=None, description="旧构建原始环境分类")
+    execution: ExecutionSnapshot = Field(description="受理时固定的完整执行快照")
 
 
 def physical_target_key(snapshot: ExecutionSnapshot) -> str:

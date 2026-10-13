@@ -7,9 +7,10 @@ from fastapi.testclient import TestClient
 from dbt_metricflow_service import __version__
 from dbt_metricflow_service.api.app import VERSION_DISTRIBUTIONS, create_app
 from dbt_metricflow_service.settings import Settings
+from tests.test_execution_profiles import settings as infrastructure
 
 # 基础接口保留原有开放响应契约，避免函数注解触发 FastAPI 响应推断。
-INFRASTRUCTURE_ROUTES = ("/health/live", "/health/ready", "/v1/versions")
+INFRASTRUCTURE_ROUTES = ("/health/live", "/health/ready", "/versions")
 OPENAPI_RESPONSE_SCHEMA_PATH = ("get", "responses", "200", "content", "application/json", "schema")
 OPENAPI_PATHS_KEY = "paths"
 
@@ -19,7 +20,9 @@ def application(monkeypatch, tmp_path):
     import dbt_metricflow_service.api.app as module
 
     (tmp_path / "profiles.yml").write_text("fixture: {}")
-    settings = Settings(tmp_path, 30, 1024, database_url="postgresql://unused/test", temp_root=tmp_path)
+    settings = Settings(
+        tmp_path, 30, 1024, database_url="postgresql://unused/test", temp_root=tmp_path, **vars(infrastructure())
+    )
     runtime = SimpleNamespace(
         settings=settings,
         db=SimpleNamespace(check=lambda: None),
@@ -51,7 +54,7 @@ def test_live_does_not_depend_on_cli(application, monkeypatch):
         assert client.get("/health/ready").status_code == 503
 
 
-def test_ready_accepts_installed_clis_and_readable_profiles(application, monkeypatch):
+def test_ready_accepts_installed_clis_and_execution_instances(application, monkeypatch):
     app, _ = application
     monkeypatch.setattr("dbt_metricflow_service.api.app.shutil.which", lambda name: name)
     with TestClient(app) as client:
@@ -62,7 +65,7 @@ def test_versions_and_runtime_lifecycle(application):
     app, runtime = application
     with TestClient(app) as client:
         assert runtime.started
-        assert client.get("/v1/versions").json() == {
+        assert client.get("/versions").json() == {
             "service": __version__,
             **{name: version(name) for name in VERSION_DISTRIBUTIONS},
         }

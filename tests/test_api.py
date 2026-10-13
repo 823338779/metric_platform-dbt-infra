@@ -8,9 +8,8 @@ from fastapi.testclient import TestClient
 
 from dbt_metricflow_service.api.app import create_app
 from dbt_metricflow_service.settings import Settings
+from tests.test_build_contract import build_body
 from tests.test_publication_storage import store as store
-from tests.test_v3_build_acceptance import service
-from tests.test_v3_contract import build_body
 
 TOKEN = "fixture-token"
 AUTH = {"Authorization": "Bearer " + TOKEN}
@@ -18,7 +17,8 @@ AUTH = {"Authorization": "Bearer " + TOKEN}
 
 @pytest.fixture
 def client(store, tmp_path):
-    service(store)
+    from tests.test_execution_profiles import settings as infrastructure
+    config = infrastructure()
     app = create_app(
         Settings(
             profiles_dir=tmp_path,
@@ -28,6 +28,7 @@ def client(store, tmp_path):
             service_token=TOKEN,
             temp_root=tmp_path,
             toolchain_version="api-fixture",
+            execution_instances=config.execution_instances, execution_credentials=config.execution_credentials,
         )
     )
     yield TestClient(app)
@@ -35,16 +36,16 @@ def client(store, tmp_path):
 
 
 def test_v3_build_api_and_error_contract(client):
-    response = client.post("/v3/builds", json=build_body(idempotencyKey=uuid4().hex), headers=AUTH)
+    response = client.post("/builds", json=build_body(idempotencyKey=uuid4().hex), headers=AUTH)
     assert response.status_code == 202
     body = response.json()
     assert body["buildStatus"] == "QUEUED"
     assert not {"projectId", "releaseId", "runId", "jobId"}.intersection(body)
-    assert client.get("/v3/builds/" + body["buildId"]).status_code == 200
-    invalid = client.post("/v3/builds", json=build_body(projectId="legacy"), headers=AUTH)
+    assert client.get("/builds/" + body["buildId"]).status_code == 200
+    invalid = client.post("/builds", json=build_body(projectId="legacy"), headers=AUTH)
     assert invalid.status_code == 422
     assert set(invalid.json()["error"]) == {"code", "message", "retryable", "phase", "buildId"}
-    assert client.post("/v3/builds", json=build_body()).status_code == 401
+    assert client.post("/builds", json=build_body()).status_code == 401
 
 
 @pytest.mark.parametrize(
@@ -56,7 +57,7 @@ def test_v3_build_api_and_error_contract(client):
         "/v1/project-runs",
         "/v1/query-jobs",
         "/internal/git-branch-events",
-        "/v3/changes",
+        "/changes",
     ],
 )
 def test_removed_business_routes_are_404(client, path):
@@ -64,15 +65,15 @@ def test_removed_business_routes_are_404(client, path):
     assert client.post(path, json={}, headers=AUTH).status_code == 404
 
 
-def test_openapi_declares_versioned_business_contract(client):
+def test_openapi_declares_unversioned_business_contract(client):
     paths = client.get("/openapi.json").json()["paths"]
-    assert all(path.startswith(("/v3/", "/v4/"))
-               or path in {"/health/live", "/health/ready", "/v1/versions"} for path in paths)
-    assert "/v3/query" in paths
-    assert {path for path in paths if path.startswith("/v4/")} == {
-        "/v4/builds", "/v4/builds/{build_id}", "/v4/builds/{build_id}/logs",
-        "/v4/builds/{build_id}/cancel", "/v4/deployments", "/v4/deployments/current",
-    }
+    assert all(path.startswith(("/", "/"))
+               or path in {"/health/live", "/health/ready", "/versions"} for path in paths)
+    assert "/query" in paths
+    assert not any(path.startswith("/v3/") for path in paths)
+    assert "/deployments/current" in paths
+    assert "/builds/{build_id}/catalog" in paths
+
 
 
 def test_exchange_fixture_matches_actual_openapi(client):
@@ -82,6 +83,6 @@ def test_exchange_fixture_matches_actual_openapi(client):
     from jsonschema import validate
 
     document = client.get("/openapi.json").json()
-    fixture = json.loads((Path(__file__).parent / "fixtures/v3/contract.json").read_text(encoding="utf-8"))
+    fixture = json.loads((Path(__file__).parent / "fixtures/contract.json").read_text(encoding="utf-8"))
     for item in fixture["examples"]:
         validate(item["value"], {"$ref": "#/components/schemas/" + item["model"], "components": document["components"]})

@@ -285,8 +285,6 @@ class DeploymentStore:
             DeploymentAttempt.generation,
         )
         statement = select(DeploymentAttempt).where(DeploymentAttempt.repository == repository)
-        if environment is None:
-            statement = statement.where(DeploymentAttempt.environment.in_(("PREVIEW", "PRODUCTION")))
         if environment is not None:
             statement = statement.where(DeploymentAttempt.environment == environment)
         if branch_name is not None:
@@ -320,6 +318,6 @@ def natural(key: DeploymentKey) -> tuple[str, str, str]:
 
 def attempt_view(row: StoredDeploymentAttempt) -> DeploymentAttemptView:
     # 显式白名单防止内部幂等来源和请求摘要泄漏到 API。
-    from ..models.deployments import DeploymentAttemptView, SnapshotDeploymentAttemptView
-    model = DeploymentAttemptView if row["environment"] in ("PREVIEW", "PRODUCTION") else SnapshotDeploymentAttemptView
+    from ..models.deployments import DeploymentAttemptView
+    model = DeploymentAttemptView
     return model(**{key: row[key] for key in model.model_fields})

@@ -31,7 +31,7 @@ async def test_database_errors_return_503(runtime_pair, monkeypatch, error):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
                                     base_url="http://test") as client:
             response = await client.post(
-                "/v3/query", params={"build_id": str(uuid4())}, headers={"Authorization": "Bearer test"},
+                "/query", params={"build_id": str(uuid4())}, headers={"Authorization": "Bearer test"},
                 json={"mode": "QUERY", "metricResourceIds": ["metric.orders"]},
             )
         assert response.status_code == 503

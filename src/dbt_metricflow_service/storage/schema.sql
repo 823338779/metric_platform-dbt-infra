@@ -64,7 +64,8 @@ CREATE TABLE engine_build (
     repository text NOT NULL,
     branch_name text,
     environment text NOT NULL,
-    execution_binding text NOT NULL,
+    environment_id uuid NOT NULL,
+    physical_target_key text NOT NULL,
     config_version text NOT NULL,
     toolchain_version text NOT NULL,
     caller text NOT NULL,
@@ -85,7 +86,7 @@ CREATE TABLE engine_build (
     updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     finished_at timestamp with time zone,
     CONSTRAINT engine_build_build_status_check CHECK ((build_status = ANY (ARRAY['QUEUED'::text, 'RUNNING'::text, 'SUCCEEDED'::text, 'FAILED'::text, 'CANCELLED'::text, 'OUTCOME_UNKNOWN'::text]))),
-    CONSTRAINT engine_build_environment_check CHECK ((environment = ANY (ARRAY['PREVIEW'::text, 'PRODUCTION'::text])))
+    CONSTRAINT engine_build_environment_check CHECK (environment ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
 );
 
 COMMENT ON COLUMN engine_build.build_id IS '一次构建身份';
@@ -98,7 +99,8 @@ COMMENT ON COLUMN engine_build.branch_name IS 'Git 短分支名';
 
 COMMENT ON COLUMN engine_build.environment IS '物理执行环境';
 
-COMMENT ON COLUMN engine_build.execution_binding IS '可复用执行配置名称';
+COMMENT ON COLUMN engine_build.environment_id IS '调用方环境 UUID';
+COMMENT ON COLUMN engine_build.physical_target_key IS '实例、catalog 和 schema 的目标摘要';
 
 COMMENT ON COLUMN engine_build.config_version IS '不可变执行配置版本';
 
@@ -246,21 +248,6 @@ COMMENT ON COLUMN engine_deployment_target.observed_head_sha IS '最近观察的
 COMMENT ON COLUMN engine_deployment_target.head_observed_at IS '远端观察时间';
 
 COMMENT ON COLUMN engine_deployment_target.source_state IS '远端相对部署的观察状态';
-
-CREATE TABLE engine_execution_binding (
-    repository text NOT NULL,
-    execution_binding text NOT NULL,
-    config_version text NOT NULL,
-    config_json jsonb NOT NULL
-);
-
-COMMENT ON COLUMN engine_execution_binding.repository IS '受控规范仓库地址';
-
-COMMENT ON COLUMN engine_execution_binding.execution_binding IS '可复用执行配置名称';
-
-COMMENT ON COLUMN engine_execution_binding.config_version IS '不可变执行配置版本';
-
-COMMENT ON COLUMN engine_execution_binding.config_json IS '执行配置，不含凭据正文';
 
 CREATE TABLE runtime_artifact_file (
     set_id uuid NOT NULL,
@@ -533,8 +520,6 @@ ALTER TABLE ONLY engine_deployment_attempt
 ALTER TABLE ONLY engine_deployment_target
     ADD CONSTRAINT engine_deployment_target_pkey PRIMARY KEY (repository, environment, branch_name);
 
-ALTER TABLE ONLY engine_execution_binding
-    ADD CONSTRAINT engine_execution_binding_pkey PRIMARY KEY (repository, execution_binding, config_version);
 
 ALTER TABLE ONLY runtime_artifact_file
     ADD CONSTRAINT runtime_artifact_file_pkey PRIMARY KEY (set_id, relative_path);
@@ -628,3 +613,14 @@ ALTER TABLE ONLY runtime_project
 
 -- 变化序号与业务事实在同一事务中递增。
 INSERT INTO engine_change_counter(singleton, value) VALUES (true, 0);
+
+CREATE INDEX IF NOT EXISTS engine_build_environment_history ON engine_build(environment_id, created_at DESC, build_id DESC);
+CREATE INDEX IF NOT EXISTS engine_build_physical_target ON engine_build(physical_target_key);
+ALTER TABLE runtime_job ADD COLUMN IF NOT EXISTS physical_target_key text;
+ALTER TABLE runtime_job ADD COLUMN IF NOT EXISTS target_claimed boolean NOT NULL DEFAULT false;
+COMMENT ON COLUMN runtime_job.physical_target_key IS '本执行的规范化物理写入目标';
+COMMENT ON COLUMN runtime_job.target_claimed IS '本执行是否仍持有目标写入权，未知结果不得释放';
+CREATE INDEX IF NOT EXISTS runtime_job_target_owner ON runtime_job(physical_target_key) WHERE target_claimed;
+
+
+ALTER TABLE engine_build ADD CONSTRAINT engine_build_environment_identity CHECK (environment = environment_id::text);

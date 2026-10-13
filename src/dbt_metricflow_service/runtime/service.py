@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from contextlib import nullcontext
 from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -72,9 +71,8 @@ class Runtime:
                 ) as project:
                     from ..models.execution import ExecutionSnapshot
                     from ..platform.execution_profile import materialized_profile
-                    profile = (materialized_profile(ExecutionSnapshot.model_validate(build["config_snapshot"]),
-                                                    self.settings.temp_root, self.settings, project)
-                               if build.get("protocol_version", 3) == 4 else nullcontext(self.settings.profiles_dir))
+                    profile = materialized_profile(ExecutionSnapshot.model_validate(build["config_snapshot"]),
+                                                   self.settings.temp_root, self.settings, project)
                     with profile as profiles:
                         return invoke_with_profile(profiles, parent, project)
 

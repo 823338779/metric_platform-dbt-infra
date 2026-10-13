@@ -10,16 +10,16 @@ from dbt_metricflow_service.application.queries import QueryService
 from dbt_metricflow_service.models.queries import AvailableDimensionsRequest
 from dbt_metricflow_service.models.queries import QueryRequest as PublishedQueryRequest
 from tests.synchronous_queries import inline_executor
+from tests.test_catalog_queries import ready_build
 from tests.test_publication_catalog import build
 from tests.test_publication_storage import store as store
-from tests.test_v3_catalog_queries import ready_build
 
 
 def query_service(store, tmp_path):
     from psycopg2.extras import Json
 
     from dbt_metricflow_service.application.catalog import CatalogService
-    from tests.test_v3_catalog_queries import ready_build
+    from tests.test_catalog_queries import ready_build
 
     builds, view, jobs, artifacts = ready_build(store, tmp_path)
     with store.db.transaction() as connection:

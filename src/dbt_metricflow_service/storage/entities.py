@@ -153,17 +153,6 @@ class ArtifactFile(Base):
     executable: Mapped[bool] = mapped_column(server_default=text("false"), comment="还原时需要保留的执行位")
 
 
-class ExecutionBinding(Base):
-    """engine_execution_binding 的持久字段；对外由 Store 返回记录快照。"""
-
-    __tablename__ = "engine_execution_binding"
-
-    repository: Mapped[str] = mapped_column(primary_key=True, comment="受控规范仓库地址")
-    execution_binding: Mapped[str] = mapped_column(primary_key=True, comment="可复用执行配置名称")
-    config_version: Mapped[str] = mapped_column(primary_key=True, comment="不可变执行配置版本")
-    config_json: Mapped[JsonDocument] = mapped_column(comment="执行配置，不含凭据正文")
-
-
 class Build(Base):
     """engine_build 的持久字段；对外由 Store 返回记录快照。"""
 
@@ -174,10 +163,8 @@ class Build(Base):
     repository: Mapped[str] = mapped_column(comment="受控规范仓库地址")
     branch_name: Mapped[str | None] = mapped_column(comment="Git 短分支名")
     environment: Mapped[str] = mapped_column(comment="物理执行环境")
-    protocol_version: Mapped[int] = mapped_column(server_default=text("3"), comment="构建输入协议版本")
-    environment_id: Mapped[StringUUID | None] = mapped_column(comment="外部环境稳定身份")
-    physical_target_key: Mapped[str | None] = mapped_column(comment="完整物理写入目标摘要")
-    execution_binding: Mapped[str | None] = mapped_column(comment="旧协议执行配置名称")
+    environment_id: Mapped[StringUUID] = mapped_column(comment="外部环境稳定身份")
+    physical_target_key: Mapped[str] = mapped_column(comment="完整物理写入目标摘要")
     config_version: Mapped[str] = mapped_column(comment="不可变执行配置版本")
     toolchain_version: Mapped[str] = mapped_column(comment="固定工具链版本")
     caller: Mapped[str] = mapped_column(comment="可信服务调用来源")

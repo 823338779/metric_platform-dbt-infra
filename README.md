@@ -6,7 +6,7 @@
 
 | package | 职责 |
 | --- | --- |
-| `models` | `/v3` 请求响应与封存资源模型；无 I/O |
+| `models` | 完整执行快照请求响应与封存资源模型；无 I/O |
 | `api` | 唯一 HTTP 装配、鉴权、参数和错误转换 |
 | `application` | builds、deployments、catalog、queries 四个具体用例服务；不持有 Runtime |
 | `storage` | PostgreSQL 短事务、任务/产物存储、构建日志和新库初始化 |
@@ -32,7 +32,6 @@ uv sync --frozen --all-groups
 $env:SERVICE_DATABASE_URL = "postgresql://user:password@localhost/dbt_service"
 $env:SERVICE_TOKEN = "由部署环境提供的服务凭据"
 uv run --frozen dbt-service-admin init-db
-uv run --frozen dbt-service-admin register-bindings bindings.json
 uv run --frozen dbt-metricflow-service
 ```
 
@@ -48,7 +47,7 @@ dbt 命令通过 `dbtRunner.invoke()` 直接执行，MetricFlow 验证和查询�
 | --- | --- |
 | `SERVICE_DATABASE_URL` | PostgreSQL 元数据库；必需 |
 | `SERVICE_TOKEN` | 所有 POST 的 Bearer 凭据，未配置则禁用写入口 |
-| `DBT_PROFILES` / `DBT_PROFILES_DIR` | 内联 profiles 或外部目录；二选一 |
+| `EXECUTION_INSTANCES` / `EXECUTION_CREDENTIALS` | 可信物理实例清单和凭据环境变量引用 |
 | `SERVICE_TEMP_ROOT` | 可丢弃执行目录 |
 | `SERVICE_CONFIG_VERSION` | 本 worker 可执行的配置版本，默认 1 |
 | `SERVICE_TOOLCHAIN_VERSION` | 工具链标识；默认按依赖版本及源码计算 |
@@ -59,29 +58,27 @@ dbt 命令通过 `dbtRunner.invoke()` 直接执行，MetricFlow 验证和查询�
 | `MAX_ARTIFACT_FILE_BYTES` / `MAX_ARTIFACT_BYTES` | 默认 64 MiB 单文件 / 256 MiB 集合 |
 | `SERVICE_HOST` / `SERVICE_PORT` | HTTP 地址、端口 |
 
-绑定以仓库、executionBinding、configVersion 为键，版本不可覆盖。凭据由 Git/profile 环境提供，不写入绑定或请求。示例：
-
-```json
-[{"repository":"https://git.example.com/data/sales.git","executionBinding":"warehouse","configVersion":"1",
-  "config":{"profileBindingId":"postgres","environments":["PREVIEW","PRODUCTION"],
-            "businessTimezone":"Asia/Shanghai"}}]
-```
-
-调用方必须在每次构建请求中指定 `schemaName`，缺失、空值或非法名称会被拒绝。构建使用固定 schema 和原模型表名（包括模型配置的 alias），不生成随机 schema 或表名前缀；后续构建覆盖同名表，历史构建查询也会读取当前表数据。清理仅结束该构建的可查询生命周期，保留共用 schema 和表；部署指针切换不会恢复旧表数据。历史查询需要匹配原工具链与配置的执行环境，不应伪造版本标识。
-
 ## 构建与部署
+
+每次请求携带完整不可变 execution 快照，构建受理后配置变更不会改变已受理任务或查询的目标。
 
 ```json
 {"repository":"https://git.example.com/data/sales.git","branchName":"feature/orders",
- "commitSha":"0123456789012345678901234567890123456789","environment":"PREVIEW",
- "executionBinding":"warehouse","configVersion":"1","schemaName":"analytics","deploymentPolicy":"NONE","idempotencyKey":"build-001"}
+ "commitSha":"0123456789012345678901234567890123456789",
+ "execution":{"environmentId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","configVersion":1,
+   "connection":{"type":"starrocks","instanceId":"warehouse","host":"localhost","port":9030},
+   "credentialRef":"warehouse-readwrite","catalog":"default_catalog","schema":"analytics",
+   "threads":1,"businessTimezone":"Asia/Shanghai"},
+ "deploymentPolicy":"NONE","idempotencyKey":"build-001"}
 ```
 
-`POST /v3/builds` 在 Git I/O 前原子保存构建身份和持久任务，返回 202。部署策略默认为 NONE。PREVIEW 可指定分支、完整 SHA 或两者；main 只可用于 PRODUCTION，正式环境必须显式 SHA。无分支只允许构建，不部署。分支输入在 worker 首次解析后固定 SHA，重试不会跟随最新 head。
+`POST /builds` 在 Git I/O 前原子保存完整请求和持久任务，返回 202。部署策略默认为 NONE。
+环境由 environmentId 标识，不限制分支名称；branchName 必填，commitSha 可选且必须为完整 SHA。
+分支输入在 worker 首次解析后固定 SHA，重试不会跟随最新 head。schema 必须显式提供；构建使用固定 schema 和原表名，后续构建可能覆盖同名表，因此固定 buildId 不表示历史物理数据快照。
 
 同仓库、可信调用方、操作类型下同幂等键恢复原身份；输入不同返回 409。新键同 SHA 产生新构建。构建成功与部署成功独立，`initialDeployment` 描述随构建附带的意图。
 
-`ON_SUCCESS` 受理时即分配 generation；较新意图即使失败，也不会恢复较旧待处理意图。独立部署使用 `POST /v3/deployments`，传入 `buildId/branchName/expectedTargetVersion/idempotencyKey`。目标自然键是 repository/environment/branchName。切换前重新核对远端 head、构建可用性和目标版本；真实 ref 消失停用指针，网络失败只标记 UNKNOWN。
+`ON_SUCCESS` 受理时即分配 generation；较新意图即使失败，也不会恢复较旧待处理意图。独立部署使用 `POST /deployments`，传入 `buildId/branchName/expectedTargetVersion/idempotencyKey`。目标自然键是 repository/environmentId/branchName。切换前重新核对远端 head、构建可用性和目标版本；真实 ref 消失停用指针，网络失败只标记 UNKNOWN。
 
 完整构建运行 deps、parse、compile、build（含测试）、必要的 source freshness、物理关系核验及 MetricFlow 探测。支持 table/view/ephemeral 和不写失败表的测试；seed、snapshot、自定义物化、SQL header、执行 hook 和数据库命令宏明确拒绝。工程读取遵循实际资源目录配置。模板约束不等于任意不可信代码沙箱。
 
@@ -97,24 +94,24 @@ uv run --frozen dbt-service-admin build --file build-request.json
 
 | 路径 | 行为 |
 | --- | --- |
-| `GET /v3/builds`、`GET /v3/builds/{buildId}` | repository 筛选历史、固定身份读取 |
-| `GET /v3/builds/{buildId}/logs` | 可续读的持久阶段/错误码日志，不回显原始 CLI |
-| `POST /v3/builds/{buildId}/cancel` | 取消构建 |
-| `GET /v3/deployments/current`、`GET /v3/deployments` | 自然键当前观察、意图历史 |
-| `GET /v3/builds/{buildId}/catalog` | 目录搜索、kind 筛选、游标分页 |
-| `GET /v3/builds/{buildId}/resources/{resourceId}` | 资源详情；另有 `/lineage`、`/source`、`/native-details` |
-| `POST /v3/query/available-dimensions?build_id={build_id}` | build_id 为独立 URL 参数，请求体指定 metricResourceIds，200 同步返回可用的 dimensions 列表，包含时间粒度和允许的过滤操作 |
-| `POST /v3/query?build_id={build_id}` | build_id 为独立 URL 参数，同步执行 QUERY、EXPLAIN、PREVIEW、DIMENSION_VALUES，直接返回本次结果，最多 8 MiB |
+| `GET /builds`、`GET /builds/{buildId}` | environmentId 必填，repository/branchName/buildStatus 可选；固定身份读取 |
+| `GET /builds/{buildId}/logs` | 可续读的持久阶段/错误码日志，不回显原始 CLI |
+| `POST /builds/{buildId}/cancel` | 取消构建 |
+| `GET /deployments/current`、`GET /deployments` | 自然键当前观察、意图历史 |
+| `GET /builds/{buildId}/catalog` | 目录搜索、kind 筛选、游标分页 |
+| `GET /builds/{buildId}/resources/{resourceId}` | 资源详情；另有 `/lineage`、`/source`、`/native-details` |
+| `POST /query/available-dimensions?build_id={build_id}` | build_id 为独立 URL 参数，请求体指定 metricResourceIds，200 同步返回可用的 dimensions 列表，包含时间粒度和允许的过滤操作 |
+| `POST /query?build_id={build_id}` | build_id 为独立 URL 参数，同步执行 QUERY、EXPLAIN、PREVIEW、DIMENSION_VALUES，直接返回本次结果，最多 8 MiB |
 
 目录、可用维度、查询始终使用选定 buildId；不重新解析当前部署。新构建不使旧构建目录和查询失效。物理清理后仍保留目录，`queryAvailable=false`。QUERY/EXPLAIN 使用 metricResourceIds；分组/过滤/维度取值使用该构建及指标集合生成的 optionId。PREVIEW 使用 datasetResourceId。请求体 `limit` 表示本次返回行数上限，默认 1000、最大 10000；查询请求不接受 `offset` 或 `idempotencyKey`。每次请求重新调用引擎，返回 QueryResult，不提供历史结果或分页读取。数值精度和 null 保留，时间按固定构建时区归一化。
 
-其他列表默认 50、最多 200，统一 `items/nextCursor`。错误统一为 `error`，包含 `code/message/retryable/phase/buildId`。完整协议以 `/openapi.json` 为准；健康及版本接口仍是 `/health/live`、`/health/ready`、`/v1/versions`。
+其他列表默认 50、最多 200，统一 `items/nextCursor`。错误统一为 `error`，包含 `code/message/retryable/phase/buildId`。完整协议以 `/openapi.json` 为准；健康及版本接口仍是 `/health/live`、`/health/ready`、`/versions`。
 
 只有构建、部署及其取消流程使用异步状态。两个查询接口均通过必填的 URL 参数 `build_id` 指定构建，请求体不包含 buildId。可用维度接口请求体只接收 `metricResourceIds`，不需要幂等键或任务编号，响应列表字段为 `dimensions`。查询接口在原请求内完成并返回本次结果，相同请求也会重新执行。查询和可用维度不缓存，不写入任务、attempt 或结果表，响应不包含 `queryId`、执行状态和分页字段。原 builds 下的 query-options、available-dimensions、queries 路由及 GET results 路由已移除。失败直接返回结构化 HTTP 错误，不返回 QUEUED/RUNNING；可用维度和查询的状态轮询路由已移除。执行期间以数据库共享会话锁保护固定构建，清理同一构建时必须取得互斥锁；查询退出后释放锁，不产生查询记录。后台 worker 只执行构建和清理，不自动重试查询。同步调用方的 HTTP 超时应大于 `COMMAND_TIMEOUT_SECONDS`（默认 1800 秒），并为网络与结果传输留出余量。
 
 ## 初始化与运维
 
-这是整体协议替换。旧 `/v1` 业务路由、所有 `/v2/projects`、独立 validation 和分支登记入口均已移除，不提供兼容路由。调用方需另行迁移，不能混用新旧部署。
+服务仅提供当前完整执行快照契约，业务接口不带版本号。
 
 部署使用空的 PostgreSQL 数据库，执行以下命令创建完整表结构、约束和触发器：
 
@@ -122,7 +119,7 @@ uv run --frozen dbt-service-admin build --file build-request.json
 uv run --frozen dbt-service-admin init-db
 ```
 
-空库初始化执行 storage/schema.sql 和增量迁移；重复 init-db 不重建已有表，也不隐式升级。已运行 v3 构建协议的数据库使用下面的 upgrade-db 增量升级，保留已有构建、部署和产物。更早的旧发布协议数据库仍不支持自动迁移。服务启动只检查结构，缺少新列时明确要求升级。
+空库初始化执行 storage/schema.sql。服务只支持该完整结构，不提供旧协议或旧持久化数据的升级与兼容入口。
 
 持久化保留构建、部署、异步任务及执行尝试、构建日志和必要的产物快照。成功任务不再保存通用结果和诊断副本；目录只保存封存文件，元数据只保存独立的版本、来源和验证字段。完整构建每次独立执行，不保留旧发布基线和默认输出复用机制。执行产物仅保留恢复工程所需文件及 manifest、semantic_manifest、catalog、published_catalog；compiled/run、run_results、sources 和额外验证证据文件只在构建期间使用。
 
@@ -164,15 +161,11 @@ uv run --frozen pytest -q tests/integration/test_publication_proxy_flow.py
 
 测试覆盖完整构建、部署、四种查询、固定 schema 覆盖与不安全模板失败，创建独立测试 schema；该证据不代表 StarRocks 已做真实集成验证。
 
-## 外部执行快照与环境隔离（v4）
+## 外部执行快照与环境隔离
 
-环境由指标平台等调用方管理。本服务不提供环境配置 CRUD 或环境注册表；每次 `POST /v4/builds` 必须携带 repository、branchName、idempotencyKey 和完整 execution 快照。execution 包含 environmentId、configVersion、connection、credentialRef、catalog、schema、threads、businessTimezone。branchName 与环境无绑定，main 和 feature 分支使用相同规则。configVersion 是外部版本，worker 匹配仍使用 SERVICE_CONFIG_VERSION。
+环境由指标平台等调用方管理。本服务不提供环境配置 CRUD 或环境注册表；每次 `POST /builds` 必须携带 repository、branchName、idempotencyKey 和完整 execution 快照。execution 包含 environmentId、configVersion、connection、credentialRef、catalog、schema、threads、businessTimezone。branchName 与环境无绑定，main 和 feature 分支使用相同规则。configVersion 是外部版本，worker 匹配仍使用 SERVICE_CONFIG_VERSION。
 
-```powershell
-uv run --frozen dbt-service-admin upgrade-db
-```
-
-升级前停止接收新写入并排空正在执行的任务，再执行事务化增量迁移并重启服务；勿通过清库迁移。v3 API/旧执行绑定继续兼容，v3 元信息读取 v4 build 返回版本不匹配。`GET /v4/builds` 必须携带 environmentId；可选 repository、branchName、buildStatus、cursor、limit。详情、日志和取消位于 `/v4/builds/{buildId}`、`/logs`、`/cancel`。`/v4/deployments` 与 `/current` 以 repository/environmentId/branchName 定位部署。目录与查询仍使用固定 buildId 的 v3 API，内部按该 build 的快照创建临时 profile。
+`GET /builds` 必须携带 environmentId；可选 repository、branchName、buildStatus、cursor、limit。详情、日志和取消位于 `/builds/{buildId}`、`/logs`、`/cancel`。`/deployments` 与 `/current` 以 repository/environmentId/branchName 定位部署。目录与查询使用固定 buildId，内部按该 build 的快照创建临时 profile。
 
 部署配置示例（可在服务 YAML 中写映射，也可用同名环境变量写 JSON）：
 
@@ -192,7 +185,7 @@ secret 值通过受保护的环境变量注入。profile 只写 dbt `env_var` �
 
 StarRocks 的 profile.catalog 指定 catalog，profile.schema 指定 database；profile.database 留空，避免 source 继承后被误识别成外部 catalog。模型的 catalog/database 覆盖必须仍指向同一物理目标。PostgreSQL 的 catalog 映射为 dbname，DuckDB 的 catalog 必须等于清单中绝对文件路径的文件名（去后缀）。不存在或不可写的外部 catalog 会导致构建失败；不能把更换 catalog 字段当成已验证的适配器写入能力。
 
-物理归属从不可变构建事实核验，已使用的目标不能交给另一环境。同一环境并发构建串行写入同一目标；租约过期或外部停止情况未知时保留写入保护，直到现有 reconcile 流程确认停止。旧 v3 记录未保存可靠 catalog 信息，遇到与旧 schema 重叠的快照构建会保守拒绝。
+物理归属从不可变构建事实核验，已使用的目标不能交给另一环境。同一环境并发构建串行写入同一目标；租约过期或外部停止情况未知时保留写入保护，直到现有 reconcile 流程确认停止。
 
 真实隔离验收需设置 `ENVIRONMENT_ISOLATION_E2E=1`、`SERVICE_TEST_DATABASE_URL`（专用服务测试库）、`ENVIRONMENT_TEST_REPOSITORY`、`DBT_ENV_SECRET_ISOLATION_USER`、`DBT_ENV_SECRET_ISOLATION_PASSWORD`；可选 `ENVIRONMENT_TEST_HOST/PORT/BRANCH`。使用已有真实仓库和只读原始数据，测试创建唯一 `env_e2e_*` schema，保留构建事实便于审计：
 

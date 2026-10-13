@@ -1,33 +1,43 @@
 {
-  "protocolVersion": "build-deployment-v3",
+  "protocolVersion": "execution-snapshot",
   "examples": [
     {
       "name": "build",
-      "model": "BuildRequest",
+      "model": "SnapshotBuildRequest",
       "value": {
         "repository": "https://git.example.com/metrics.git",
         "branchName": "feature/revenue",
         "commitSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "environment": "PREVIEW",
-        "executionBinding": "warehouse",
-        "configVersion": "1",
-        "schemaName": "analytics",
         "deploymentPolicy": "NONE",
         "idempotencyKey": "build-001",
-        "origin": null
+        "origin": null,
+        "execution": {
+          "environmentId": "12345678-1234-4234-8234-000000000001",
+          "configVersion": 1,
+          "connection": {
+            "type": "starrocks",
+            "instanceId": "warehouse",
+            "host": "localhost",
+            "port": 9030,
+            "path": null
+          },
+          "credentialRef": "warehouse-test",
+          "catalog": "default_catalog",
+          "schema": "analytics",
+          "threads": 2,
+          "businessTimezone": "Asia/Shanghai"
+        }
       }
     },
     {
       "name": "failed-build",
-      "model": "BuildView",
+      "model": "SnapshotBuildView",
       "value": {
         "buildId": "12345678-1234-4234-8234-123456789abc",
         "repository": "https://git.example.com/metrics.git",
         "branchName": "feature/revenue",
         "requestedCommitSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "commitSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "environment": "PREVIEW",
-        "executionBinding": "warehouse",
         "configVersion": "1",
         "toolchainVersion": "fixture",
         "buildStatus": "FAILED",
@@ -46,7 +56,23 @@
           "phase": null,
           "buildId": null
         },
-        "initialDeployment": null
+        "initialDeployment": null,
+        "execution": {
+          "environmentId": "12345678-1234-4234-8234-000000000001",
+          "configVersion": 1,
+          "connection": {
+            "type": "starrocks",
+            "instanceId": "warehouse",
+            "host": "localhost",
+            "port": 9030,
+            "path": null
+          },
+          "credentialRef": "warehouse-test",
+          "catalog": "default_catalog",
+          "schema": "analytics",
+          "threads": 2,
+          "businessTimezone": "Asia/Shanghai"
+        }
       }
     },
     {
@@ -64,7 +90,6 @@
       "model": "DeploymentTargetView",
       "value": {
         "repository": "https://git.example.com/metrics.git",
-        "environment": "PREVIEW",
         "branchName": "feature/revenue",
         "version": 0,
         "desiredGeneration": 0,
@@ -73,7 +98,8 @@
         "latestAttempt": null,
         "observedHeadSha": null,
         "headObservedAt": null,
-        "sourceState": "UNDEPLOYED"
+        "sourceState": "UNDEPLOYED",
+        "environmentId": "12345678-1234-4234-8234-000000000001"
       }
     },
     {
@@ -81,14 +107,14 @@
       "model": "DeploymentAttemptView",
       "value": {
         "repository": "https://git.example.com/metrics.git",
-        "environment": "PREVIEW",
         "branchName": "feature/revenue",
         "generation": 1,
         "buildId": "12345678-1234-4234-8234-123456789abc",
         "deploymentStatus": "WAITING_FOR_BUILD",
         "reason": null,
         "createdAt": "2026-10-10T00:00:00Z",
-        "deployedAt": null
+        "deployedAt": null,
+        "environmentId": "12345678-1234-4234-8234-000000000001"
       }
     },
     {
@@ -446,20 +472,159 @@
       "repository": "https://git.example.com/metrics.git",
       "branchName": "feature/revenue",
       "commitSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      "environment": "PREVIEW",
-      "executionBinding": "warehouse",
-      "configVersion": "1",
+      "deploymentPolicy": "NONE",
       "idempotencyKey": "build-001",
-      "projectId": "legacy"
+      "origin": null,
+      "execution": {
+        "environmentId": "12345678-1234-4234-8234-000000000001",
+        "configVersion": 1,
+        "connection": {
+          "type": "starrocks",
+          "instanceId": "warehouse",
+          "host": "localhost",
+          "port": 9030,
+          "path": null
+        },
+        "credentialRef": "warehouse-test",
+        "catalog": "default_catalog",
+        "schema": "analytics",
+        "threads": 2,
+        "businessTimezone": "Asia/Shanghai"
+      },
+      "environment": "old"
     },
     {
       "repository": "https://git.example.com/metrics.git",
       "branchName": "feature/revenue",
-      "commitSha": "abc",
-      "environment": "PREVIEW",
-      "executionBinding": "warehouse",
-      "configVersion": "1",
-      "idempotencyKey": "build-001"
+      "commitSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "deploymentPolicy": "NONE",
+      "idempotencyKey": "build-001",
+      "origin": null,
+      "execution": {
+        "environmentId": "12345678-1234-4234-8234-000000000001",
+        "configVersion": 1,
+        "connection": {
+          "type": "starrocks",
+          "instanceId": "warehouse",
+          "host": "localhost",
+          "port": 9030,
+          "path": null
+        },
+        "credentialRef": "warehouse-test",
+        "catalog": "default_catalog",
+        "schema": "analytics",
+        "threads": 2,
+        "businessTimezone": "Asia/Shanghai"
+      },
+      "executionBinding": "old"
+    },
+    {
+      "repository": "https://git.example.com/metrics.git",
+      "branchName": "feature/revenue",
+      "commitSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "deploymentPolicy": "NONE",
+      "idempotencyKey": "build-001",
+      "origin": null,
+      "execution": {
+        "environmentId": "12345678-1234-4234-8234-000000000001",
+        "configVersion": 1,
+        "connection": {
+          "type": "starrocks",
+          "instanceId": "warehouse",
+          "host": "localhost",
+          "port": 9030,
+          "path": null
+        },
+        "credentialRef": "warehouse-test",
+        "catalog": "default_catalog",
+        "schema": "analytics",
+        "threads": 2,
+        "businessTimezone": "Asia/Shanghai"
+      },
+      "configVersion": "old"
+    },
+    {
+      "repository": "https://git.example.com/metrics.git",
+      "branchName": "feature/revenue",
+      "commitSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "deploymentPolicy": "NONE",
+      "idempotencyKey": "build-001",
+      "origin": null,
+      "execution": {
+        "environmentId": "12345678-1234-4234-8234-000000000001",
+        "configVersion": 1,
+        "connection": {
+          "type": "starrocks",
+          "instanceId": "warehouse",
+          "host": "localhost",
+          "port": 9030,
+          "path": null
+        },
+        "credentialRef": "warehouse-test",
+        "catalog": "default_catalog",
+        "schema": "analytics",
+        "threads": 2,
+        "businessTimezone": "Asia/Shanghai"
+      },
+      "schemaName": "old"
+    },
+    {
+      "repository": "https://git.example.com/metrics.git",
+      "branchName": "feature/revenue",
+      "commitSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "deploymentPolicy": "NONE",
+      "idempotencyKey": "build-001",
+      "origin": null,
+      "execution": {
+        "environmentId": "12345678-1234-4234-8234-000000000001",
+        "configVersion": 1,
+        "connection": {
+          "type": "starrocks",
+          "instanceId": "warehouse",
+          "host": "localhost",
+          "port": 9030,
+          "path": null
+        },
+        "credentialRef": "warehouse-test",
+        "catalog": "default_catalog",
+        "schema": "analytics",
+        "threads": 2,
+        "businessTimezone": "Asia/Shanghai"
+      },
+      "projectId": "old"
+    },
+    {
+      "repository": "https://git.example.com/metrics.git",
+      "branchName": "feature/revenue",
+      "commitSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "deploymentPolicy": "NONE",
+      "idempotencyKey": "build-001",
+      "origin": null,
+      "execution": null
+    },
+    {
+      "repository": "https://git.example.com/metrics.git",
+      "branchName": null,
+      "commitSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "deploymentPolicy": "NONE",
+      "idempotencyKey": "build-001",
+      "origin": null,
+      "execution": {
+        "environmentId": "12345678-1234-4234-8234-000000000001",
+        "configVersion": 1,
+        "connection": {
+          "type": "starrocks",
+          "instanceId": "warehouse",
+          "host": "localhost",
+          "port": 9030,
+          "path": null
+        },
+        "credentialRef": "warehouse-test",
+        "catalog": "default_catalog",
+        "schema": "analytics",
+        "threads": 2,
+        "businessTimezone": "Asia/Shanghai"
+      }
     }
   ]
 }

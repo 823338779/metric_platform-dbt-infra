@@ -7,9 +7,9 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from dbt_metricflow_service.models.builds import BuildRequest
+from dbt_metricflow_service.models.execution import SnapshotBuildRequest as BuildRequest
 from dbt_metricflow_service.platform.bindings import ProjectBinding, resolve_revision
-from tests.test_v3_contract import build_body
+from tests.test_build_contract import build_body
 
 
 def git(repo: Path, *args: str) -> str:
@@ -107,11 +107,16 @@ def test_remote_cannot_be_supplied_by_request() -> None:
 
 def test_schema_is_supplied_by_build_request() -> None:
     baseline = build_body()
-    assert BuildRequest.model_validate({**baseline, "schemaName": "dbt_ecom"}).schema_name == "dbt_ecom"
+    assert (
+        BuildRequest.model_validate(
+            {**baseline, "execution": {**baseline["execution"], "schema": "dbt_ecom"}}
+        ).execution.schema_name
+        == "dbt_ecom"
+    )
 
 
 @pytest.mark.parametrize("schema", [None, "dbt-ecom", "", "a" * 257, "dbt_ecom;drop schema public"])
 def test_build_rejects_unsafe_schema(schema) -> None:
     with pytest.raises(ValidationError) as error:
-        BuildRequest.model_validate({**build_body(), "schemaName": schema})
-    assert [item["loc"] for item in error.value.errors()] == [("schemaName",)]
+        BuildRequest.model_validate({**build_body(), "execution": {**build_body()["execution"], "schema": schema}})
+    assert [item["loc"] for item in error.value.errors()] == [("execution", "schema")]

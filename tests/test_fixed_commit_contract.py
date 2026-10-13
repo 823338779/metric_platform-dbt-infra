@@ -5,11 +5,11 @@ from types import SimpleNamespace
 import pytest
 
 from dbt_metricflow_service.api.app import create_app
-from dbt_metricflow_service.models.builds import BuildRequest
+from dbt_metricflow_service.models.execution import SnapshotBuildRequest as BuildRequest
 from dbt_metricflow_service.platform.bindings import ProjectBinding, resolve_commit
+from tests.test_build_contract import build_body
 from tests.test_platform_bindings import git
 from tests.test_platform_bindings import repository as repository
-from tests.test_v3_contract import build_body
 
 
 def test_fixed_commit_request_rejects_moving_refs_and_environment_overrides():
@@ -50,8 +50,8 @@ def test_application_exposes_only_fixed_commit_business_routes(monkeypatch):
         SimpleNamespace(service_token="test", database_url="unused", command_timeout_seconds=30, temp_root=None)
     )
     paths = set(app.openapi()["paths"])
-    assert "/v3/builds" in paths
-    assert "/v3/changes" not in paths
+    assert "/builds" in paths
+    assert "/changes" not in paths
     assert not any("validations" in path for path in paths)
-    assert not any(path.startswith("/v1/") and path != "/v1/versions" for path in paths)
+    assert not any(path.startswith("/v1/") and path != "/versions" for path in paths)
     assert not any("branches" in path or "compatibility" in path or path.startswith("/internal/") for path in paths)

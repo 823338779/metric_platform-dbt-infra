@@ -128,10 +128,13 @@ class RuntimeExecutor:
 
         if not job["request_json"].get("buildId"):
             raise ExecutionError("FIXED_COMMIT_INPUT_REQUIRED")
+        # 缺少快照时在 Git、产物恢复和目标占用之前拒绝旧任务。
+        raw = job["request_json"].get("execution")
+        if not raw:
+            raise ExecutionError("EXECUTION_SNAPSHOT_REQUIRED")
         job = await self._prepare_build_source(job)
         project = attempt / PROJECT_DIRECTORY
         await _thread(self.artifacts.materialize, cast(str, job["input_set_id"]), project)
-        from contextlib import nullcontext
 
         from ..models.execution import ExecutionSnapshot
         from ..platform.execution_profile import materialized_profile
@@ -141,9 +144,7 @@ class RuntimeExecutor:
             if not await _thread(self.jobs.heartbeat, job["job_id"], job["lease_token"]):
                 raise ExecutionError(ERROR_LEASE_LOST)
             await asyncio.sleep(0.25)
-        raw = job["request_json"].get("execution")
-        profile = (materialized_profile(ExecutionSnapshot.model_validate(raw), attempt, self.settings, project)
-                   if raw else nullcontext(self.settings.profiles_dir))
+        profile = materialized_profile(ExecutionSnapshot.model_validate(raw), attempt, self.settings, project)
         with profile as profiles:
             return await execute_publication(self, job, attempt, project, profiles=profiles)
 

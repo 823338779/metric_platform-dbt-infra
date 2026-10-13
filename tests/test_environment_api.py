@@ -8,10 +8,10 @@ from fastapi.testclient import TestClient
 
 from dbt_metricflow_service.api.app import create_app
 from dbt_metricflow_service.settings import Settings
+from tests.test_api import AUTH, TOKEN
 from tests.test_execution_profiles import settings as infrastructure
 from tests.test_execution_snapshot_storage import request, snapshot
 from tests.test_publication_storage import store as store
-from tests.test_v3_api import AUTH, TOKEN
 
 
 @pytest.fixture
@@ -26,7 +26,7 @@ def client(store, tmp_path):
 
 
 def submit(client, **changes):
-    response = client.post("/v4/builds", json=request(**changes).model_dump(mode="json", by_alias=True), headers=AUTH)
+    response = client.post("/builds", json=request(**changes).model_dump(mode="json", by_alias=True), headers=AUTH)
     assert response.status_code == 202, response.text
     return response.json()
 
@@ -35,8 +35,8 @@ def test_environment_history_includes_failed_unpublished_builds(client):
     environment = snapshot()
     first = submit(client, execution=environment)
     second = submit(client, execution=environment, branchName="feature/test")
-    assert client.post(f"/v4/builds/{second['buildId']}/cancel", headers=AUTH).status_code in (200, 202)
-    response = client.get("/v4/builds", params={"environmentId": str(environment.environment_id)})
+    assert client.post(f"/builds/{second['buildId']}/cancel", headers=AUTH).status_code in (200, 202)
+    response = client.get("/builds", params={"environmentId": str(environment.environment_id)})
     assert response.status_code == 200
     rows = response.json()["items"]
     assert {row["buildId"] for row in rows} == {first["buildId"], second["buildId"]}
@@ -47,9 +47,9 @@ def test_cursor_is_bound_to_environment_and_filters(client):
     environment = snapshot()
     submit(client, execution=environment)
     submit(client, execution=environment)
-    first = client.get("/v4/builds", params={"environmentId": str(environment.environment_id), "limit": 1}).json()
+    first = client.get("/builds", params={"environmentId": str(environment.environment_id), "limit": 1}).json()
     assert first["nextCursor"]
-    response = client.get("/v4/builds", params={"environmentId": str(uuid4()), "cursor": first["nextCursor"]})
+    response = client.get("/builds", params={"environmentId": str(uuid4()), "cursor": first["nextCursor"]})
     assert response.status_code == 422
 
 
@@ -64,27 +64,26 @@ def test_new_environment_can_build_main_or_feature_branch(client):
 
 def test_v3_response_never_serializes_uuid_as_environment_enum(client):
     result = submit(client)
-    assert client.get("/v3/builds/" + result["buildId"]).status_code == 409
-    assert client.get("/v4/builds/" + result["buildId"]).status_code == 200
-    legacy = client.get("/v3/builds", params={"repository": result["repository"]}).json()
-    assert result["buildId"] not in [row["buildId"] for row in legacy["items"]]
+    assert client.get("/v3/builds/" + result["buildId"]).status_code == 404
+    assert client.get("/builds/" + result["buildId"]).status_code == 200
+    assert client.get("/v3/builds", params={"repository": result["repository"]}).status_code == 404
 
 
 def test_snapshot_build_requires_service_authentication(client):
-    assert client.post("/v4/builds", json=request().model_dump(mode="json", by_alias=True)).status_code == 401
+    assert client.post("/builds", json=request().model_dump(mode="json", by_alias=True)).status_code == 401
 
 
 def test_unknown_timezone_is_input_error(client):
     body = request().model_dump(mode="json", by_alias=True)
     body["execution"]["businessTimezone"] = "Invalid/Unknown"
-    assert client.post("/v4/builds", json=body, headers=AUTH).status_code == 422
+    assert client.post("/builds", json=body, headers=AUTH).status_code == 422
 
 
 def test_v3_cancel_rejects_snapshot_before_mutation(client):
     result = submit(client)
     response = client.post(f"/v3/builds/{result['buildId']}/cancel", headers=AUTH)
-    assert response.status_code == 409
-    after = client.get(f"/v4/builds/{result['buildId']}").json()
+    assert response.status_code == 404
+    after = client.get(f"/builds/{result['buildId']}").json()
     assert after["cancelRequested"] == result["cancelRequested"]
     assert after["buildStatus"] == result["buildStatus"]
 
@@ -102,7 +101,6 @@ def test_v3_deployment_rejects_snapshot_before_mutation(client):
         "buildId": result["buildId"], "branchName": "main", "expectedTargetVersion": 0,
         "idempotencyKey": uuid4().hex,
     })
-    assert response.status_code == 409
-    assert response.json()["error"]["code"] == "PROTOCOL_VERSION_MISMATCH"
+    assert response.status_code == 404
     with database.transaction() as connection:
         assert connection.execute(text("SELECT count(*) FROM engine_deployment_attempt")).scalar() == before

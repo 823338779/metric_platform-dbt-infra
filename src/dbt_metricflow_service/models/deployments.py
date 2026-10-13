@@ -6,7 +6,7 @@ from uuid import UUID
 
 from pydantic import Field, field_validator
 
-from .builds import Contract, Environment, validate_branch
+from .builds import Contract, validate_branch
 
 
 class DeploymentStatus(StrEnum):
@@ -21,9 +21,15 @@ class DeploymentStatus(StrEnum):
 
 class DeploymentKey(Contract):
     repository: str = Field(description="规范仓库地址")
-    environment: Environment = Field(description="物理执行环境")
+    environment: str = Field(alias="environmentId", description="调用方环境 UUID")
     branch_name: str = Field(description="目标分支短名")
     _branch = field_validator("branch_name")(validate_branch)
+
+    @field_validator("environment")
+    @classmethod
+    def valid_environment(cls, value: str) -> str:
+        return str(UUID(value))
+
 
 
 class DeploymentRequest(Contract):
@@ -52,21 +58,3 @@ class DeploymentTargetView(DeploymentKey):
     observed_head_sha: str | None = Field(default=None, description="最近观察远端 head")
     head_observed_at: datetime | None = Field(default=None, description="远端观察时间")
     source_state: str = Field(default="UNDEPLOYED", description="远端观察结果，不替代部署终态")
-
-
-class SnapshotDeploymentKey(DeploymentKey):
-    environment: str = Field(alias="environmentId", description="外部环境 UUID，与源码无绑定")
-
-    @field_validator("environment")
-    @classmethod
-    def valid_environment(cls, value: str) -> str:
-        return str(UUID(value))
-
-
-class SnapshotDeploymentAttemptView(DeploymentAttemptView):
-    environment: str = Field(alias="environmentId", description="外部环境 UUID")
-
-
-class SnapshotDeploymentTargetView(DeploymentTargetView):
-    environment: str = Field(alias="environmentId", description="外部环境 UUID")
-    latest_attempt: SnapshotDeploymentAttemptView | None = Field(default=None, description="该来源最新部署意图")

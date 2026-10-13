@@ -5,9 +5,9 @@ import pytest
 
 from dbt_metricflow_service.application.errors import ServiceError
 from dbt_metricflow_service.models.queries import AvailableDimensionsRequest
+from tests.test_catalog_queries import ready_build
 from tests.test_publication_queries import query_service
 from tests.test_publication_storage import store as store
-from tests.test_v3_catalog_queries import ready_build
 
 
 def test_recomputed_available_dimensions_keep_stable_option_ids(store, tmp_path):

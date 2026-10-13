@@ -50,17 +50,17 @@ def test_real_environment_isolation(tmp_path):
     # 所有引擎操作都经过 API；数据库连接仅核查本次创建的物理对象。
     with TestClient(create_app(settings)) as client, database:
         def completed(snapshot, expected="SUCCEEDED"):
-            response = client.post("/v4/builds", headers=headers, json={"repository": repository,
+            response = client.post("/builds", headers=headers, json={"repository": repository,
                 "branchName": branch, "execution": snapshot, "idempotencyKey": uuid4().hex,
                 "deploymentPolicy": "ON_SUCCESS"})
             assert response.status_code == 202, response.text
             build_id = response.json()["buildId"]
             deadline = time.monotonic() + TIMEOUT
             while time.monotonic() < deadline:
-                value = client.get("/v4/builds/" + build_id).json()
+                value = client.get("/builds/" + build_id).json()
                 if value["buildStatus"] not in ("QUEUED", "RUNNING"):
                     assert value["buildStatus"] == expected, (
-                        value, client.get(f"/v4/builds/{build_id}/logs").json())
+                        value, client.get(f"/builds/{build_id}/logs").json())
                     return value
                 time.sleep(0.5)
             pytest.fail("build timeout: " + build_id)
@@ -77,14 +77,14 @@ def test_real_environment_isolation(tmp_path):
                 return result
 
         def query(build):
-            catalog = client.get(f"/v3/builds/{build['buildId']}/catalog", params={"kind": "METRIC"})
+            catalog = client.get(f"/builds/{build['buildId']}/catalog", params={"kind": "METRIC"})
             assert catalog.status_code == 200, catalog.text
             metric = catalog.json()["items"][0]["resourceId"]
-            response = client.post("/v3/query", params={"build_id": build["buildId"]}, headers=headers,
+            response = client.post("/query", params={"build_id": build["buildId"]}, headers=headers,
                 json={"mode": "QUERY", "metricResourceIds": [metric], "limit": 10})
             assert response.status_code == 200, response.text
             assert response.json()["rows"]
-            explained = client.post("/v3/query", params={"build_id": build["buildId"]}, headers=headers,
+            explained = client.post("/query", params={"build_id": build["buildId"]}, headers=headers,
                 json={"mode": "EXPLAIN", "metricResourceIds": [metric], "limit": 10})
             assert explained.status_code == 200, explained.text
             assert build["execution"]["schema"] in explained.json()["sql"]
@@ -101,10 +101,10 @@ def test_real_environment_isolation(tmp_path):
         assert contents(schemas[1]) == before
         assert query(second) == rows
         assert query(first) == first_rows
-        assert client.get("/v4/builds/" + first["buildId"]).json()["execution"] == snapshots[0]
-        history = client.get("/v4/builds", params={"environmentId": snapshots[0]["environmentId"]}).json()
+        assert client.get("/builds/" + first["buildId"]).json()["execution"] == snapshots[0]
+        history = client.get("/builds", params={"environmentId": snapshots[0]["environmentId"]}).json()
         assert {row["buildId"] for row in history["items"]} == {first["buildId"], third["buildId"]}
-        target = client.get("/v4/deployments/current", params={"repository": repository,
+        target = client.get("/deployments/current", params={"repository": repository,
             "branchName": branch, "environmentId": snapshots[1]["environmentId"]})
         assert target.status_code == 200, target.text
         assert target.json()["activeBuildId"] == second["buildId"]

@@ -11,14 +11,24 @@ import pytest
 from dbt_metricflow_service.application.errors import ServiceError
 from dbt_metricflow_service.runtime.service import Runtime
 from dbt_metricflow_service.settings import Settings
+from tests.test_execution_profiles import secrets as secrets
+from tests.test_execution_profiles import settings as infrastructure
+from tests.test_execution_snapshot_storage import snapshot
 from tests.test_publication_storage import store as store
 
 
 @pytest.fixture
-def realtime(tmp_path):
+def realtime(tmp_path, secrets):
     runtime = Runtime.__new__(Runtime)
-    runtime.settings = Settings(tmp_path, 5, 64, temp_root=tmp_path / "queries", max_result_bytes=1024)
-    build = {"build_id": str(uuid4()), "run_id": str(uuid4()), "output_set_id": str(uuid4())}
+    runtime.settings = Settings(
+        tmp_path, 5, 64, temp_root=tmp_path / "queries", max_result_bytes=1024, **vars(infrastructure())
+    )
+    build = {
+        "build_id": str(uuid4()),
+        "run_id": str(uuid4()),
+        "output_set_id": str(uuid4()),
+        "config_snapshot": snapshot().model_dump(mode="json", by_alias=True),
+    }
     events = []
 
     @contextmanager
@@ -64,10 +74,14 @@ def test_repeated_calls_execute_in_memory_and_remove_workspaces(realtime, monkey
     assert events == ["lock", "unlock", "lock", "unlock"]
 
 
-@pytest.mark.parametrize("failure,code,status", [
-    ("invalid", "INVALID_QUERY", 422), ("connection", "COMMAND_FAILED", 503),
-    ("timeout", "COMMAND_TIMEOUT", 504),
-])
+@pytest.mark.parametrize(
+    "failure,code,status",
+    [
+        ("invalid", "INVALID_QUERY", 422),
+        ("connection", "COMMAND_FAILED", 503),
+        ("timeout", "COMMAND_TIMEOUT", 504),
+    ],
+)
 def test_errors_release_lock_and_do_not_publish_late_results(realtime, monkeypatch, failure, code, status):
     import time
 
@@ -99,11 +113,17 @@ def test_errors_release_lock_and_do_not_publish_late_results(realtime, monkeypat
     assert all(not path.exists() for path in paths)
 
 
-@pytest.mark.parametrize("value,limit,error_code", [
-    ({"x": "中"}, 12, None), ({"x": "中"}, 11, "RESULT_TOO_LARGE"),
-    ({}, 2, None), ({}, 1, "RESULT_TOO_LARGE"),
-    ([], 1024, "RESULT_INVALID"), (None, 1024, "RESULT_INVALID"),
-])
+@pytest.mark.parametrize(
+    "value,limit,error_code",
+    [
+        ({"x": "中"}, 12, None),
+        ({"x": "中"}, 11, "RESULT_TOO_LARGE"),
+        ({}, 2, None),
+        ({}, 1, "RESULT_TOO_LARGE"),
+        ([], 1024, "RESULT_INVALID"),
+        (None, 1024, "RESULT_INVALID"),
+    ],
+)
 def test_realtime_result_size_and_shape(realtime, monkeypatch, value, limit, error_code):
     import dbt_metricflow_service.platform.metricflow as engine
 
@@ -137,15 +157,15 @@ def test_waiting_queries_do_not_hold_cleanup_connections(realtime, monkeypatch):
     assert events == ["lock", "unlock"] * 9
 
 
-def test_real_database_query_path_only_reads_without_persisting_records(store, tmp_path, monkeypatch):
+def test_real_database_query_path_only_reads_without_persisting_records(store, tmp_path, monkeypatch, secrets):
     import dbt_metricflow_service.platform.metricflow as engine
     from tests.test_application_reads import reads
-    from tests.test_v3_catalog_queries import ready_build
+    from tests.test_catalog_queries import ready_build
 
     builds, view, jobs, artifacts = ready_build(store, tmp_path)
     build = builds.store.get(view.build_id)
     runtime = Runtime.__new__(Runtime)
-    runtime.settings = Settings(tmp_path, 5, 64, temp_root=tmp_path / "queries")
+    runtime.settings = Settings(tmp_path, 5, 64, temp_root=tmp_path / "queries", **vars(infrastructure()))
     runtime.jobs, runtime.artifacts = jobs, artifacts
     monkeypatch.setattr(engine, "execute_programmatic", lambda *args: {"rows": [[1]]})
     with reads(store.db) as statements:
@@ -154,6 +174,10 @@ def test_real_database_query_path_only_reads_without_persisting_records(store, t
     assert statements
     assert all(statement.lstrip().upper().startswith("SELECT") for statement in statements)
     with store.db.transaction() as connection:
-        assert connection.exec_driver_sql(
-            "SELECT count(*) FROM runtime_job WHERE parent_run_id=%s", (build["run_id"],),
-        ).scalar_one() == 0
+        assert (
+            connection.exec_driver_sql(
+                "SELECT count(*) FROM runtime_job WHERE parent_run_id=%s",
+                (build["run_id"],),
+            ).scalar_one()
+            == 0
+        )

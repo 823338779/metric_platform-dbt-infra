@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from dbt_metricflow_service.models.builds import BuildRequest
 from dbt_metricflow_service.storage.builds import BuildStore
 from dbt_metricflow_service.storage.records import StoredBuild, StoredDeploymentAttempt
 
@@ -41,7 +40,7 @@ class BuildService:
     def snapshot_view(self, build_id: UUID | str) -> SnapshotBuildView:
         row = self.load(build_id)
         initial = DeploymentStore(self.store.db).initial(row["build_id"])
-        return self.view(row, initial, snapshot=True)
+        return self.view(row, initial)
 
     def cancel_snapshot(self, build_id: UUID | str, caller: str) -> tuple[SnapshotBuildView, int]:
         self.load(build_id)
@@ -52,8 +51,8 @@ class BuildService:
         return self.snapshot_view(build_id), status
 
     def list_by_environment(
-        self, environment_id: UUID, repository: str | None, branch_name: str | None,
-        status: BuildStatus | None, cursor: str | None, limit: int,
+        self, environment_id: UUID, repository: str | None = None, branch_name: str | None = None,
+        status: BuildStatus | None = None, cursor: str | None = None, limit: int = 50,
     ) -> Page[SnapshotBuildView]:
         try:
             rows, following = self.store.list(repository, branch_name, cursor, limit,
@@ -61,49 +60,14 @@ class BuildService:
         except ValueError as error:
             raise ServiceError("INVALID_CURSOR", str(error)) from error
         initials = DeploymentStore(self.store.db).initials([row["build_id"] for row in rows])
-        return Page[SnapshotBuildView](items=[self.view(row, initials.get(row["build_id"]), snapshot=True)
+        return Page[SnapshotBuildView](items=[self.view(row, initials.get(row["build_id"]))
                                               for row in rows], next_cursor=following)
-
-    def submit(self, request: BuildRequest, caller: str) -> BuildView:
-        try:
-            row = self.store.accept(request, caller, self.toolchain, self.timeout)
-        except StoreConflict as error:
-            raise ServiceError("IDEMPOTENCY_CONFLICT", str(error), 409) from error
-        except ValueError as error:
-            raise ServiceError("INVALID_BINDING", str(error)) from error
-        return self.get(row["build_id"])
-
-    def get(self, build_id: UUID | str) -> BuildView:
-        row = self.load(build_id)
-        initial = DeploymentStore(self.store.db).initial(row["build_id"])
-        return self.view(row, initial)
 
     def load(self, build_id: UUID | str) -> StoredBuild:
         row = self.store.get(str(build_id))
         if row is None:
             raise ServiceError("BUILD_NOT_FOUND", "build does not exist", 404)
         return row
-
-    def cancel(self, build_id: UUID | str, caller: str) -> tuple[BuildView, int]:
-        # caller 已由入口验证；取消没有新的外部任务身份。
-        self.get(build_id)
-        try:
-            status = self.store.cancel(str(build_id))
-        except StoreConflict as error:
-            raise ServiceError("BUILD_TERMINAL", str(error), 409, build_id=str(build_id)) from error
-        return self.get(build_id), status
-
-    def list(
-        self, repository: str, branch_name: str | None = None, cursor: str | None = None, limit: int = 50
-    ) -> Page[BuildView]:
-        try:
-            rows, next_cursor = self.store.list(repository, branch_name, cursor, limit)
-        except ValueError as error:
-            raise ServiceError("INVALID_CURSOR", str(error)) from error
-        initials = DeploymentStore(self.store.db).initials([row["build_id"] for row in rows])
-        return Page[BuildView](
-            items=[self.view(row, initials.get(row["build_id"])) for row in rows], next_cursor=next_cursor,
-        )
 
     def logs(self, build_id: UUID | str, cursor: str | None=None) -> LogPage:
         self.load(build_id)
@@ -129,17 +93,13 @@ class BuildService:
             return MISSING
         if row["run_lifecycle"] in {"CLEANED", "CLEANING"}:
             return REMOVED
-        if (
-            row["toolchain_version"] != self.toolchain
-            or row.get("protocol_version", 3) == 3 and self.config_version is not None
-            and row["config_version"] != self.config_version
-        ):
+        if row["toolchain_version"] != self.toolchain:
             return ENVIRONMENT_MISSING
         return None
 
     def view(
-        self, row: StoredBuild, initial: StoredDeploymentAttempt | None, *, snapshot: bool = False,
-    ) -> BuildView | SnapshotBuildView:
+        self, row: StoredBuild, initial: StoredDeploymentAttempt | None,
+    ) -> SnapshotBuildView:
         # 目录能力与物理执行能力独立；响应组装不再隐含数据库读取。
         catalog = row["build_status"] == BuildStatus.SUCCEEDED and bool(row["output_set_id"])
         reason = self.query_unavailable_reason(row)
@@ -160,12 +120,5 @@ class BuildService:
             if row["error_code"]
             else None,
         )
-        if snapshot:
-            legacy = row.get("protocol_version", 3) == 3
-            fields.update(environment=None, execution_binding=None,
-                          legacy_environment=row["environment"] if legacy else None,
-                          execution=None if legacy else ExecutionSnapshot.model_validate(row["config_snapshot"]))
-            return SnapshotBuildView(**fields)
-        if row.get("protocol_version", 3) != 3:
-            raise ServiceError("PROTOCOL_VERSION_MISMATCH", "use v4 for this build metadata", 409)
-        return BuildView(**fields)
+        fields["execution"] = ExecutionSnapshot.model_validate(row["config_snapshot"])
+        return SnapshotBuildView(**fields)

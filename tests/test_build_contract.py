@@ -15,31 +15,32 @@ LEGACY_FIELDS = ("projectId", "branchId", "workspaceId", "projectSubdir", "relea
 
 
 def build_body(**changes):
-    # 固定请求样本不含连接秘密或 Agent 业务对象。
+    import os
+    from uuid import NAMESPACE_URL, uuid5
+
+    from tests.test_execution_snapshot_storage import snapshot
+
+    # 每个测试独立物理环境；同一用例内所有重试/并发仍使用相同环境。
+    identity = uuid5(NAMESPACE_URL, os.environ.get("PYTEST_CURRENT_TEST", "fixture").split(" (")[0])
+    execution = snapshot(environmentId=str(identity), configVersion=1, schema="test_" + identity.hex)
     return {
-        "repository": REPOSITORY,
-        "branchName": FEATURE,
-        "commitSha": SHA,
-        "environment": PREVIEW,
-        "executionBinding": "warehouse",
-        "configVersion": "1",
-        "schemaName": "analytics",
-        "idempotencyKey": "build-001",
-        **changes,
+        "repository": REPOSITORY, "branchName": FEATURE, "commitSha": SHA,
+        "execution": execution.model_dump(mode="json", by_alias=True),
+        "idempotencyKey": "build-001", **changes,
     }
 
 
 def test_build_defaults_and_full_sha():
-    from dbt_metricflow_service.models.builds import BuildRequest
+    from dbt_metricflow_service.models.execution import SnapshotBuildRequest as BuildRequest
 
     assert BuildRequest.model_validate(build_body()).deployment_policy == NONE
     assert BuildRequest.model_validate(build_body(commitSha="b" * 64)).commit_sha == "b" * 64
-    assert BuildRequest.model_validate(build_body(branchName=None)).branch_name is None
+    assert BuildRequest.model_validate(build_body(branchName=MAIN)).branch_name == MAIN
 
 
 @pytest.mark.parametrize("field", LEGACY_FIELDS)
 def test_legacy_fields_are_rejected(field):
-    from dbt_metricflow_service.models.builds import BuildRequest
+    from dbt_metricflow_service.models.execution import SnapshotBuildRequest as BuildRequest
 
     with pytest.raises(ValidationError):
         BuildRequest.model_validate(build_body(**{field: "old"}))
@@ -51,7 +52,7 @@ def test_legacy_fields_are_rejected(field):
         {"commitSha": "abc"},
         {"branchName": "refs/heads/feature/a"},
         {"branchName": "../main"},
-        {"branchName": MAIN},
+        {"executionBinding": "warehouse"},
         {"environment": PRODUCTION},
         {"environment": PRODUCTION, "branchName": MAIN, "commitSha": None},
         {"branchName": None, "deploymentPolicy": ON_SUCCESS},
@@ -61,7 +62,7 @@ def test_legacy_fields_are_rejected(field):
     ],
 )
 def test_invalid_build_inputs(changes):
-    from dbt_metricflow_service.models.builds import BuildRequest
+    from dbt_metricflow_service.models.execution import SnapshotBuildRequest as BuildRequest
 
     with pytest.raises(ValidationError):
         BuildRequest.model_validate(build_body(**changes))
@@ -98,12 +99,12 @@ def test_exchange_fixture_matches_models():
     import json
     from pathlib import Path
 
-    from dbt_metricflow_service.models import builds, catalog, deployments, queries
+    from dbt_metricflow_service.models import builds, catalog, deployments, execution, queries
 
-    fixture = json.loads((Path(__file__).parent / "fixtures/v3/contract.json").read_text(encoding="utf-8"))
+    fixture = json.loads((Path(__file__).parent / "fixtures/contract.json").read_text(encoding="utf-8"))
     registry = {
         name: model
-        for module in (builds, catalog, deployments, queries)
+        for module in (builds, catalog, deployments, queries, execution)
         for name, model in vars(module).items()
         if isinstance(model, type) and hasattr(model, "model_validate")
     }
@@ -114,4 +115,4 @@ def test_exchange_fixture_matches_models():
         )
     for body in fixture["invalidBuilds"]:
         with pytest.raises(ValidationError):
-            builds.BuildRequest.model_validate(body)
+            execution.SnapshotBuildRequest.model_validate(body)

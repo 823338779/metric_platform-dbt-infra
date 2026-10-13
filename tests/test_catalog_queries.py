@@ -8,14 +8,14 @@ import pytest
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.jobs import JobStore
 from tests.synchronous_queries import inline_executor
+from tests.test_build_acceptance import CALLER, request, service
 from tests.test_publication_storage import store as store
-from tests.test_v3_build_acceptance import CALLER, request, service
 
 
 def ready_build(store, tmp_path, before_finish=None):
     app = service(store)
     app.toolchain = uuid4().hex
-    build = app.submit(request(branchName="feature/" + uuid4().hex), CALLER)
+    build = app.submit_snapshot(request(branchName="feature/" + uuid4().hex), CALLER)
     jobs = JobStore(store.db)
     run = app.store.get(build.build_id)["run_id"]
     job = jobs.claim(str(uuid4()), toolchain_version=app.toolchain, kinds=["BUILD_RUN"])
@@ -93,12 +93,12 @@ def test_completion_rejects_output_from_other_source(store, tmp_path):
 
 def test_cancel_before_finish_has_one_terminal_state(store, tmp_path):
     def cancel(app, build, job, output):
-        assert app.cancel(build.build_id, CALLER)[1] == 202
+        assert app.cancel_snapshot(build.build_id, CALLER)[1] == 202
 
     app, build, jobs, artifacts = ready_build(store, tmp_path, cancel)
-    assert app.get(build.build_id).build_status == "CANCELLED"
-    assert app.get(build.build_id).catalog_available is False
-    assert app.cancel(build.build_id, CALLER)[1] == 200
+    assert app.snapshot_view(build.build_id).build_status == "CANCELLED"
+    assert app.snapshot_view(build.build_id).catalog_available is False
+    assert app.cancel_snapshot(build.build_id, CALLER)[1] == 200
 
 
 def test_catalog_survives_physical_removal(store, tmp_path):
@@ -111,13 +111,13 @@ def test_catalog_survives_physical_removal(store, tmp_path):
         )
     catalogs = CatalogService(app.store, artifacts)
     assert catalogs.list(build.build_id).items[0].resource_id == "metric.revenue"
-    assert app.get(build.build_id).catalog_available
-    assert not app.get(build.build_id).query_available
+    assert app.snapshot_view(build.build_id).catalog_available
+    assert not app.snapshot_view(build.build_id).query_available
 
 
 @pytest.mark.parametrize("lifecycle", ["CLEANING", "CLEANED"])
 def test_build_retry_preserves_physical_availability(store, tmp_path, lifecycle):
-    from dbt_metricflow_service.models.builds import BuildRequest
+    from dbt_metricflow_service.models.execution import SnapshotBuildRequest as BuildRequest
 
     app, build, jobs, artifacts = ready_build(store, tmp_path)
     row = app.store.get(build.build_id)
@@ -125,12 +125,12 @@ def test_build_retry_preserves_physical_availability(store, tmp_path, lifecycle)
         connection.exec_driver_sql(
             "UPDATE runtime_job SET run_lifecycle=%s WHERE job_id=%s", (lifecycle, row["run_id"]),
         )
-    retry = app.submit(BuildRequest.model_validate(row["request_json"]), CALLER)
+    retry = app.submit_snapshot(BuildRequest.model_validate(row["request_json"]), CALLER)
     assert retry.build_id == build.build_id
     assert retry.catalog_available
     assert not retry.query_available
     assert retry.query_unavailable_reason == "PHYSICAL_OBJECTS_REMOVED"
-    assert retry == app.get(build.build_id)
+    assert retry == app.snapshot_view(build.build_id)
 
 
 def test_cleanup_completion_preserves_catalog_and_source(store, tmp_path):
@@ -142,8 +142,8 @@ def test_cleanup_completion_preserves_catalog_and_source(store, tmp_path):
     cleanup = jobs.claim(str(uuid4()), toolchain_version=app.toolchain, kinds=["RUN_CLEANUP"])
     assert jobs.finish(cleanup["job_id"], cleanup["lease_token"])
     assert CatalogService(app.store, artifacts).list(build.build_id).items
-    assert app.get(build.build_id).catalog_available
-    assert app.get(build.build_id).query_unavailable_reason == "PHYSICAL_OBJECTS_REMOVED"
+    assert app.snapshot_view(build.build_id).catalog_available
+    assert app.snapshot_view(build.build_id).query_unavailable_reason == "PHYSICAL_OBJECTS_REMOVED"
 
 
 def test_option_scope_includes_build_and_metric_set(store, tmp_path):

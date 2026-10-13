@@ -7,7 +7,6 @@ from typing import cast
 
 from dbt_metricflow_service.application.builds import BuildService
 from dbt_metricflow_service.application.catalog import CatalogService
-from dbt_metricflow_service.models.builds import Environment
 from dbt_metricflow_service.models.deployments import DeploymentRequest
 from dbt_metricflow_service.storage.deployments import DeploymentStore
 from dbt_metricflow_service.storage.records import StoredBuild, StoredDeploymentAttempt, StoredDeploymentTarget
@@ -17,8 +16,6 @@ from ..models.deployments import (
     DeploymentAttemptView,
     DeploymentKey,
     DeploymentTargetView,
-    SnapshotDeploymentKey,
-    SnapshotDeploymentTargetView,
 )
 from ..storage.builds import digest
 from ..storage.deployments import TERMINAL, attempt_view
@@ -60,16 +57,13 @@ class DeploymentService:
             raise ServiceError("BUILD_NOT_READY", "a successful build with source evidence is required", 409)
         if build["branch_name"] and request.branch_name != build["branch_name"]:
             raise ServiceError("SOURCE_MISMATCH", "deployment branch differs from build source")
-        if (build.get("protocol_version", 3) == 3
-                and ((build["environment"] == "PRODUCTION") != (request.branch_name == "main"))):
-            raise ServiceError("INVALID_TARGET", "branch and environment do not match")
         try:
             return attempt_view(self.store.submit(build, caller, request, fingerprint))
         except StoreConflict as error:
             raise ServiceError("TARGET_CONFLICT", str(error), 409) from error
 
     def current(self, key: DeploymentKey) -> DeploymentTargetView:
-        model = SnapshotDeploymentTargetView if isinstance(key, SnapshotDeploymentKey) else DeploymentTargetView
+        model = DeploymentTargetView
         target = self.store.current(key)
         if target is None:
             return model(**key.model_dump())
@@ -136,20 +130,6 @@ class DeploymentService:
             return attempt_view(
                 cast(StoredDeploymentAttempt, self.store.settle(key, generation, "STALE", "SOURCE_HEAD_CHANGED"))
             )
-        # 正式目标不能向现有版本的祖先或分叉切换；无法证明则等待核实。
-        if current.active_commit_sha and current.active_commit_sha != build["commit_sha"]:
-            if self.ancestry_reader is None:
-                return attempt_view(attempt)
-            try:
-                forward = self.ancestry_reader(
-                    key.repository, current.active_commit_sha, cast(str, build["commit_sha"])
-                )
-            except (ValueError, OSError):
-                return attempt_view(attempt)
-            if not forward and key.environment == "PRODUCTION":
-                return attempt_view(
-                    cast(StoredDeploymentAttempt, self.store.settle(key, generation, "STALE", "NON_FORWARD_SOURCE"))
-                )
         return attempt_view(
             cast(StoredDeploymentAttempt, self.store.settle(
                 key, generation, "DEPLOYED", expected_version=current.version, head=current.observed_head_sha
@@ -159,14 +139,14 @@ class DeploymentService:
     def reconcile_pending(self) -> None:
         # 调度由 runtime 调用；每次有界扫描，重启后仍读取同一持久意图。
         for attempt in self.store.pending():
-            model = DeploymentKey if attempt["environment"] in ("PREVIEW", "PRODUCTION") else SnapshotDeploymentKey
+            model = DeploymentKey
             key = model(**{name: attempt[name] for name in DeploymentKey.model_fields})
             self.reconcile(key, attempt["generation"])
 
     def list(
         self,
         repository: str,
-        environment: Environment | None = None,
+        environment: str | None = None,
         branch_name: str | None = None,
         cursor: str | None = None,
         limit: int = 50,

@@ -11,18 +11,18 @@ from sqlalchemy import event
 from dbt_metricflow_service.models.deployments import DeploymentKey
 from dbt_metricflow_service.storage.deployments import DeploymentStore
 from tests.schema_helpers import isolated_database
+from tests.test_build_acceptance import CALLER, request, service
+from tests.test_deployments import deployment_service
 from tests.test_publication_storage import store as store
-from tests.test_v3_build_acceptance import CALLER, request, service
-from tests.test_v3_deployments import deployment_service
 
 
 @pytest.mark.parametrize("head", [None, "a" * 40])
 def test_observation_does_not_overwrite_concurrent_deployment(store, head):
     app = service(store)
     branch = "feature/" + uuid4().hex
-    first = app.submit(request(branchName=branch, deploymentPolicy="ON_SUCCESS"), CALLER)
-    second = app.submit(request(branchName=branch, commitSha="b" * 40), CALLER)
-    key = DeploymentKey(repository=first.repository, environment=first.environment, branchName=branch)
+    first = app.submit_snapshot(request(branchName=branch, deploymentPolicy="ON_SUCCESS"), CALLER)
+    second = app.submit_snapshot(request(branchName=branch, commitSha="b" * 40), CALLER)
+    key = DeploymentKey(repository=first.repository, environment=str(first.execution.environment_id), branchName=branch)
     update = """UPDATE engine_deployment_target SET active_build_id=%s,version=version+1,
         observed_head_sha=%s,source_state='MATCHED' WHERE repository=%s AND branch_name=%s"""
     with store.db.transaction() as connection:
@@ -47,7 +47,7 @@ def test_pending_scan_reaches_beyond_first_unresolved_batch():
         db.initialize()
         app = service(SimpleNamespace(db=db))
         for _ in range(101):
-            app.submit(request(branchName="feature/" + uuid4().hex, deploymentPolicy="ON_SUCCESS"), CALLER)
+            app.submit_snapshot(request(branchName="feature/" + uuid4().hex, deploymentPolicy="ON_SUCCESS"), CALLER)
         deployments = DeploymentStore(db)
         first = deployments.pending()
         second = deployments.pending()
@@ -58,8 +58,8 @@ def test_pending_scan_reaches_beyond_first_unresolved_batch():
 def test_build_acceptance_and_observation_have_consistent_lock_order(store, monkeypatch):
     app = service(store)
     branch = "feature/" + uuid4().hex
-    first = app.submit(request(branchName=branch, deploymentPolicy="ON_SUCCESS"), CALLER)
-    key = DeploymentKey(repository=first.repository, environment=first.environment, branchName=branch)
+    first = app.submit_snapshot(request(branchName=branch, deploymentPolicy="ON_SUCCESS"), CALLER)
+    key = DeploymentKey(repository=first.repository, environment=str(first.execution.environment_id), branchName=branch)
     deploy = deployment_service(store, first.commit_sha)
     build_inserted, observer_started, observer_locked = Event(), Event(), Event()
     original = DeploymentStore.accept_in_transaction
@@ -72,8 +72,12 @@ def test_build_acceptance_and_observation_have_consistent_lock_order(store, monk
         return original(self, *args, **kwargs)
 
     def after_statement(conn, cursor, statement, parameters, context, executemany):
-        if (current_thread().name.startswith("observer") and statement.lstrip().startswith("SELECT")
-                and "engine_deployment_target" in statement and "FOR UPDATE" in statement):
+        if (
+            current_thread().name.startswith("observer")
+            and statement.lstrip().startswith("SELECT")
+            and "engine_deployment_target" in statement
+            and "FOR UPDATE" in statement
+        ):
             observer_locked.set()
 
     def observe():
@@ -86,7 +90,9 @@ def test_build_acceptance_and_observation_have_consistent_lock_order(store, monk
     try:
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="builder") as builders:
             with ThreadPoolExecutor(max_workers=1, thread_name_prefix="observer") as observers:
-                built = builders.submit(app.submit, request(branchName=branch, deploymentPolicy="ON_SUCCESS"), CALLER)
+                built = builders.submit(
+                    app.submit_snapshot, request(branchName=branch, deploymentPolicy="ON_SUCCESS"), CALLER
+                )
                 observed = observers.submit(observe)
                 assert built.result(timeout=8).initial_deployment["generation"] == 2
                 assert observed.result(timeout=8).branch_name == branch
@@ -96,7 +102,7 @@ def test_build_acceptance_and_observation_have_consistent_lock_order(store, monk
 
 def test_realtime_query_lock_blocks_cleanup_and_releases_without_records(store, tmp_path):
     from dbt_metricflow_service.storage.jobs import CleanupBlocked
-    from tests.test_v3_catalog_queries import ready_build
+    from tests.test_catalog_queries import ready_build
 
     app, build, jobs, artifacts = ready_build(store, tmp_path)
     run = app.store.get(build.build_id)["run_id"]
@@ -107,9 +113,13 @@ def test_realtime_query_lock_blocks_cleanup_and_releases_without_records(store, 
         # 同一构建可有多个实时读取者，不需要插入子任务。
         with jobs.query_run(run):
             with store.db.transaction() as connection:
-                assert connection.exec_driver_sql(
-                    "SELECT count(*) FROM runtime_job WHERE parent_run_id=%s", (run,),
-                ).scalar_one() == 0
+                assert (
+                    connection.exec_driver_sql(
+                        "SELECT count(*) FROM runtime_job WHERE parent_run_id=%s",
+                        (run,),
+                    ).scalar_one()
+                    == 0
+                )
     jobs.reserve_cleanup(run)
     with pytest.raises(CleanupBlocked):
         with jobs.query_run(run):
@@ -117,7 +127,7 @@ def test_realtime_query_lock_blocks_cleanup_and_releases_without_records(store, 
 
 
 def test_realtime_query_lock_releases_after_failure(store, tmp_path):
-    from tests.test_v3_catalog_queries import ready_build
+    from tests.test_catalog_queries import ready_build
 
     app, build, jobs, artifacts = ready_build(store, tmp_path)
     run = app.store.get(build.build_id)["run_id"]
@@ -131,15 +141,22 @@ def test_failed_new_intent_fences_inflight_old_switch(store, tmp_path, monkeypat
     from dbt_metricflow_service.application.catalog import CatalogService
     from dbt_metricflow_service.application.deployments import DeploymentService
     from dbt_metricflow_service.models.deployments import DeploymentRequest
-    from tests.test_v3_catalog_queries import ready_build
+    from tests.test_catalog_queries import ready_build
 
     app, build, jobs, artifacts = ready_build(store, tmp_path)
     deployments = DeploymentStore(store.db)
-    deploy = DeploymentService(deployments, lambda *_: build.commit_sha,
-                               builds=app, catalogs=CatalogService(app.store, artifacts))
-    key = DeploymentKey(repository=build.repository, environment=build.environment, branchName=build.branch_name)
-    old = deploy.submit(DeploymentRequest(buildId=build.build_id, branchName=build.branch_name,
-                                         expectedTargetVersion=0, idempotencyKey=uuid4().hex), CALLER)
+    deploy = DeploymentService(
+        deployments, lambda *_: build.commit_sha, builds=app, catalogs=CatalogService(app.store, artifacts)
+    )
+    key = DeploymentKey(
+        repository=build.repository, environment=str(build.execution.environment_id), branchName=build.branch_name
+    )
+    old = deploy.submit(
+        DeploymentRequest(
+            buildId=build.build_id, branchName=build.branch_name, expectedTargetVersion=0, idempotencyKey=uuid4().hex
+        ),
+        CALLER,
+    )
     switching, continue_switch = Event(), Event()
     settle = deployments.settle
 
@@ -153,10 +170,11 @@ def test_failed_new_intent_fences_inflight_old_switch(store, tmp_path, monkeypat
         old_switch = pool.submit(deploy.reconcile, key, old.generation)
         try:
             assert switching.wait(5)
-            newer = app.submit(request(branchName=build.branch_name, deploymentPolicy="ON_SUCCESS"), CALLER)
+            newer = app.submit_snapshot(request(branchName=build.branch_name, deploymentPolicy="ON_SUCCESS"), CALLER)
             with store.db.fact_transaction() as connection:
-                connection.exec_driver_sql("UPDATE runtime_job SET status='FAILED' WHERE job_id=%s",
-                                           (app.store.get(newer.build_id)["run_id"],))
+                connection.exec_driver_sql(
+                    "UPDATE runtime_job SET status='FAILED' WHERE job_id=%s", (app.store.get(newer.build_id)["run_id"],)
+                )
         finally:
             continue_switch.set()
         assert old_switch.result().deployment_status == "STALE"

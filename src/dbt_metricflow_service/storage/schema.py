@@ -10,8 +10,7 @@ SCHEMA_FILE = Path(__file__).with_suffix(".sql")
 REQUIRED_TABLES = frozenset(Base.metadata.tables)
 NOT_INITIALIZED = "Runtime database is not initialized; run dbt-service-admin init-db on an empty schema"
 CURRENT_SCHEMA = "SELECT current_schema()"
-MIGRATIONS = Path(__file__).parent / "migrations"
-UPGRADE_REQUIRED = "Runtime database requires dbt-service-admin upgrade-db"
+SCHEMA_MISMATCH = "Runtime database schema is incompatible; initialize a new empty schema"
 INITIALIZATION_LOCK = "SELECT pg_advisory_xact_lock(609302026)"
 
 
@@ -25,18 +24,8 @@ def check(connection: Connection) -> None:
     if _tables(connection) != REQUIRED_TABLES:
         raise RuntimeError(NOT_INITIALIZED)
     columns = {column["name"] for column in inspect(connection).get_columns("engine_build")}
-    if "protocol_version" not in columns:
-        raise RuntimeError(UPGRADE_REQUIRED)
-
-
-def upgrade(connection: Connection) -> None:
-    """显式、事务化增量升级；不重建已有事实表。"""
-    connection.exec_driver_sql(INITIALIZATION_LOCK)
-    if _tables(connection) != REQUIRED_TABLES:
-        raise RuntimeError(NOT_INITIALIZED)
-    for migration in sorted(MIGRATIONS.glob("*.sql")):
-        connection.exec_driver_sql(migration.read_text(encoding="utf-8"), execution_options={"no_parameters": True})
-    check(connection)
+    if not {"environment_id", "physical_target_key"}.issubset(columns) or "execution_binding" in columns:
+        raise RuntimeError(SCHEMA_MISMATCH)
 
 
 def initialize(connection: Connection) -> None:
@@ -48,4 +37,4 @@ def initialize(connection: Connection) -> None:
     if existing:
         raise RuntimeError(NOT_INITIALIZED)
     connection.exec_driver_sql(SCHEMA_FILE.read_text(encoding="utf-8"), execution_options={"no_parameters": True})
-    upgrade(connection)
+    check(connection)

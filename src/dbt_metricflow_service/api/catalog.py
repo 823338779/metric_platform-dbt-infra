@@ -13,7 +13,7 @@ from ..models.catalog import CatalogPage, ResourceLineageView, ResourceNativeVie
 
 
 def router(service: CatalogService) -> APIRouter:
-    routes = APIRouter(prefix="/v3/builds")
+    routes = APIRouter(prefix="/builds")
 
     @routes.get("/{build_id}/catalog", response_model=CatalogPage)
     def catalog(

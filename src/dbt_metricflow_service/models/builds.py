@@ -5,10 +5,10 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Generic, Self, TypeVar
+from typing import Any, Generic, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
 SHA_PATTERN = r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$"
@@ -25,11 +25,6 @@ class Contract(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True, alias_generator=to_camel)
 
 
-class Environment(StrEnum):
-    PREVIEW = "PREVIEW"
-    PRODUCTION = "PRODUCTION"
-
-
 class DeploymentPolicy(StrEnum):
     NONE = "NONE"
     ON_SUCCESS = "ON_SUCCESS"
@@ -42,14 +37,6 @@ class BuildStatus(StrEnum):
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
     OUTCOME_UNKNOWN = "OUTCOME_UNKNOWN"
-
-
-class ConfigSnapshot(Contract):
-    """只保存可公开审计的执行语义，密码由 profile 环境加载。"""
-
-    profile_binding_id: str = Field(min_length=1, description="受控 profile 的 target 引用")
-    environments: list[Environment] = Field(min_length=1, description="允许使用的执行环境")
-    business_timezone: str = Field(default="UTC", description="构建固定的业务时区")
 
 
 def validate_branch(value: str | None) -> str | None:
@@ -77,42 +64,6 @@ class Origin(Contract):
     operation_id: str | None = Field(default=None, max_length=256, description="调用方原样提供的关联标签")
 
 
-class BuildRequest(Contract):
-    repository: str = Field(min_length=1, max_length=2048, description="受控配置中的规范仓库地址")
-    branch_name: str | None = Field(default=None, description="可选来源分支短名")
-    commit_sha: str | None = Field(default=None, pattern=SHA_PATTERN, description="固定远端提交完整 SHA")
-    environment: Environment = Field(description="构建的物理执行环境")
-    execution_binding: str = Field(min_length=1, max_length=128, description="可复用执行配置引用")
-    config_version: str = Field(min_length=1, max_length=128, description="不可变语义配置版本")
-    schema_name: str = Field(description="调用方必填固定 schema；同名物理表由后续构建覆盖")
-    deployment_policy: DeploymentPolicy = Field(default=DeploymentPolicy.NONE, description="是否附带成功部署意图")
-    idempotency_key: str = Field(min_length=1, max_length=256, description="调用方持久化的一次受理键")
-    origin: Origin | None = Field(default=None, description="无业务语义的追溯标签")
-
-    @field_validator("schema_name")
-    @classmethod
-    def valid_schema(cls, value: str) -> str:
-        if not re.fullmatch(r"[a-z][a-z0-9_]{0,255}", value):
-            raise ValueError("invalid schemaName")
-        return value
-
-    _branch = field_validator("branch_name")(validate_branch)
-
-    @model_validator(mode="after")
-    def fixed_source(self) -> Self:
-        # 这里只检查协议组合；仓库准入与配置可用性由应用用例负责。
-        if not self.branch_name and not self.commit_sha:
-            raise ValueError("branchName or commitSha is required")
-        if self.deployment_policy == DeploymentPolicy.ON_SUCCESS and not self.branch_name:
-            raise ValueError("deployment requires branchName")
-        if self.environment == Environment.PRODUCTION:
-            if self.branch_name != MAIN_BRANCH or not self.commit_sha:
-                raise ValueError("production requires main and an explicit commitSha")
-        elif self.branch_name == MAIN_BRANCH:
-            raise ValueError("preview cannot target main")
-        return self
-
-
 class ErrorView(Contract):
     code: str = Field(description="稳定错误码")
     message: str = Field(description="不含凭据或本地路径的诊断")
@@ -127,8 +78,6 @@ class BuildView(Contract):
     branch_name: str | None = Field(description="请求来源分支")
     requested_commit_sha: str | None = Field(description="受理时显式指定的 SHA")
     commit_sha: str | None = Field(description="首次解析后固定的实际 SHA")
-    environment: Environment = Field(description="执行环境")
-    execution_binding: str = Field(description="执行配置引用")
     config_version: str = Field(description="固定配置版本")
     toolchain_version: str = Field(description="固定工具链版本")
     build_status: BuildStatus = Field(description="构建状态，不代表部署状态")
