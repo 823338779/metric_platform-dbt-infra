@@ -11,12 +11,16 @@ import pytest
 import yaml
 from resource_helpers import make_resource_project
 
+from dbt_metricflow_service.models.native import NativeNode
 from dbt_metricflow_service.platform.build import (
     execute_publication,
     prepare_publication_project,
     validate_bound_manifest,
     validate_readonly_sql,
 )
+from dbt_metricflow_service.platform.models import EngineResult
+from dbt_metricflow_service.storage.records import ArtifactValidation, JobRequest
+from tests.data_helpers import leased_job
 
 
 @pytest.fixture
@@ -30,9 +34,8 @@ def publication_executor(tmp_path):
     (project / "dbt_project.yml").write_text("name: sample\nversion: '1.0'\n", encoding="utf-8")
     target = project / "target"
     target.mkdir()
-    job = {"job_id": str(uuid4()), "attempt_id": str(uuid4()), "project_id": "sample",
-           "request_json": {"buildId": str(uuid4())}, "schema_name": "candidate",
-           "profile_binding_id": "test", "config_version": "1", "toolchain_version": "1"}
+    job = leased_job(project_id="sample", request_json=JobRequest(build_id=str(uuid4())),
+                     schema_name="candidate", profile_binding_id="test", toolchain_version="1")
     alias = "orders"
     manifest = {"metadata": {"dbt_schema_version": MANIFEST_SCHEMA, "adapter_type": "postgres"},
                 "nodes": {"model.sample.orders": {"resource_type": "model", "name": "orders",
@@ -56,7 +59,7 @@ def publication_executor(tmp_path):
             (target / "run_results.json").write_text('{"results": []}')
 
     async def metricflow(*_args):
-        return {"queryCapability": True}
+        return EngineResult(query_capability=True)
 
     def capture(_project_id, _project, **kwargs):
         captured.update(kwargs)
@@ -73,13 +76,13 @@ async def test_publication_persists_catalog_file_and_minimum_validation_flags(pu
     await execute_publication(executor, job, project.parent, project)
 
     catalog = json.loads((project / "target/published_catalog.json").read_text(encoding="utf-8"))
-    assert catalog["releaseId"] == job["request_json"]["buildId"]
+    assert catalog["releaseId"] == job.request_json.build_id
     assert catalog["relationBindings"][0]["mode"] == "BUILT"
     assert not (project / "target/publication_evidence.json").exists()
-    assert captured["metadata"]["validation_json"] == {
-        "allTestsPassed": True, "representativeQueryPassed": True, "relationsVerified": True,
-    }
-    assert "catalog_json" not in captured["metadata"]
+    assert captured["metadata"].validation_json == ArtifactValidation(
+        all_tests_passed=True, representative_query_passed=True, relations_verified=True,
+    )
+    assert not hasattr(captured["metadata"], "catalog_json")
 
 
 @pytest.mark.parametrize("missing", ["model.sample.orders", "test.sample.orders"])
@@ -110,7 +113,7 @@ def test_only_configured_freshness_thresholds_require_execution(freshness, expec
     """原生 manifest 的空阈值对象不是 freshness 规则，零阈值则是有效规则。"""
     from dbt_metricflow_service.platform.build import requires_source_freshness
 
-    assert requires_source_freshness({"freshness": freshness}) is expected
+    assert requires_source_freshness(NativeNode.model_validate({"freshness": freshness})) is expected
 
 
 def test_manifest_cannot_escape_fixed_schema(tmp_path):

@@ -52,7 +52,7 @@ def test_pending_scan_reaches_beyond_first_unresolved_batch():
         first = deployments.pending()
         second = deployments.pending()
         assert len(first) == len(second) == 100
-        assert len({row["build_id"] for row in first + second}) == 101
+        assert len({row.build_id for row in first + second}) == 101
 
 
 def test_build_acceptance_and_observation_have_consistent_lock_order(store, monkeypatch):
@@ -94,7 +94,7 @@ def test_build_acceptance_and_observation_have_consistent_lock_order(store, monk
                     app.submit_snapshot, request(branchName=branch, deploymentPolicy="ON_SUCCESS"), CALLER
                 )
                 observed = observers.submit(observe)
-                assert built.result(timeout=8).initial_deployment["generation"] == 2
+                assert built.result(timeout=8).initial_deployment.generation == 2
                 assert observed.result(timeout=8).branch_name == branch
     finally:
         event.remove(store.db.engine, "after_cursor_execute", after_statement)
@@ -105,9 +105,9 @@ def test_realtime_query_lock_blocks_cleanup_and_releases_without_records(store, 
     from tests.test_catalog_queries import ready_build
 
     app, build, jobs, artifacts = ready_build(store, tmp_path)
-    run = app.store.get(build.build_id)["run_id"]
+    run = app.store.get(build.build_id).run_id
     with jobs.query_run(run) as parent:
-        assert parent["job_id"] == run
+        assert parent.job_id == run
         with pytest.raises(CleanupBlocked):
             jobs.reserve_cleanup(run)
         # 同一构建可有多个实时读取者，不需要插入子任务。
@@ -130,11 +130,11 @@ def test_realtime_query_lock_releases_after_failure(store, tmp_path):
     from tests.test_catalog_queries import ready_build
 
     app, build, jobs, artifacts = ready_build(store, tmp_path)
-    run = app.store.get(build.build_id)["run_id"]
+    run = app.store.get(build.build_id).run_id
     with pytest.raises(RuntimeError):
         with jobs.query_run(run):
             raise RuntimeError("engine failed")
-    assert jobs.reserve_cleanup(run)["kind"] == "RUN_CLEANUP"
+    assert jobs.reserve_cleanup(run).kind == "RUN_CLEANUP"
 
 
 def test_failed_new_intent_fences_inflight_old_switch(store, tmp_path, monkeypatch):
@@ -173,10 +173,10 @@ def test_failed_new_intent_fences_inflight_old_switch(store, tmp_path, monkeypat
             newer = app.submit_snapshot(request(branchName=build.branch_name, deploymentPolicy="ON_SUCCESS"), CALLER)
             with store.db.fact_transaction() as connection:
                 connection.exec_driver_sql(
-                    "UPDATE runtime_job SET status='FAILED' WHERE job_id=%s", (app.store.get(newer.build_id)["run_id"],)
+                    "UPDATE runtime_job SET status='FAILED' WHERE job_id=%s", (app.store.get(newer.build_id).run_id,)
                 )
         finally:
             continue_switch.set()
         assert old_switch.result().deployment_status == "STALE"
-    assert deploy.reconcile(key, newer.initial_deployment["generation"]).deployment_status == "FAILED"
+    assert deploy.reconcile(key, newer.initial_deployment.generation).deployment_status == "FAILED"
     assert deploy.current(key).active_build_id is None

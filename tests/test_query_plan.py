@@ -4,18 +4,21 @@ import pytest
 
 from dbt_metricflow_service.application.errors import ServiceError
 from dbt_metricflow_service.application.query_plan import compile_query
+from dbt_metricflow_service.models.payloads import DimensionOption
 from dbt_metricflow_service.models.queries import QueryRequest
 from dbt_metricflow_service.platform.dimensions import DimensionBinding, map_available_dimensions
+from dbt_metricflow_service.platform.models import EngineResult
+from tests.catalog_helpers import catalog, resource
 
 RUN = "00000000-0000-0000-0000-000000000001"
 RESOURCES = {
-    "metric.revenue": {"name": "revenue"},
-    "dataset.orders": {"capabilities": ["PREVIEW"]},
+    "metric.revenue": resource("metric.revenue", name="revenue"),
+    "dataset.orders": resource("dataset.orders", capabilities=["PREVIEW"]),
 }
-DIMENSIONS = [{
+DIMENSIONS = [DimensionOption.model_validate({
     "optionId": "region", "resourceId": None, "displayName": "Region",
     "dimensionType": "categorical", "valueType": "string", "granularities": [], "operators": ["IN"],
-}]
+})]
 MAPPING = {"region": DimensionBinding("order__region", {})}
 
 
@@ -76,24 +79,26 @@ def test_base_time_option_changes_grouping_and_order_with_selected_grain(grain):
         ],
         "allowedFilters": ["="],
     }
-    available, mapping = map_available_dimensions(RUN, ["metric.revenue"], {"resources": []}, native)
-    assert len(available["dimensions"]) == 1
-    option = available["dimensions"][0]
-    assert option["displayName"] == "metric_time"
-    assert option["granularities"] == ["day", "month"]
-    selection = {"optionId": option["optionId"], **({"grain": grain} if grain else {})}
+    available, mapping = map_available_dimensions(
+        RUN, ["metric.revenue"], catalog(), EngineResult.model_validate(native)
+    )
+    assert len(available.dimensions) == 1
+    option = available.dimensions[0]
+    assert option.display_name == "metric_time"
+    assert option.granularities == ["day", "month"]
+    selection = {"optionId": option.option_id, **({"grain": grain} if grain else {})}
     request = QueryRequest(
         mode="QUERY", metricResourceIds=["metric.revenue"], groupBy=[selection],
-        orderBy=[{"fieldId": option["optionId"], "direction": "DESC"}],
+        orderBy=[{"fieldId": option.option_id, "direction": "DESC"}],
     )
-    plan = compile_query(request, RUN, RESOURCES, available["dimensions"], mapping)
+    plan = compile_query(request, RUN, RESOURCES, available.dimensions, mapping)
     expected = "metric_time__" + (grain or "day")
     assert plan.group_by == [expected]
     assert plan.order_by == ["-" + expected]
     # 服务未声明的粒度不能靠前端拼接绕过校验。
     request.group_by[0].grain = "hour"
     with pytest.raises(ServiceError) as failure:
-        compile_query(request, RUN, RESOURCES, available["dimensions"], mapping)
+        compile_query(request, RUN, RESOURCES, available.dimensions, mapping)
     assert failure.value.error.code == "INVALID_DIMENSION_OPTION"
 
 
@@ -109,10 +114,12 @@ def test_metric_time_grains_form_one_option_even_without_a_native_base_dimension
         ],
         "allowedFilters": ["="],
     }
-    available, mapping = map_available_dimensions(RUN, ["metric.revenue"], {"resources": []}, native)
-    assert len(available["dimensions"]) == 3
-    option = available["dimensions"][-1]
-    assert option["displayName"] == "metric_time"
-    assert option["granularities"] == ["day", "month"]
-    assert option["operators"] == []
-    assert mapping[option["optionId"]].grain_tokens["month"] == "metric_time__month"
+    available, mapping = map_available_dimensions(
+        RUN, ["metric.revenue"], catalog(), EngineResult.model_validate(native)
+    )
+    assert len(available.dimensions) == 3
+    option = available.dimensions[-1]
+    assert option.display_name == "metric_time"
+    assert option.granularities == ["day", "month"]
+    assert option.operators == []
+    assert mapping[option.option_id].grain_tokens["month"] == "metric_time__month"

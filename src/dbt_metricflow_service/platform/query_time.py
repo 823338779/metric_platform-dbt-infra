@@ -2,34 +2,32 @@
 
 from zoneinfo import ZoneInfo
 
-from dbt_metricflow_service.models.payloads import JsonObject
+from dbt_metricflow_service import constants as strings
 
+from ..models.payloads import NormalizedTimeRange, QueryTimeMetadata
 from ..models.queries import QueryRequest
 
-TIME_FIELDS = ("start_time", "end_time")
-BOUNDARY_POLICY = "metricflow_granularity_alignment"
+BOUNDARY_POLICY = strings.QUERY_TIME_BOUNDARY_POLICY
 
 
 def normalize_query_time(request: QueryRequest, timezone: str) -> QueryRequest:
     zone = ZoneInfo(timezone)
-    values = {}
-    for field in TIME_FIELDS:
-        value = getattr(request, field)
-        # 无 offset 的输入表示业务日历时间，带 offset 的输入转换到固定业务时区。
-        values[field] = value.astimezone(zone).replace(tzinfo=None) if value and value.tzinfo else value
-    return request.model_copy(update=values)
+    result = request.model_copy()
+    result.start_time = (request.start_time.astimezone(zone).replace(tzinfo=None)
+                         if request.start_time and request.start_time.tzinfo else request.start_time)
+    result.end_time = (request.end_time.astimezone(zone).replace(tzinfo=None)
+                       if request.end_time and request.end_time.tzinfo else request.end_time)
+    return result
 
 
-def canonical_query(request: QueryRequest) -> JsonObject:
-    """序列化已按业务时区归一化的请求，并固定指标集合顺序。"""
-    value = request.model_dump(mode="json", by_alias=True)
-    value["metricResourceIds"] = sorted(set(value["metricResourceIds"]))
-    return value
+def canonical_query(request: QueryRequest) -> QueryRequest:
+    result = request.model_copy()
+    result.metric_resource_ids = sorted(set(request.metric_resource_ids))
+    return result
 
 
-def query_time_metadata(normalized: JsonObject, timezone: str) -> JsonObject:
-    return {
-        "businessTimezone": timezone,
-        "normalizedTimeRange": {"startTime": normalized["startTime"], "endTime": normalized["endTime"]},
-        "boundaryPolicy": BOUNDARY_POLICY,
-    }
+def query_time_metadata(normalized: QueryRequest, timezone: str) -> QueryTimeMetadata:
+    return QueryTimeMetadata(business_timezone=timezone, normalized_time_range=NormalizedTimeRange(
+        start_time=normalized.start_time.isoformat() if normalized.start_time else None,
+        end_time=normalized.end_time.isoformat() if normalized.end_time else None,
+    ), boundary_policy=BOUNDARY_POLICY)

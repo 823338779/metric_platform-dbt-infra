@@ -7,16 +7,26 @@ import json
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import timedelta
-from typing import cast, overload
+from typing import Final
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, or_, select, true, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from dbt_metricflow_service.models.payloads import JsonObject, JsonValue
-from dbt_metricflow_service.storage.records import DatabaseRow, LeasedJob, StoredJob
-from dbt_metricflow_service.storage.rows import entity_dict
+from dbt_metricflow_service import constants as strings
+from dbt_metricflow_service.models.execution import ExecutionSnapshot
+from dbt_metricflow_service.models.payloads import JsonObject
+from dbt_metricflow_service.storage.records import (
+    ArtifactValidation,
+    EmptyConfig,
+    JobErrorDetail,
+    JobRequest,
+    LeasedJob,
+    StoredJob,
+    StoredProject,
+)
+from dbt_metricflow_service.storage.rows import entity_record
 
 from .entities import (
     ArtifactFile,
@@ -29,38 +39,55 @@ from .entities import (
 )
 from .postgres import Database
 
+BUILD_SOURCE_EVIDENCE_CONFLICT_MESSAGE: Final = "build output does not match fixed source evidence"
+DIAGNOSTIC_SIZE_LIMIT_MESSAGE: Final = "Diagnostic exceeded configured size limit"
+IDEMPOTENCY_REQUEST_CONFLICT_MESSAGE: Final = "Idempotency key belongs to another request"
+IMMUTABLE_JOB_INPUT_MESSAGE: Final = "Job input is immutable after admission"
+INACTIVE_RUN_MESSAGE: Final = "Run is not ready and active"
+INVALID_PARENT_RUN_MESSAGE: Final = "Parent must be a BUILD_RUN of this project"
+INVALID_PROJECT_SOURCE_MESSAGE: Final = "Project source must be a sealed source of the same project"
+INVALID_SOURCE_SET_MESSAGE: Final = "Invalid source artifact set"
+MISSING_NATIVE_ARTIFACTS_MESSAGE: Final = "BUILD_RUN output is missing required native artifacts"
+MISSING_RUN_MESSAGE: Final = "Run does not exist"
+MISSING_VALIDATION_EVIDENCE_MESSAGE: Final = "BUILD_RUN output lacks successful validation evidence"
+OUTPUT_ATTEMPT_CONFLICT_MESSAGE: Final = "Output must belong to the authorized attempt"
+OUTPUT_PROJECT_CONFLICT_MESSAGE: Final = "Output belongs to a different project"
+PROJECT_CHANGED_MESSAGE: Final = "Project changed during request validation; retry"
+REQUIRED_BUILD_OUTPUT_MESSAGE: Final = "BUILD_RUN requires a complete validated output artifact set"
+RESTORE_SOURCE_BEFORE_CLEANUP_MESSAGE: Final = "Restore source artifacts before cleaning a run that executed externally"
+UNAVAILABLE_INPUT_SET_MESSAGE: Final = "Input artifact set is not available"
+UNKNOWN_CLEANUP_OUTCOME_MESSAGE: Final = "Cleanup outcome is still unknown"
+UNPUBLISHED_PARENT_MESSAGE: Final = "Parent has no published artifact set"
+UNREGISTERED_PROJECT_MESSAGE: Final = "Project is not registered"
+
 # ORM 表达式显式保留条件更新和行锁，时间边界由数据库判断。
-EXECUTING = "EXECUTING"
-PREPARATION_ONLY = "PREPARATION_ONLY"
-PREPARING = "PREPARING"
-QUEUED = "QUEUED"
-RUNNING = "RUNNING"
-SUCCEEDED = "SUCCEEDED"
-FAILED = "FAILED"
-BUILD_RUN = "BUILD_RUN"
-RUN_CLEANUP = "RUN_CLEANUP"
-NEVER = "NEVER"
-EXTERNAL = "EXTERNAL"
-OUTCOME_UNKNOWN = "EXECUTION_OUTCOME_UNKNOWN"
-TIMEOUT = "TASK_TIMEOUT"
-LEASE_EXPIRED = "LEASE_EXPIRED"
-ACTIVE = "ACTIVE"
-CLEANING = "CLEANING"
-CLEANED = "CLEANED"
-SEALED = "SEALED"
-EXECUTION = "EXECUTION"
-SOURCE = "SOURCE"
-EXPIRED_UNCONFIRMED = "EXPIRED_UNCONFIRMED"
-STOPPED = "STOPPED"
-CLEANUP_SCOPE = "RUN_CLEANUP"
+EXECUTING = strings.EXECUTING
+PREPARATION_ONLY = strings.PREPARATION_ONLY
+PREPARING = strings.PREPARING
+QUEUED = strings.QUEUED
+RUNNING = strings.RUNNING
+SUCCEEDED = strings.SUCCEEDED
+FAILED = strings.FAILED
+BUILD_RUN = strings.BUILD_RUN
+RUN_CLEANUP = strings.RUN_CLEANUP
+NEVER = strings.NEVER
+EXTERNAL = strings.EXTERNAL
+OUTCOME_UNKNOWN = strings.EXECUTION_OUTCOME_UNKNOWN
+TIMEOUT = strings.TASK_TIMEOUT
+LEASE_EXPIRED = strings.LEASE_EXPIRED
+ACTIVE = strings.ACTIVE
+CLEANING = strings.CLEANING
+CLEANED = strings.CLEANED
+SEALED = strings.SEALED
+EXECUTION = strings.EXECUTION
+SOURCE = strings.SOURCE
+EXPIRED_UNCONFIRMED = strings.EXPIRED_UNCONFIRMED
+STOPPED = strings.STOPPED
+CLEANUP_SCOPE = strings.RUN_CLEANUP
 REQUIRED_BUILD_FILES = frozenset(
-    {"target/manifest.json", "target/semantic_manifest.json", "target/catalog.json", "target/published_catalog.json"}
+    {strings.MANIFEST_PATH, strings.SEMANTIC_MANIFEST_PATH, strings.CATALOG_PATH, strings.PUBLISHED_CATALOG_PATH}
 )
-REQUIRED_VALIDATION_FLAGS = ("allTestsPassed", "representativeQueryPassed", "relationsVerified")
 MAX_DIAGNOSTIC = 1024 * 1024
-
-
-FORBIDDEN_REQUEST_KEYS = frozenset({"resources", "credentials", "password", "token", "secret", "environment", "env"})
 
 
 class _FinishLeaseLost(Exception):
@@ -77,23 +104,6 @@ class ProjectBusy(ValueError):
 
 class CleanupBlocked(ValueError):
     """run 仍被活动任务或未知外部执行引用。"""
-
-
-@overload
-def _safe_request(value: JsonObject) -> JsonObject: ...
-
-
-@overload
-def _safe_request(value: JsonValue) -> JsonValue: ...
-
-
-def _safe_request(value: JsonValue) -> JsonValue:
-    # resources 和凭据不进入持久请求。
-    if isinstance(value, dict):
-        return {key: _safe_request(item) for key, item in value.items() if key.lower() not in FORBIDDEN_REQUEST_KEYS}
-    if isinstance(value, list):
-        return [_safe_request(item) for item in value]
-    return value
 
 
 class JobStore:
@@ -113,55 +123,61 @@ class JobStore:
     def register_project(
         self,
         project_id: str,
-        binding_config: JsonObject | None = None,
-        config_version: str = "1",
+        binding_config: ExecutionSnapshot | EmptyConfig | None = None,
+        config_version: str = strings.DEFAULT_CONFIG_VERSION,
         source_set_id: str | None = None,
-    ) -> DatabaseRow:
+    ) -> StoredProject:
         # 项目导入与任务受理锁同一项目行，保持固定输入归属。
         with self.db.session() as session:
             session.execute(
                 pg_insert(RuntimeProject)
-                .values(project_id=project_id, binding_config=binding_config or {}, config_version=config_version)
+                .values(
+                    project_id=project_id,
+                    binding_config=binding_config.model_dump(mode=strings.JSON_MODE, by_alias=True)
+                    if binding_config
+                    else {},
+                    config_version=config_version,
+                )
                 .on_conflict_do_nothing(index_elements=[RuntimeProject.project_id])
             )
             project = session.get(RuntimeProject, project_id, with_for_update=True, populate_existing=True)
             if source_set_id is not None:
                 source = session.get(ArtifactSet, source_set_id)
                 if not source or source.state != SEALED or source.kind != SOURCE or source.project_id != project_id:
-                    raise ValueError("Project source must be a sealed source of the same project")
+                    raise ValueError(INVALID_PROJECT_SOURCE_MESSAGE)
             if binding_config is not None:
-                project.binding_config = binding_config
+                project.binding_config = binding_config.model_dump(mode=strings.JSON_MODE, by_alias=True)
             if source_set_id is not None:
                 project.source_set_id = source_set_id
             project.config_version = config_version
             project.revision += 1
             session.flush()
-            return entity_dict(project)
+            return entity_record(project, StoredProject)
 
-    def project(self, project_id: str) -> DatabaseRow | None:
+    def project(self, project_id: str) -> StoredProject | None:
         with self.db.session() as session:
-            return entity_dict(session.get(RuntimeProject, project_id))
+            return entity_record(session.get(RuntimeProject, project_id), StoredProject)
 
     def get(self, job_id: UUID | str) -> StoredJob | None:
         with self.db.session() as session:
-            return cast(StoredJob | None, entity_dict(session.get(RuntimeJob, str(job_id))))
+            return entity_record(session.get(RuntimeJob, str(job_id)), StoredJob)
 
     @contextmanager
     def query_run(self, run_id: UUID | str) -> Iterator[StoredJob]:
         """只持有会话锁保护实时查询，不创建任务、租约或结果记录。"""
-        key = func.hashtextextended("query:" + str(run_id), 0)
+        key = func.hashtextextended(strings.QUERY_IDEMPOTENCY_PREFIX + str(run_id), 0)
         # 会话锁覆盖引擎执行；autocommit 避免持有长事务和行锁。
-        with self.db.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+        with self.db.engine.connect().execution_options(isolation_level=strings.AUTOCOMMIT) as connection:
             connection.execute(select(func.pg_advisory_lock_shared(key)))
             try:
                 row = connection.execute(
                     select(RuntimeJob).where(RuntimeJob.job_id == str(run_id))
                 ).mappings().one_or_none()
-                parent = cast(StoredJob, dict(row)) if row is not None else None
-                if not parent or parent["kind"] != BUILD_RUN or parent["status"] != SUCCEEDED or (
-                    parent["run_lifecycle"] != ACTIVE
+                parent = StoredJob.model_validate(row) if row is not None else None
+                if not parent or parent.kind != BUILD_RUN or parent.status != SUCCEEDED or (
+                    parent.run_lifecycle != ACTIVE
                 ):
-                    raise CleanupBlocked("Run is not ready and active")
+                    raise CleanupBlocked(INACTIVE_RUN_MESSAGE)
                 yield parent
             finally:
                 try:
@@ -185,7 +201,7 @@ class JobStore:
         self,
         kind: str,
         project_id: str,
-        request_json: JsonObject,
+        request_json: JobRequest,
         *,
         job_id: UUID | str | None = None,
         fingerprint: str | None = None,
@@ -193,11 +209,11 @@ class JobStore:
         idempotency_key: str | None = None,
         parent_run_id: UUID | str | None = None,
         input_set_id: str | None = None,
-        config_version: str = "1",
-        toolchain_version: str = "default",
+        config_version: str = strings.DEFAULT_CONFIG_VERSION,
+        toolchain_version: str = strings.DEFAULT_TOOLCHAIN_NAMESPACE,
         schema_name: str | None = None,
         profile_binding_id: str | None = None,
-        retry_policy: str = "PREPARATION_ONLY",
+        retry_policy: str = strings.PREPARATION_ONLY,
         max_attempts: int = 3,
         timeout_seconds: int = 600,
         write: bool = False,
@@ -207,29 +223,26 @@ class JobStore:
             raise ValueError(f"Unsupported job kind: {kind}")
         # 幂等作用域先串行化；parent 锁统一先于项目行和子任务，避免清理受理穿透。
         with self.db.fact_session() as session:
-            return cast(
-                StoredJob,
-                self.reserve_in_transaction(
-                    session,
-                    kind,
-                    project_id,
-                    request_json,
-                    job_id=job_id,
-                    fingerprint=fingerprint,
-                    idempotency_scope=idempotency_scope,
-                    idempotency_key=idempotency_key,
-                    parent_run_id=parent_run_id,
-                    input_set_id=input_set_id,
-                    config_version=config_version,
-                    toolchain_version=toolchain_version,
-                    schema_name=schema_name,
-                    profile_binding_id=profile_binding_id,
-                    retry_policy=retry_policy,
-                    max_attempts=max_attempts,
-                    timeout_seconds=timeout_seconds,
-                    write=write,
-                    expected_revision=expected_revision,
-                ),
+            return self.reserve_in_transaction(
+                session,
+                kind,
+                project_id,
+                request_json,
+                job_id=job_id,
+                fingerprint=fingerprint,
+                idempotency_scope=idempotency_scope,
+                idempotency_key=idempotency_key,
+                parent_run_id=parent_run_id,
+                input_set_id=input_set_id,
+                config_version=config_version,
+                toolchain_version=toolchain_version,
+                schema_name=schema_name,
+                profile_binding_id=profile_binding_id,
+                retry_policy=retry_policy,
+                max_attempts=max_attempts,
+                timeout_seconds=timeout_seconds,
+                write=write,
+                expected_revision=expected_revision,
             )
 
     def reserve_in_transaction(
@@ -237,7 +250,7 @@ class JobStore:
         connection: Session,
         kind: str,
         project_id: str,
-        request_json: JsonObject,
+        request_json: JobRequest,
         *,
         job_id: UUID | str | None = None,
         fingerprint: str | None = None,
@@ -245,11 +258,11 @@ class JobStore:
         idempotency_key: str | None = None,
         parent_run_id: UUID | str | None = None,
         input_set_id: str | None = None,
-        config_version: str = "1",
-        toolchain_version: str = "default",
+        config_version: str = strings.DEFAULT_CONFIG_VERSION,
+        toolchain_version: str = strings.DEFAULT_TOOLCHAIN_NAMESPACE,
         schema_name: str | None = None,
         profile_binding_id: str | None = None,
-        retry_policy: str = "PREPARATION_ONLY",
+        retry_policy: str = strings.PREPARATION_ONLY,
         max_attempts: int = 3,
         timeout_seconds: int = 600,
         write: bool = False,
@@ -268,18 +281,21 @@ class JobStore:
         if parent_run_id is not None:
             parent = session.get(RuntimeJob, str(parent_run_id), with_for_update=True, populate_existing=True)
             if not parent or parent.kind != BUILD_RUN or parent.project_id != project_id:
-                raise ValueError("Parent must be a BUILD_RUN of this project")
+                raise ValueError(INVALID_PARENT_RUN_MESSAGE)
         project = session.get(RuntimeProject, project_id, with_for_update=True, populate_existing=True)
         if not project:
-            raise ValueError("Project is not registered")
+            raise ValueError(UNREGISTERED_PROJECT_MESSAGE)
         # 前置 manifest 校验之后若项目发生导入，拒绝混用旧输入与新配置。
         if expected_revision is not None and (
             project.revision != expected_revision or project.config_version != config_version
         ):
-            raise StoreConflict("Project changed during request validation; retry")
+            raise StoreConflict(PROJECT_CHANGED_MESSAGE)
         if input_set_id is None and parent:
             input_set_id = parent.output_set_id
-        safe_request = _safe_request(request_json)
+        safe_request = request_json.model_dump(
+            mode=strings.JSON_MODE, by_alias=True,
+            exclude=set(JobRequest.model_fields) - request_json.model_fields_set,
+        )
         encoded = json.dumps(
             [
                 fingerprint or safe_request,
@@ -304,18 +320,18 @@ class JobStore:
             )
             if prior:
                 if prior.request_fingerprint != fingerprint:
-                    raise StoreConflict("Idempotency key belongs to another request")
-                return cast(StoredJob, entity_dict(prior))
+                    raise StoreConflict(IDEMPOTENCY_REQUEST_CONFLICT_MESSAGE)
+                return entity_record(prior, StoredJob)
         if parent and (parent.status != SUCCEEDED or parent.run_lifecycle != ACTIVE):
-            raise CleanupBlocked("Run is not ready and active")
+            raise CleanupBlocked(INACTIVE_RUN_MESSAGE)
         if input_set_id is not None:
             artifact = session.get(ArtifactSet, input_set_id)
             if not artifact or artifact.state != SEALED or artifact.project_id != project_id:
-                raise ValueError("Input artifact set is not available")
+                raise ValueError(UNAVAILABLE_INPUT_SET_MESSAGE)
         elif parent:
-            raise ValueError("Parent has no published artifact set")
+            raise ValueError(UNPUBLISHED_PARENT_MESSAGE)
         if write and project.busy_job_id is not None:
-            raise ProjectBusy("project_busy")
+            raise ProjectBusy(strings.PROJECT_BUSY)
         job = RuntimeJob(
             job_id=str(job_id or uuid4()),
             kind=kind,
@@ -341,15 +357,15 @@ class JobStore:
         if write:
             project.busy_job_id = job.job_id
             session.flush()
-        return cast(StoredJob, entity_dict(job))
+        return entity_record(job, StoredJob)
 
     def claim(
         self,
         worker_id: UUID | str,
         *,
-        config_version: str = "1",
+        config_version: str = strings.DEFAULT_CONFIG_VERSION,
         config_versions: list[str] | None = None,
-        toolchain_version: str = "default",
+        toolchain_version: str = strings.DEFAULT_TOOLCHAIN_NAMESPACE,
         kinds: list[str] | None = None,
         job_id: UUID | str | None = None,
     ) -> LeasedJob | None:
@@ -393,9 +409,10 @@ class JobStore:
             if job.started_at is None:
                 job.started_at = func.clock_timestamp()
             session.flush()
-            result = entity_dict(job)
-            result.update(attempt_id=attempt_id, lease_token=token)
-            return cast(LeasedJob, result)
+            return LeasedJob(
+                **entity_record(job, StoredJob).model_dump(exclude_unset=True),
+                attempt_id=attempt_id, lease_token=token,
+            )
 
     def _authorized(self, session: Session, job_id: UUID | str, token: UUID | str) -> LeasedJob | None:
         # 清理和子任务更新都先锁 parent；每次修改同时核对 current attempt、token 和数据库时间。
@@ -419,11 +436,10 @@ class JobStore:
         if row is None:
             return None
         job, attempt = row
-        result = entity_dict(job)
-        result.update(
-            attempt_id=attempt.attempt_id, execution_stage=attempt.execution_stage, lease_token=attempt.lease_token
+        return LeasedJob(
+            **entity_record(job, StoredJob).model_dump(exclude_unset=True), attempt_id=attempt.attempt_id,
+            execution_stage=attempt.execution_stage, lease_token=attempt.lease_token,
         )
-        return cast(LeasedJob, result)
 
     def heartbeat(self, job_id: UUID | str, token: UUID | str) -> bool:
         with self.db.session() as session:
@@ -432,7 +448,7 @@ class JobStore:
                 return False
             session.execute(
                 update(RuntimeAttempt)
-                .where(RuntimeAttempt.attempt_id == job["attempt_id"])
+                .where(RuntimeAttempt.attempt_id == job.attempt_id)
                 .values(
                     heartbeat_at=func.clock_timestamp(),
                     lease_expires_at=func.clock_timestamp() + timedelta(seconds=self.lease_seconds),
@@ -447,6 +463,7 @@ class JobStore:
         phase: str,
         *,
         external: bool = False,
+        # External engine session identifiers form an adapter-defined map.
         external_execution_refs: JsonObject | None = None,
     ) -> bool:
         with self.db.fact_session() as session:
@@ -457,7 +474,7 @@ class JobStore:
             if external:
                 session.execute(
                     update(RuntimeAttempt)
-                    .where(RuntimeAttempt.attempt_id == job["attempt_id"])
+                    .where(RuntimeAttempt.attempt_id == job.attempt_id)
                     .values(execution_stage=EXTERNAL, external_execution_refs=external_execution_refs or {})
                 )
             return True
@@ -471,16 +488,18 @@ class JobStore:
             if not job:
                 return False
             source = session.get(ArtifactSet, set_id)
-            if not source or source.state != SEALED or source.project_id != job["project_id"]:
-                raise ValueError("Invalid source artifact set")
-            if job["input_set_id"] is not None and job["input_set_id"] != str(set_id):
-                raise ValueError("Job input is immutable after admission")
+            if not source or source.state != SEALED or source.project_id != job.project_id:
+                raise ValueError(INVALID_SOURCE_SET_MESSAGE)
+            if job.input_set_id is not None and job.input_set_id != str(set_id):
+                raise ValueError(IMMUTABLE_JOB_INPUT_MESSAGE)
             session.execute(update(RuntimeJob).where(RuntimeJob.job_id == str(job_id)).values(input_set_id=set_id))
             if project_digest is not None:
                 session.execute(
                     update(RuntimeJob)
                     .where(RuntimeJob.job_id == str(job_id))
-                    .values(request_json=RuntimeJob.request_json.concat({"projectDigest": project_digest}))
+                    .values(request_json=RuntimeJob.request_json.concat(JobRequest(project_digest=project_digest).model_dump(
+                        mode=strings.JSON_MODE, by_alias=True, exclude_unset=True,
+                    )))
                 )
             return True
 
@@ -513,20 +532,20 @@ class JobStore:
     ) -> bool:
         # 产物封存和终态共用一个事务；过期 worker 无权提交。
         if not succeeded:
-            return self.fail(job_id, token, error_code or "EXECUTION_FAILED")
+            return self.fail(job_id, token, error_code or strings.EXECUTION_FAILED)
         try:
             with self.db.fact_session() as session:
                 job = self._authorized(session, job_id, token)
                 if not job:
                     return False
-                if job["kind"] == BUILD_RUN and output_set_id is None:
-                    raise ValueError("BUILD_RUN requires a complete validated output artifact set")
+                if job.kind == BUILD_RUN and output_set_id is None:
+                    raise ValueError(REQUIRED_BUILD_OUTPUT_MESSAGE)
                 # 命令已明确结束，若取消意图先提交，则只确认取消、不发布成功或部署。
                 cancelled = session.scalar(select(Build.cancel_requested).where(Build.run_id == str(job_id)))
                 if cancelled:
                     session.execute(
                         update(RuntimeAttempt)
-                        .where(RuntimeAttempt.attempt_id == job["attempt_id"])
+                        .where(RuntimeAttempt.attempt_id == job.attempt_id)
                         .values(
                             state=FAILED,
                             stop_confirmed_at=func.clock_timestamp(),
@@ -537,38 +556,45 @@ class JobStore:
                         update(RuntimeJob)
                         .where(RuntimeJob.job_id == str(job_id))
                         .values(
-                            status=FAILED, error_code="CANCELLED", error_detail={}, finished_at=func.clock_timestamp()
+                            status=FAILED,
+                            error_code=strings.CANCELLED,
+                            error_detail={},
+                            finished_at=func.clock_timestamp(),
                         )
                     )
                     self._release_project(session, job_id)
                     return True
                 if output_set_id is not None:
                     output = session.get(ArtifactSet, output_set_id, with_for_update=True, populate_existing=True)
-                    if not output or output.producer_attempt_id != job["attempt_id"] or output.kind != EXECUTION:
-                        raise ValueError("Output must belong to the authorized attempt")
-                    if output.project_id != job["project_id"]:
-                        raise ValueError("Output belongs to a different project")
-                    if job["kind"] == BUILD_RUN:
+                    if not output or output.producer_attempt_id != job.attempt_id or output.kind != EXECUTION:
+                        raise ValueError(OUTPUT_ATTEMPT_CONFLICT_MESSAGE)
+                    if output.project_id != job.project_id:
+                        raise ValueError(OUTPUT_PROJECT_CONFLICT_MESSAGE)
+                    if job.kind == BUILD_RUN:
                         # 新构建的输出必须引用同一固定源码、摘要、配置及工具链。
-                        if job["request_json"].get("buildId"):
-                            expected = {
-                                "source_set_id": job["input_set_id"],
-                                "source_commit_sha": job["request_json"].get("commitSha"),
-                                "project_digest": job["request_json"].get("projectDigest"),
-                                "config_version": job["config_version"],
-                                "toolchain_version": job["toolchain_version"],
-                            }
-                            if any(value is None or getattr(output, name) != value for name, value in expected.items()):
-                                raise ValueError("build output does not match fixed source evidence")
+                        if job.request_json.build_id:
+                            if (
+                                job.input_set_id is None or output.source_set_id != job.input_set_id
+                                or job.request_json.commit_sha is None
+                                or output.source_commit_sha != job.request_json.commit_sha
+                                or job.request_json.project_digest is None
+                                or output.project_digest != job.request_json.project_digest
+                                or output.config_version != job.config_version
+                                or output.toolchain_version != job.toolchain_version
+                            ):
+                                raise ValueError(BUILD_SOURCE_EVIDENCE_CONFLICT_MESSAGE)
                         files = set(
                             session.scalars(
                                 select(ArtifactFile.relative_path).where(ArtifactFile.set_id == output_set_id)
                             )
                         )
                         if not REQUIRED_BUILD_FILES.issubset(files):
-                            raise ValueError("BUILD_RUN output is missing required native artifacts")
-                        if not all(output.validation_json.get(flag) is True for flag in REQUIRED_VALIDATION_FLAGS):
-                            raise ValueError("BUILD_RUN output lacks successful validation evidence")
+                            raise ValueError(MISSING_NATIVE_ARTIFACTS_MESSAGE)
+                        validation = ArtifactValidation.model_validate(output.validation_json)
+                        if not (validation.all_tests_passed is True
+                                and validation.representative_query_passed is True
+                                and validation.relations_verified is True):
+                            raise ValueError(MISSING_VALIDATION_EVIDENCE_MESSAGE)
                     if seal is None:
                         from .artifacts import ArtifactStore
 
@@ -579,7 +605,7 @@ class JobStore:
                     raise _FinishLeaseLost
                 session.execute(
                     update(RuntimeAttempt)
-                    .where(RuntimeAttempt.attempt_id == job["attempt_id"])
+                    .where(RuntimeAttempt.attempt_id == job.attempt_id)
                     .values(
                         state=SUCCEEDED, stop_confirmed_at=func.clock_timestamp(), finished_at=func.clock_timestamp()
                     )
@@ -595,10 +621,10 @@ class JobStore:
                         error_detail=None,
                     )
                 )
-                if job["kind"] == RUN_CLEANUP:
+                if job.kind == RUN_CLEANUP:
                     session.execute(
                         update(RuntimeJob)
-                        .where(RuntimeJob.job_id == job["parent_run_id"])
+                        .where(RuntimeJob.job_id == job.parent_run_id)
                         .values(run_lifecycle=CLEANED)
                     )
                     # schema 删除已经确认；保留任务与幂等墓碑，将无引用文件交给 GC。
@@ -606,8 +632,8 @@ class JobStore:
                         update(RuntimeJob)
                         .where(
                             or_(
-                                RuntimeJob.job_id == job["parent_run_id"],
-                                RuntimeJob.parent_run_id == job["parent_run_id"],
+                                RuntimeJob.job_id == job.parent_run_id,
+                                RuntimeJob.parent_run_id == job.parent_run_id,
                             ),
                             ~select(Build.build_id).where(Build.run_id == RuntimeJob.job_id).exists(),
                             ~select(Build.build_id).where(Build.run_id == RuntimeJob.parent_run_id).exists(),
@@ -624,20 +650,23 @@ class JobStore:
         job_id: UUID | str,
         token: UUID | str,
         error_code: str,
-        detail: JsonObject | None = None,
+        detail: JobErrorDetail | None = None,
         *,
         stopped: bool = True,
     ) -> bool:
         # 错误详情也有字节预算，禁止在失败路径写入无限增长的异常堆栈。
-        if len(json.dumps(detail or {}, ensure_ascii=False).encode()) > self.max_diagnostic_bytes:
-            detail = {"message": "Diagnostic exceeded configured size limit"}
+        diagnostic = (detail or JobErrorDetail()).model_dump(mode=strings.JSON_MODE, by_alias=True, exclude_unset=True)
+        if len(json.dumps(diagnostic, ensure_ascii=False).encode()) > self.max_diagnostic_bytes:
+            diagnostic = JobErrorDetail(message=DIAGNOSTIC_SIZE_LIMIT_MESSAGE).model_dump(
+                mode=strings.JSON_MODE, by_alias=True, exclude_unset=True,
+            )
         with self.db.fact_session() as session:
             job = self._authorized(session, job_id, token)
             if not job:
                 return False
             session.execute(
                 update(RuntimeAttempt)
-                .where(RuntimeAttempt.attempt_id == job["attempt_id"])
+                .where(RuntimeAttempt.attempt_id == job.attempt_id)
                 .values(
                     state=FAILED if stopped else EXPIRED_UNCONFIRMED,
                     stop_confirmed_at=func.clock_timestamp() if stopped else None,
@@ -648,7 +677,7 @@ class JobStore:
                 update(RuntimeJob)
                 .where(RuntimeJob.job_id == str(job_id))
                 .values(
-                    status=FAILED, error_code=error_code, error_detail=detail or {}, finished_at=func.clock_timestamp()
+                    status=FAILED, error_code=error_code, error_detail=diagnostic, finished_at=func.clock_timestamp()
                 )
             )
 
@@ -705,7 +734,9 @@ class JobStore:
                     code = TIMEOUT if timed_out else OUTCOME_UNKNOWN if external else LEASE_EXPIRED
                     job.status = FAILED
                     job.error_code = code
-                    job.error_detail = {"externalOutcomeUnknown": external}
+                    job.error_detail = JobErrorDetail(external_outcome_unknown=external).model_dump(
+                        mode=strings.JSON_MODE, by_alias=True, exclude_unset=True,
+                    )
                     job.finished_at = func.clock_timestamp()
                     # 先提交任务/attempt 修改到事务，再让项目解锁读取最新状态。
                     session.flush()
@@ -732,17 +763,19 @@ class JobStore:
                 self._release_project(session, job_id)
             return True
 
-    def reserve_cleanup(self, parent_run_id: UUID | str, toolchain_version: str = "default") -> StoredJob:
+    def reserve_cleanup(
+        self, parent_run_id: UUID | str, toolchain_version: str = strings.DEFAULT_TOOLCHAIN_NAMESPACE
+    ) -> StoredJob:
         # 先与实时查询的会话锁互斥，再检查持久任务及未确认停止的历史 attempt。
         parent_run_id = str(parent_run_id)
         with self.db.fact_session() as session:
             if not session.scalar(select(func.pg_try_advisory_xact_lock(
-                func.hashtextextended("query:" + parent_run_id, 0)
+                func.hashtextextended(strings.QUERY_IDEMPOTENCY_PREFIX + parent_run_id, 0)
             ))):
-                raise CleanupBlocked("run_cleanup_blocked")
+                raise CleanupBlocked(strings.RUN_CLEANUP_BLOCKED)
             parent = session.get(RuntimeJob, parent_run_id, with_for_update=True)
             if not parent or parent.kind != BUILD_RUN:
-                raise ValueError("Run does not exist")
+                raise ValueError(MISSING_RUN_MESSAGE)
             # 当前部署保护物理 run。
             protected = session.scalar(
                 select(
@@ -753,7 +786,7 @@ class JobStore:
                 )
             )
             if protected:
-                raise CleanupBlocked("run_cleanup_blocked")
+                raise CleanupBlocked(strings.RUN_CLEANUP_BLOCKED)
             existing = session.scalar(
                 select(RuntimeJob).where(
                     RuntimeJob.kind == RUN_CLEANUP,
@@ -771,7 +804,7 @@ class JobStore:
                         )
                         .limit(1)
                     ):
-                        raise CleanupBlocked("Cleanup outcome is still unknown")
+                        raise CleanupBlocked(UNKNOWN_CLEANUP_OUTCOME_MESSAGE)
                     existing.status = QUEUED
                     existing.current_attempt_id = None
                     existing.available_at = func.clock_timestamp()
@@ -779,7 +812,7 @@ class JobStore:
                     existing.finished_at = None
                     existing.error_code = None
                     session.flush()
-                return cast(StoredJob, entity_dict(existing))
+                return entity_record(existing, StoredJob)
             run_family = or_(RuntimeJob.job_id == parent_run_id, RuntimeJob.parent_run_id == parent_run_id)
             if session.scalar(
                 select(
@@ -796,7 +829,7 @@ class JobStore:
                     )
                 )
             ):
-                raise CleanupBlocked("run_cleanup_blocked")
+                raise CleanupBlocked(strings.RUN_CLEANUP_BLOCKED)
             if not (parent.output_set_id or parent.input_set_id) and session.scalar(
                 select(RuntimeAttempt.attempt_id)
                 .where(
@@ -805,7 +838,7 @@ class JobStore:
                 )
                 .limit(1)
             ):
-                raise CleanupBlocked("Restore source artifacts before cleaning a run that executed externally")
+                raise CleanupBlocked(RESTORE_SOURCE_BEFORE_CLEANUP_MESSAGE)
             parent.run_lifecycle = CLEANING
             session.flush()
             cleanup = RuntimeJob(
@@ -826,4 +859,4 @@ class JobStore:
             )
             session.add(cleanup)
             session.flush()
-            return cast(StoredJob, entity_dict(cleanup))
+            return entity_record(cleanup, StoredJob)

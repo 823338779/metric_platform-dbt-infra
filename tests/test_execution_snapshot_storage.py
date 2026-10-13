@@ -34,21 +34,21 @@ def accept(store, body):
 def test_snapshot_acceptance_does_not_read_execution_binding(store):
     body = request()
     row = accept(store, body)
-    assert row["environment_id"] == str(body.execution.environment_id)
-    assert "protocol_version" not in row
-    assert "execution_binding" not in row
-    assert row["config_snapshot"] == body.execution.model_dump(mode="json", by_alias=True)
-    job = JobStore(store.db).get(row["run_id"])
-    assert job["config_version"] == "runtime-v1"
-    assert row["config_version"] == "7"
-    assert job["schema_name"] == body.execution.schema_name
+    assert row.environment_id == str(body.execution.environment_id)
+    assert "protocol_version" not in type(row).model_fields
+    assert "execution_binding" not in type(row).model_fields
+    assert row.config_snapshot == body.execution
+    job = JobStore(store.db).get(row.run_id)
+    assert job.config_version == "runtime-v1"
+    assert row.config_version == "7"
+    assert job.schema_name == body.execution.schema_name
     assert "engine_execution_binding" not in inspect(store.db.engine).get_table_names()
 
 
 def test_snapshot_idempotency(store):
     body = request()
     first = accept(store, body)
-    assert accept(store, body)["build_id"] == first["build_id"]
+    assert accept(store, body).build_id == first.build_id
     changed = body.model_copy(update={"execution": body.execution.model_copy(update={"catalog": "other"})})
     with pytest.raises(StoreConflict):
         accept(store, changed)
@@ -69,9 +69,9 @@ def test_initialize_creates_only_snapshot_schema():
 
 def test_repeated_initialize_preserves_new_builds(store):
     row = accept(store, request())
-    before = BuildStore(store.db).get(row["build_id"])
+    before = BuildStore(store.db).get(row.build_id)
     store.db.initialize()
-    assert BuildStore(store.db).get(row["build_id"]) == before
+    assert BuildStore(store.db).get(row.build_id) == before
 
 
 def test_environment_has_no_source_binding():

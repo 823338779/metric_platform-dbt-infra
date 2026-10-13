@@ -13,17 +13,17 @@ def test_equivalent_offsets_share_business_calendar_but_execute_separately(store
         metricResourceIds=["metric.sample.orders"],
         startTime="2026-09-30T16:00:00Z",
     )
-    accepted = service.submit(release["build_id"], request, "platform")
-    saved = service.execute.calls[-1][1]["request"]
-    assert saved["startTime"] == "2026-10-01T00:00:00"
+    accepted = service.submit(release.build_id, request, "platform")
+    saved = service.execute.calls[-1][1].request
+    assert saved.start_time.isoformat() == "2026-10-01T00:00:00"
     equivalent = PublishedQueryRequest.model_validate(
         {**request.model_dump(by_alias=True), "startTime": "2026-10-01T00:00:00+08:00"}
     )
     count = len(service.execute.calls)
-    result = service.submit(release["build_id"], equivalent, "platform")
+    result = service.submit(release.build_id, equivalent, "platform")
     assert result.normalized_time_range == accepted.normalized_time_range
     assert len(service.execute.calls) == count + 1
-    assert service.execute.calls[-1][0]["config_snapshot"]["businessTimezone"] == "Asia/Shanghai"
+    assert service.execute.calls[-1][0].config_snapshot.business_timezone == "Asia/Shanghai"
 
 
 def test_naive_business_calendar_is_preserved(store, tmp_path):
@@ -33,10 +33,10 @@ def test_naive_business_calendar_is_preserved(store, tmp_path):
         metricResourceIds=["metric.sample.orders"],
         startTime="2026-10-01T00:00:00",
     )
-    service.submit(release["build_id"], request, "platform")
-    saved = service.execute.calls[-1][1]["request"]
-    assert saved["startTime"] == "2026-10-01T00:00:00"
-    assert service.execute.calls[-1][0]["config_snapshot"]["businessTimezone"] == "Asia/Shanghai"
+    service.submit(release.build_id, request, "platform")
+    saved = service.execute.calls[-1][1].request
+    assert saved.start_time.isoformat() == "2026-10-01T00:00:00"
+    assert service.execute.calls[-1][0].config_snapshot.business_timezone == "Asia/Shanghai"
 
 
 def test_capabilities_disclose_project_path_and_time_contract(store, tmp_path):
@@ -61,5 +61,5 @@ def test_query_error_identifies_invalid_dimension(store, tmp_path):
         groupBy=[{"optionId": "missing"}],
     )
     with pytest.raises(PublicationError) as caught:
-        service.submit(release["build_id"], request, "platform")
+        service.submit(release.build_id, request, "platform")
     assert caught.value.error.code == "INVALID_DIMENSION_OPTION"

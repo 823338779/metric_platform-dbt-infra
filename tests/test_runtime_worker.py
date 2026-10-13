@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from dbt_metricflow_service.settings import Settings
+from tests.data_helpers import leased_job
 from tests.test_publication_storage import store as store
 
 
@@ -37,9 +38,9 @@ async def test_worker_completes_with_artifact_identity_without_result_payload():
         )
     )
     worker.executor = Executor()
-    job = {"job_id": str(uuid4()), "lease_token": str(uuid4()), "attempt_id": str(uuid4())}
+    job = leased_job()
     await worker._execute(job)
-    assert completed == [(job["job_id"], job["lease_token"], output, seal)]
+    assert completed == [(job.job_id, job.lease_token, output, seal)]
 
 
 async def test_runtime_reconciles_explicit_deployments(store, tmp_path):
@@ -83,8 +84,8 @@ async def test_runtime_reconciles_explicit_deployments(store, tmp_path):
     try:
         await runtime.start(deployments=deployments)
         async with asyncio.timeout(5):
-            while deployments.store.current(key)["active_build_id"] is None:
+            while deployments.store.current(key).active_build_id is None:
                 await asyncio.sleep(0.02)
-        assert deployments.store.current(key)["active_build_id"] == str(build.build_id)
+        assert deployments.store.current(key).active_build_id == str(build.build_id)
     finally:
         await runtime.close()

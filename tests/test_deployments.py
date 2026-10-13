@@ -33,10 +33,10 @@ def test_newer_failed_intent_still_fences_older(store):
     with store.db.transaction() as connection:
         connection.exec_driver_sql(
             "UPDATE runtime_job SET status='FAILED',error_code='TEST_FAILURE' WHERE job_id=%s",
-            (app.store.get(second.build_id)["run_id"],),
+            (app.store.get(second.build_id).run_id,),
         )
-    assert deploy.reconcile(key, second.initial_deployment["generation"]).deployment_status == "FAILED"
-    assert deploy.reconcile(key, first.initial_deployment["generation"]).deployment_status == "STALE"
+    assert deploy.reconcile(key, second.initial_deployment.generation).deployment_status == "FAILED"
+    assert deploy.reconcile(key, first.initial_deployment.generation).deployment_status == "STALE"
     assert deploy.current(key).active_build_id is None
 
 

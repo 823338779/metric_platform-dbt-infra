@@ -1,9 +1,8 @@
 """历史资源视图固定到构建；资源原生结构不重复解释。"""
 
-from typing import Any
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import Field, JsonValue
 
 from .artifacts import (
     CatalogRelation,
@@ -16,6 +15,7 @@ from .artifacts import (
     ResourceKind,
 )
 from .builds import Contract, Page
+from .native import NativeColumn, NativeNode
 
 
 class CatalogPage(Page[PublishedResource]):
@@ -46,4 +46,30 @@ class ResourceLineageView(Contract):
 class ResourceNativeView(Contract):
     build_id: UUID = Field(description="原生详情所属构建")
     resource_id: str = Field(description="资源身份")
-    native_details: dict[str, Any] = Field(description="原生引擎定义")
+    native_details: dict[str, JsonValue] = Field(description="原生引擎定义")
+
+class ArtifactSchemas(Contract):
+    manifest: str
+    semantic_manifest: str
+    catalog: str
+
+
+class NativeResource(Contract):
+    resource_id: str
+    native_id: str
+    kind: ResourceKind
+    name: str
+    description: str | None = None
+    source_path: str | None = None
+    definition: NativeNode
+    queryable: bool = False
+    relation: str | None = None
+    columns: dict[str, NativeColumn] = Field(default_factory=dict)
+    semantic_model_id: str | None = None
+
+
+class NativeCatalog(Contract):
+    resources: list[NativeResource]
+    dependencies: list[CatalogRelation]
+    artifact_schemas: ArtifactSchemas | None = None
+    ephemeral_dependencies: dict[str, list[str]] = Field(default_factory=dict)

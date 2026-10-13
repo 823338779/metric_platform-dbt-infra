@@ -6,26 +6,28 @@ from uuid import UUID
 
 from pydantic import Field, field_validator
 
-from .builds import Contract, validate_branch
+from dbt_metricflow_service import constants as strings
+
+from .contracts import Contract, validate_branch
 
 
 class DeploymentStatus(StrEnum):
-    WAITING_FOR_BUILD = "WAITING_FOR_BUILD"
-    PENDING = "PENDING"
-    CHECKING = "CHECKING"
-    DEPLOYED = "DEPLOYED"
-    STALE = "STALE"
-    FAILED = "FAILED"
-    CANCELLED = "CANCELLED"
+    WAITING_FOR_BUILD = strings.WAITING_FOR_BUILD
+    PENDING = strings.PENDING
+    CHECKING = strings.CHECKING
+    DEPLOYED = strings.DEPLOYED
+    STALE = strings.STALE
+    FAILED = strings.FAILED
+    CANCELLED = strings.CANCELLED
 
 
 class DeploymentKey(Contract):
     repository: str = Field(description="规范仓库地址")
-    environment: str = Field(alias="environmentId", description="调用方环境 UUID")
+    environment: str = Field(alias=strings.ENVIRONMENT_ID_ALIAS, description="调用方环境 UUID")
     branch_name: str = Field(description="目标分支短名")
-    _branch = field_validator("branch_name")(validate_branch)
+    _branch = field_validator(strings.BRANCH_NAME_FIELD)(validate_branch)
 
-    @field_validator("environment")
+    @field_validator(strings.ENVIRONMENT_FIELD)
     @classmethod
     def valid_environment(cls, value: str) -> str:
         return str(UUID(value))
@@ -37,7 +39,7 @@ class DeploymentRequest(Contract):
     branch_name: str = Field(description="来源核对及部署目标分支")
     expected_target_version: int = Field(ge=0, description="受理前观察到的目标版本")
     idempotency_key: str = Field(min_length=1, max_length=256, description="部署请求幂等键")
-    _branch = field_validator("branch_name")(validate_branch)
+    _branch = field_validator(strings.BRANCH_NAME_FIELD)(validate_branch)
 
 
 class DeploymentAttemptView(DeploymentKey):
@@ -57,4 +59,4 @@ class DeploymentTargetView(DeploymentKey):
     latest_attempt: DeploymentAttemptView | None = Field(default=None, description="最新部署意图")
     observed_head_sha: str | None = Field(default=None, description="最近观察远端 head")
     head_observed_at: datetime | None = Field(default=None, description="远端观察时间")
-    source_state: str = Field(default="UNDEPLOYED", description="远端观察结果，不替代部署终态")
+    source_state: str = Field(default=strings.UNDEPLOYED, description="远端观察结果，不替代部署终态")

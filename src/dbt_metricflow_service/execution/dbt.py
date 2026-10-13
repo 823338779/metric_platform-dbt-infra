@@ -4,17 +4,22 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 from uuid import uuid4
+
+from dbt_metricflow_service import constants as strings
 
 from .embedded import create_output, engine_environment, run_serialized
 from .models import CommandSpec, JobRecord, JobStatus
 
+UNSUPPORTED_ENGINE_COMMAND: Final[str] = "unsupported engine command"
+
+
 if TYPE_CHECKING:
     from dbt_common.events.base_types import EventMsg
 
-DBT = "dbt"
-EVENT_MESSAGE = "msg"
+DBT = strings.DBT_EXECUTABLE
+EVENT_MESSAGE = strings.DBT_MESSAGE_ATTRIBUTE
 
 
 async def run_dbt(
@@ -24,12 +29,12 @@ async def run_dbt(
     """只接受 dbt 命令，完成串行与租约检查后执行并返回脱敏记录。"""
     # 在授权和引擎初始化前拒绝非 dbt 入口。
     if command.argv[:1] != (DBT,):
-        raise ValueError("unsupported engine command")
+        raise ValueError(UNSUPPORTED_ENGINE_COMMAND)
     record, timed_out = await run_serialized(
         lambda: _invoke_dbt(project, command, max_output_bytes), timeout_seconds, before_start,
     )
     if timed_out:
-        return record.model_copy(update={"status": JobStatus.TIMED_OUT, "exit_code": None})
+        return record.with_outcome(status=JobStatus.TIMED_OUT, exit_code=None, stderr=record.stderr)
     return record
 
 

@@ -1,3 +1,5 @@
 from __future__ import annotations
 
-__version__ = "0.1.0"
+from dbt_metricflow_service import constants as strings
+
+__version__ = strings.SERVICE_VERSION

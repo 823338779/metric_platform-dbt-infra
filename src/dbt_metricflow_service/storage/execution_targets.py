@@ -2,11 +2,13 @@
 
 from sqlalchemy import func, select
 
+from dbt_metricflow_service import constants as strings
+
 from .entities import RuntimeAttempt, RuntimeJob
 from .jobs import JobStore
 from .postgres import Database
 
-ACTIVE_STATES = ("EXECUTING", "EXPIRED_UNCONFIRMED")
+ACTIVE_STATES = (strings.EXECUTING, strings.EXPIRED_UNCONFIRMED)
 
 
 class ExecutionTargetStore:

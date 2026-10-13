@@ -3,7 +3,9 @@
 import codecs
 from collections.abc import Iterable
 
-SECRET_ENVIRONMENT_PREFIX = "DBT_ENV_SECRET_"
+from dbt_metricflow_service import constants as strings
+
+SECRET_ENVIRONMENT_PREFIX = strings.DBT_ENV_SECRET_
 REDACTION_MARKER = "***"
 
 
@@ -24,7 +26,7 @@ class _TailBuffer:
 
     def decode(self) -> str:
         """Decode retained bytes even when truncation split a code point."""
-        return self._data.decode("utf-8", errors="replace")
+        return self._data.decode(strings.UTF8, errors=strings.DECODE_REPLACE_ERRORS)
 
 
 class _RedactingTailBuffer:
@@ -35,7 +37,7 @@ class _RedactingTailBuffer:
         self._secrets = tuple(sorted(set(secrets), key=len, reverse=True))
         self._max_secret_length = max((len(secret) for secret in self._secrets), default=0)
         self._pending = ""
-        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self._decoder = codecs.getincrementaldecoder(strings.UTF8)(errors=strings.DECODE_REPLACE_ERRORS)
 
     @property
     def truncated(self) -> bool:
@@ -76,4 +78,4 @@ class _RedactingTailBuffer:
                 index += 1
         self._pending = combined[index:]
         if output:
-            self._tail.append("".join(output).encode("utf-8"))
+            self._tail.append("".join(output).encode(strings.UTF8))

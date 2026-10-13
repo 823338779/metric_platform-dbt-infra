@@ -8,8 +8,10 @@ from tests.test_publication_storage import store as store
 
 def test_external_version_does_not_make_build_unavailable(store):
     row = accept(store, request())
-    row.update(build_status="SUCCEEDED", output_set_id="artifact", run_lifecycle="ACTIVE")
+    row.build_status = "SUCCEEDED"
+    row.output_set_id = "artifact"
+    row.run_lifecycle = "ACTIVE"
     app = BuildService(BuildStore(store.db), "test-toolchain", 600, "runtime-v1")
     assert app.query_unavailable_reason(row) is None
-    row["toolchain_version"] = "incompatible"
+    row.toolchain_version = "incompatible"
     assert app.query_unavailable_reason(row) == "EXECUTION_ENVIRONMENT_UNAVAILABLE"

@@ -32,15 +32,15 @@ def test_pinned_sha_survives_remote_advance(store):
     jobs = JobStore(store.db)
     job = jobs.claim(str(uuid4()), toolchain_version=TOOLCHAIN)
     # 其他测试可能有排队任务，领取直到本次构建。
-    while job and job["job_id"] != app.store.get(build.build_id)["run_id"]:
-        jobs.fail(job["job_id"], job["lease_token"], "TEST_FINISHED")
+    while job and job.job_id != app.store.get(build.build_id).run_id:
+        jobs.fail(job.job_id, job.lease_token, "TEST_FINISHED")
         job = jobs.claim(str(uuid4()), toolchain_version=TOOLCHAIN)
-    assert app.store.pin_source(build.build_id, "a" * 40, job["lease_token"])["commit_sha"] == "a" * 40
+    assert app.store.pin_source(build.build_id, "a" * 40, job.lease_token).commit_sha == "a" * 40
     # 固定 SHA 只合并对应 JSONB 字段，原始执行请求必须完整保留。
-    pinned_request = jobs.get(job["job_id"])["request_json"]
-    assert pinned_request == {**job["request_json"], "commitSha": "a" * 40}
+    pinned_request = jobs.get(job.job_id).request_json
+    assert pinned_request == job.request_json.model_copy(update={"commit_sha": "a" * 40})
     with pytest.raises(ValueError):
-        app.store.pin_source(build.build_id, "b" * 40, job["lease_token"])
+        app.store.pin_source(build.build_id, "b" * 40, job.lease_token)
 
 
 def test_cancel_queued_is_idempotent(store):
@@ -54,16 +54,16 @@ def test_unknown_write_is_not_reexecuted(store):
     app = service(store)
     build = app.submit_snapshot(request(), CALLER)
     jobs = JobStore(store.db)
-    run_id = app.store.get(build.build_id)["run_id"]
+    run_id = app.store.get(build.build_id).run_id
     job = jobs.claim(str(uuid4()), toolchain_version=TOOLCHAIN)
-    while job and job["job_id"] != run_id:
-        jobs.fail(job["job_id"], job["lease_token"], "TEST_FINISHED")
+    while job and job.job_id != run_id:
+        jobs.fail(job.job_id, job.lease_token, "TEST_FINISHED")
         job = jobs.claim(str(uuid4()), toolchain_version=TOOLCHAIN)
-    jobs.phase(run_id, job["lease_token"], "BUILDING", external=True)
-    jobs.fail(run_id, job["lease_token"], "EXECUTION_OUTCOME_UNKNOWN", stopped=False)
+    jobs.phase(run_id, job.lease_token, "BUILDING", external=True)
+    jobs.fail(run_id, job.lease_token, "EXECUTION_OUTCOME_UNKNOWN", stopped=False)
     jobs.recover()
     assert app.snapshot_view(build.build_id).build_status == "OUTCOME_UNKNOWN"
-    assert jobs.get(run_id)["attempt_no"] == 1
+    assert jobs.get(run_id).attempt_no == 1
 
 
 def test_logs_cursor_follows_persisted_progress(store):

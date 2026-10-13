@@ -1,11 +1,13 @@
 """进程内引擎调用的串行、取消和环境隔离契约。"""
 
 import asyncio
+import json
 import logging
 import os
 import threading
 from dataclasses import replace
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 from dbt.cli.main import dbtRunner
@@ -13,7 +15,10 @@ from dbt.cli.main import dbtRunner
 from dbt_metricflow_service.execution.dbt import run_dbt
 from dbt_metricflow_service.execution.metricflow import MetricFlowRequest, run_metricflow
 from dbt_metricflow_service.execution.models import CommandSpec, JobStatus
+from dbt_metricflow_service.models.payloads import ResultColumn
+from dbt_metricflow_service.platform.models import EngineRequest, EngineResult, PlatformQueryRequest
 from dbt_metricflow_service.runtime.executor import ExecutionError, RuntimeExecutor
+from tests.data_helpers import leased_job
 
 DBT = "dbt"
 BUILD = "build"
@@ -96,7 +101,7 @@ async def test_sdk_failure_restores_environment_and_logging(tmp_path, monkeypatc
     if metricflow:
         monkeypatch.setattr(module, "execute_programmatic", lambda *args: invoke(None, []))
         request = MetricFlowRequest(
-            {"DBT_PROJECT_DIR": str(tmp_path), "DBT_PROFILES_DIR": str(tmp_path)}, {"mode": "PROBE"},
+            {"DBT_PROJECT_DIR": str(tmp_path), "DBT_PROFILES_DIR": str(tmp_path)}, EngineRequest(mode="PROBE"),
         )
         result = (await run_metricflow(PROJECT, request, 5, 64, before_start)).record
         assert result.exit_code is None
@@ -117,7 +122,7 @@ async def test_rejected_lease_never_invokes_sdk(tmp_path, monkeypatch, metricflo
     calls = []
     monkeypatch.setattr(dbtRunner, "invoke", lambda *_: calls.append(True))
     monkeypatch.setattr(module, "execute_programmatic", lambda *_: calls.append(True))
-    spec = MetricFlowRequest({}, {"mode": "PROBE"}) if metricflow else command(tmp_path)
+    spec = MetricFlowRequest({}, EngineRequest(mode="PROBE")) if metricflow else command(tmp_path)
     run = run_metricflow if metricflow else run_dbt
 
     async def expired():
@@ -153,11 +158,11 @@ async def test_timeout_or_cancel_keeps_slot_until_call_exits(tmp_path, monkeypat
     if metricflow:
         def execute(project, profiles, data):
             invoke(None, [])
-            return {"queryCapability": True}
+            return EngineResult(query_capability=True)
 
         monkeypatch.setattr(module, "execute_programmatic", execute)
         spec = MetricFlowRequest(
-            {"DBT_PROJECT_DIR": str(tmp_path), "DBT_PROFILES_DIR": str(tmp_path)}, {"mode": "PROBE"},
+            {"DBT_PROJECT_DIR": str(tmp_path), "DBT_PROFILES_DIR": str(tmp_path)}, EngineRequest(mode="PROBE"),
         )
     run = run_metricflow if metricflow else run_dbt
     first = asyncio.create_task(run(PROJECT, spec, 5 if cancel else 0.03, 64, before_start))
@@ -197,7 +202,7 @@ async def test_executor_calls_dbt_without_subprocess(tmp_path, monkeypatch):
     jobs = SimpleNamespace(phase=lambda *args, **kwargs: True)
     executor = RuntimeExecutor(settings, jobs, None)
     result = await executor._dbt(
-        {"job_id": PROJECT, "lease_token": PROJECT, "kind": "BUILD_RUN", "project_id": PROJECT},
+        leased_job(job_id=PROJECT, lease_token=PROJECT, kind="BUILD_RUN", project_id=PROJECT),
         command(tmp_path), "BUILDING",
     )
     assert result.status == JobStatus.SUCCEEDED
@@ -219,12 +224,12 @@ async def test_unsupported_command_is_rejected_before_authorization(tmp_path):
 async def test_metricflow_calls_python_function_without_child(tmp_path, monkeypatch):
     import dbt_metricflow_service.platform.metricflow as module
 
-    payload = {"mode": "PROBE"}
+    payload = EngineRequest(mode="PROBE")
 
     def execute(project, profiles, data):
         assert os.getpid() == calling_pid
         assert data is payload
-        return {"queryCapability": True}
+        return EngineResult(query_capability=True)
 
     calling_pid = os.getpid()
     monkeypatch.setattr(module, "execute_programmatic", execute)
@@ -233,21 +238,21 @@ async def test_metricflow_calls_python_function_without_child(tmp_path, monkeypa
     )
     result = await run_metricflow(PROJECT, spec, 5, 64, before_start)
     assert result.record.status == JobStatus.SUCCEEDED
-    assert result.payload == {"queryCapability": True}
+    assert result.payload == EngineResult(query_capability=True)
     assert list(tmp_path.iterdir()) == []
 
 
 async def test_metricflow_success_does_not_use_command_exit_codes(tmp_path, monkeypatch):
     import dbt_metricflow_service.platform.metricflow as module
 
-    monkeypatch.setattr(module, "execute_programmatic", lambda *args: {"queryCapability": True})
+    monkeypatch.setattr(module, "execute_programmatic", lambda *args: EngineResult(query_capability=True))
     spec = MetricFlowRequest(
-        {"DBT_PROJECT_DIR": str(tmp_path), "DBT_PROFILES_DIR": str(tmp_path)}, {"mode": "PROBE"},
+        {"DBT_PROJECT_DIR": str(tmp_path), "DBT_PROFILES_DIR": str(tmp_path)}, EngineRequest(mode="PROBE"),
     )
     result = await run_metricflow(PROJECT, spec, 5, 64, before_start)
     assert result.record.status == JobStatus.SUCCEEDED
     assert result.record.exit_code is None
-    assert result.payload == {"queryCapability": True}
+    assert result.payload == EngineResult(query_capability=True)
 
 
 async def test_metricflow_invalid_available_dimensions_returns_business_error_without_exit_code(tmp_path, monkeypatch):
@@ -258,7 +263,7 @@ async def test_metricflow_invalid_available_dimensions_returns_business_error_wi
 
     monkeypatch.setattr(module, "execute_programmatic", execute)
     request = MetricFlowRequest(
-        {"DBT_PROJECT_DIR": str(tmp_path), "DBT_PROFILES_DIR": str(tmp_path)}, {"mode": "OPTIONS"},
+        {"DBT_PROJECT_DIR": str(tmp_path), "DBT_PROFILES_DIR": str(tmp_path)}, EngineRequest(mode="OPTIONS"),
     )
     result = await run_metricflow(PROJECT, request, 5, 64, before_start)
     assert result.error_code == "INVALID_QUERY"
@@ -278,19 +283,22 @@ async def test_dbt_failure_preserves_command_exit_codes(tmp_path, monkeypatch, e
     assert SECRET not in str(record.model_dump())
 
 
-@pytest.mark.parametrize("value", [{}, {"columns": ["名称"], "rows": [["订单"]], "truncated": False}])
+@pytest.mark.parametrize("value", [
+    EngineResult(),
+    EngineResult(columns=[ResultColumn(name="名称", type="str")], rows=[["订单"]], truncated=False),
+])
 async def test_programmatic_request_and_result_stay_in_memory(tmp_path, monkeypatch, value):
     import dbt_metricflow_service.platform.metricflow as module
 
-    payload = {"mode": "OPTIONS", "metrics": ["orders"]}
+    payload = EngineRequest(mode="OPTIONS", metrics=["orders"])
     settings = SimpleNamespace(
         profiles_dir=tmp_path, command_timeout_seconds=5, max_output_bytes=64, max_result_bytes=1024,
     )
     executor = RuntimeExecutor(settings, SimpleNamespace(phase=lambda *args, **kwargs: True), None)
-    job = {
-        "job_id": PROJECT, "lease_token": PROJECT, "kind": "BUILD_RUN", "project_id": PROJECT,
-        "schema_name": SCHEMA, "profile_binding_id": PROJECT,
-    }
+    job = leased_job(
+        job_id=PROJECT, lease_token=PROJECT, kind="BUILD_RUN", project_id=PROJECT,
+        schema_name=SCHEMA, profile_binding_id=PROJECT,
+    )
 
     def execute(project, profiles, data):
         assert data is payload
@@ -311,71 +319,79 @@ async def test_programmatic_errors_do_not_write_control_files(tmp_path, monkeypa
         profiles_dir=tmp_path, command_timeout_seconds=5, max_output_bytes=64, max_result_bytes=1024,
     )
     executor = RuntimeExecutor(settings, SimpleNamespace(phase=lambda *args, **kwargs: True), None)
-    job = {
-        "job_id": PROJECT, "lease_token": PROJECT, "kind": "BUILD_RUN", "project_id": PROJECT,
-        "schema_name": SCHEMA, "profile_binding_id": PROJECT,
-    }
+    job = leased_job(
+        job_id=PROJECT, lease_token=PROJECT, kind="BUILD_RUN", project_id=PROJECT,
+        schema_name=SCHEMA, profile_binding_id=PROJECT,
+    )
 
     def execute(project, profiles, data):
         raise module.InvalidDimensionsRequest(SECRET) if invalid_dimensions else ConnectionError(SECRET)
 
     monkeypatch.setattr(module, "execute_programmatic", execute)
     with pytest.raises(ExecutionError) as error:
-        await executor._metricflow(job, tmp_path, {"mode": "OPTIONS", "metrics": ["missing"]})
+        await executor._metricflow(job, tmp_path, EngineRequest(mode="OPTIONS", metrics=["missing"]))
     assert error.value.code == ("INVALID_QUERY" if invalid_dimensions else "COMMAND_FAILED")
     assert SECRET not in str(error.value.payload)
     assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.parametrize("value,limit,error_code", [
-    ({"x": "中"}, 12, None),
-    ({"x": "中"}, 11, "RESULT_TOO_LARGE"),
-    ({}, 2, None),
-    ({}, 1, "RESULT_TOO_LARGE"),
+    (EngineResult(rows=[["中"]]), 0, None),
+    (EngineResult(rows=[["中"]]), -1, "RESULT_TOO_LARGE"),
+    (EngineResult(), 0, None),
+    (EngineResult(), -1, "RESULT_TOO_LARGE"),
     ([], 1024, "RESULT_INVALID"),
     (None, 1024, "RESULT_INVALID"),
 ])
 async def test_memory_result_preserves_shape_and_utf8_size_limits(tmp_path, monkeypatch, value, limit, error_code):
     import dbt_metricflow_service.platform.metricflow as module
 
+    if isinstance(value, EngineResult):
+        serialized = json.dumps(
+            value.model_dump(mode="python", by_alias=True, exclude_unset=True), ensure_ascii=False,
+        )
+        limit += len(serialized.encode("utf-8"))
+
     settings = SimpleNamespace(
         profiles_dir=tmp_path, command_timeout_seconds=5, max_output_bytes=64, max_result_bytes=limit,
     )
     executor = RuntimeExecutor(settings, SimpleNamespace(phase=lambda *args, **kwargs: True), None)
-    job = {
-        "job_id": PROJECT, "lease_token": PROJECT, "kind": "BUILD_RUN", "project_id": PROJECT,
-        "schema_name": SCHEMA, "profile_binding_id": PROJECT,
-    }
+    job = leased_job(
+        job_id=PROJECT, lease_token=PROJECT, kind="BUILD_RUN", project_id=PROJECT,
+        schema_name=SCHEMA, profile_binding_id=PROJECT,
+    )
     monkeypatch.setattr(module, "execute_programmatic", lambda *args: value)
     if error_code is None:
-        assert await executor._metricflow(job, tmp_path, {"mode": "OPTIONS"}) is value
+        assert await executor._metricflow(job, tmp_path, EngineRequest(mode="OPTIONS")) is value
     else:
         with pytest.raises(ExecutionError) as error:
-            await executor._metricflow(job, tmp_path, {"mode": "OPTIONS"})
+            await executor._metricflow(job, tmp_path, EngineRequest(mode="OPTIONS"))
         assert error.value.code == error_code
     assert list(tmp_path.iterdir()) == []
 
 
+@pytest.mark.parametrize("cell", [object(), SECRET.encode()])
 @pytest.mark.parametrize("kind,stopped", [("METRIC_QUERY", True), ("RUN_CLEANUP", False)])
-async def test_non_json_result_retains_sanitized_command_failure(tmp_path, monkeypatch, kind, stopped):
+async def test_non_json_result_retains_sanitized_command_failure(tmp_path, monkeypatch, kind, stopped, cell):
     import dbt_metricflow_service.platform.metricflow as module
-    from dbt_metricflow_service.platform.queries import _json_cell
 
     settings = SimpleNamespace(
         profiles_dir=tmp_path, command_timeout_seconds=5, max_output_bytes=64, max_result_bytes=1024,
     )
     executor = RuntimeExecutor(settings, SimpleNamespace(phase=lambda *args, **kwargs: True), None)
-    job = {
-        "job_id": PROJECT, "lease_token": PROJECT, "kind": kind, "project_id": PROJECT,
-        "schema_name": SCHEMA, "profile_binding_id": PROJECT,
-    }
-    # bytea 等二进制列仍可能经过现有单元格转换到达执行边界。
-    monkeypatch.setattr(module, "execute_programmatic", lambda *args: {"rows": [[_json_cell(SECRET.encode())]]})
+    job = leased_job(
+        job_id=PROJECT, lease_token=PROJECT, kind=kind, project_id=PROJECT,
+        schema_name=SCHEMA, profile_binding_id=PROJECT,
+    )
+    # 未知原生对象到达结果边界时，必须保留失败状态并隐藏原始内容。
+    monkeypatch.setattr(module, "execute_programmatic", lambda *args: EngineResult(rows=[[cell]]))
     with pytest.raises(ExecutionError) as error:
-        await executor._metricflow(job, tmp_path, {"mode": "QUERY"})
+        await executor._metricflow(job, tmp_path, EngineRequest(
+            mode="QUERY", request=PlatformQueryRequest(runId=uuid4(), mode="QUERY"),
+        ))
     assert error.value.code == "COMMAND_FAILED"
     assert error.value.stopped is stopped
-    assert error.value.payload["status"] == "failed"
-    assert error.value.payload["stderr"] == "TypeError"
+    assert error.value.payload.status == "failed"
+    assert error.value.payload.stderr == "ValidationError"
     assert SECRET not in str(error.value.payload)
     assert list(tmp_path.iterdir()) == []

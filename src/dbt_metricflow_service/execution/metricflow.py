@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from dbt_metricflow_service.models.payloads import JsonObject
+from dbt_metricflow_service.platform.models import EngineRequest, EngineResult
 
 from .embedded import PROFILES_ENV, PROJECT_ENV, create_output, engine_environment, run_serialized
 from .models import JobRecord, JobStatus
@@ -21,7 +21,7 @@ class MetricFlowRequest:
     # 项目路径、profile 和执行目标等引擎环境项。
     environment: Mapping[str, str]
     # 直接交给 MetricFlow 的请求，不写入诊断表示。
-    payload: JsonObject = field(repr=False)
+    payload: EngineRequest = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,7 +31,7 @@ class MetricFlowResult:
     # 记录执行状态与日志；MetricFlow 不设置命令退出码。
     record: JobRecord
     # 成功时直接返回的业务对象，失败或超时时为空。
-    payload: JsonObject | None = field(default=None, repr=False)
+    payload: EngineResult | None = field(default=None, repr=False)
     # 可向调用方公开的业务错误码，不包含原始异常文本。
     error_code: str | None = None
 
@@ -45,7 +45,9 @@ async def run_metricflow(
         lambda: invoke_metricflow(project, request, max_output_bytes), timeout_seconds, before_start,
     )
     if timed_out:
-        return replace(result, record=result.record.model_copy(update={"status": JobStatus.TIMED_OUT}), payload=None)
+        return replace(result, record=result.record.with_outcome(
+            status=JobStatus.TIMED_OUT, exit_code=result.record.exit_code, stderr=result.record.stderr,
+        ), payload=None)
     return result
 
 

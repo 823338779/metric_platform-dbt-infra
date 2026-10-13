@@ -6,15 +6,16 @@ import hashlib
 import json
 from importlib.metadata import version
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Final, cast
 from uuid import uuid4
 
+from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.application.errors import ServiceError
 from dbt_metricflow_service.execution.embedded import run_serialized
 from dbt_metricflow_service.execution.metricflow import MetricFlowRequest, MetricFlowResult, invoke_metricflow
 from dbt_metricflow_service.execution.models import JobStatus
-from dbt_metricflow_service.models.payloads import JsonObject
 from dbt_metricflow_service.platform.execution_profile import ExecutionConfigurationError
+from dbt_metricflow_service.platform.models import EngineRequest, EngineResult
 from dbt_metricflow_service.runtime.executor import build_engine_environment
 from dbt_metricflow_service.runtime.workspace import materialized_workspace
 from dbt_metricflow_service.settings import Settings
@@ -23,11 +24,25 @@ from dbt_metricflow_service.storage.jobs import CleanupBlocked, JobStore
 from dbt_metricflow_service.storage.postgres import Database
 from dbt_metricflow_service.storage.records import StoredBuild, StoredJob
 
+EXECUTION_CONFIGURATION_UNAVAILABLE: Final[str] = "execution configuration unavailable"
+BUILD_CLEANUP_IN_PROGRESS: Final[str] = "build is being cleaned"
+QUERY_EXECUTION_TIMED_OUT: Final[str] = "query execution timed out"
+QUERY_EXECUTION_FAILED: Final[str] = "query execution failed"
+INVALID_QUERY_RESULT: Final[str] = "query returned an invalid result"
+QUERY_RESULT_TOO_LARGE: Final[str] = "query result exceeds the size limit"
+
+
 if TYPE_CHECKING:
     from dbt_metricflow_service.application.deployments import DeploymentService
 
 
-TOOLCHAIN_PACKAGES = ("dbt-core", "metricflow", "dbt-starrocks", "dbt-duckdb", "dbt-postgres")
+TOOLCHAIN_PACKAGES = (
+    strings.DBT_CORE_PACKAGE,
+    strings.METRICFLOW_PACKAGE,
+    strings.DBT_STARROCKS_PACKAGE,
+    strings.DBT_DUCKDB_PACKAGE,
+    strings.DBT_POSTGRES_PACKAGE,
+)
 
 
 def current_toolchain() -> str:
@@ -37,7 +52,7 @@ def current_toolchain() -> str:
         digest.update(f"{package}={version(package)}\n".encode())
     # runtime 已归入子包，兼容标识仍必须覆盖整个服务源码。
     source_root = Path(__file__).resolve().parents[1]
-    for source in sorted(source_root.rglob("*.py")):
+    for source in sorted(source_root.rglob(strings.PYTHON_GLOB)):
         digest.update(source.relative_to(source_root).as_posix().encode())
         digest.update(source.read_bytes().replace(b"\r\n", b"\n"))
     return digest.hexdigest()
@@ -57,21 +72,20 @@ class Runtime:
                                        max_set_bytes=settings.max_artifact_bytes)
         self.worker = None
 
-    def execute_query(self, build: StoredBuild, payload: JsonObject) -> JsonObject:
+    def execute_query(self, build: StoredBuild, payload: EngineRequest) -> EngineResult:
         """直接执行固定构建的查询，输入、结果和诊断均不落库。"""
         async def before_start() -> None:
             # 无持久租约；执行线程内的 query_run 会在引擎调用前校验并保护构建。
             return None
 
         def invoke() -> MetricFlowResult:
-            with self.jobs.query_run(cast(str, build["run_id"])) as parent:
+            with self.jobs.query_run(cast(str, build.run_id)) as parent:
                 with materialized_workspace(
-                    self.artifacts, cast(str, build["output_set_id"]), self.settings.temp_root,
+                    self.artifacts, cast(str, build.output_set_id), self.settings.temp_root,
                     str(uuid4()), str(uuid4()),
                 ) as project:
-                    from ..models.execution import ExecutionSnapshot
                     from ..platform.execution_profile import materialized_profile
-                    profile = materialized_profile(ExecutionSnapshot.model_validate(build["config_snapshot"]),
+                    profile = materialized_profile(build.config_snapshot,
                                                    self.settings.temp_root, self.settings, project)
                     with profile as profiles:
                         return invoke_with_profile(profiles, parent, project)
@@ -79,10 +93,10 @@ class Runtime:
         def invoke_with_profile(profiles: Path, parent: StoredJob, project: Path) -> MetricFlowResult:
             environment = build_engine_environment(
                 project, profiles,
-                cast(str, parent["schema_name"]), cast(str, parent["profile_binding_id"]),
+                cast(str, parent.schema_name), cast(str, parent.profile_binding_id),
             )
             return invoke_metricflow(
-                parent["project_id"], MetricFlowRequest(environment, payload),
+                parent.project_id, MetricFlowRequest(environment, payload),
                 self.settings.max_output_bytes,
             )
 
@@ -91,26 +105,31 @@ class Runtime:
             result, timed_out = asyncio.run(run_serialized(invoke, self.settings.command_timeout_seconds, before_start))
         except ExecutionConfigurationError as error:
             # 凭据或实例清单是运行基础设施，恢复配置后可重试同一个构建查询。
-            raise ServiceError(error.code, "execution configuration unavailable", 503, retryable=True,
-                               build_id=build["build_id"]) from error
+            raise ServiceError(error.code, EXECUTION_CONFIGURATION_UNAVAILABLE, 503, retryable=True,
+                               build_id=build.build_id) from error
         except CleanupBlocked as error:
-            raise ServiceError("PHYSICAL_OBJECTS_REMOVED", "build is being cleaned", 410,
-                               build_id=build["build_id"]) from error
+            raise ServiceError(strings.PHYSICAL_OBJECTS_REMOVED, BUILD_CLEANUP_IN_PROGRESS, 410,
+                               build_id=build.build_id) from error
         if timed_out or result.record.status == JobStatus.TIMED_OUT:
-            raise ServiceError("COMMAND_TIMEOUT", "query execution timed out", 504, build_id=build["build_id"])
+            raise ServiceError(strings.COMMAND_TIMEOUT, QUERY_EXECUTION_TIMED_OUT, 504, build_id=build.build_id)
         if result.record.status != JobStatus.SUCCEEDED:
-            code = result.error_code or "COMMAND_FAILED"
-            raise ServiceError(code, "query execution failed", 422 if code == "INVALID_QUERY" else 503,
-                               build_id=build["build_id"])
+            code = result.error_code or strings.COMMAND_FAILED
+            raise ServiceError(code, QUERY_EXECUTION_FAILED, 422 if code == strings.INVALID_QUERY else 503,
+                               build_id=build.build_id)
         value = result.payload
-        if not isinstance(value, dict):
-            raise ServiceError("RESULT_INVALID", "query returned an invalid result", 503, build_id=build["build_id"])
+        if not isinstance(value, EngineResult):
+            raise ServiceError(strings.RESULT_INVALID, INVALID_QUERY_RESULT, 503, build_id=build.build_id)
         size = 0
-        for chunk in json.JSONEncoder(ensure_ascii=False).iterencode(value):
-            size += len(chunk.encode())
-            if size > self.settings.max_result_bytes:
-                raise ServiceError("RESULT_TOO_LARGE", "query result exceeds the size limit", 422,
-                                   build_id=build["build_id"])
+        try:
+            for chunk in json.JSONEncoder(ensure_ascii=False).iterencode(
+                value.model_dump(mode=strings.PYTHON_MODE, by_alias=True, exclude_unset=True),
+            ):
+                size += len(chunk.encode())
+                if size > self.settings.max_result_bytes:
+                    raise ServiceError(strings.RESULT_TOO_LARGE, QUERY_RESULT_TOO_LARGE, 422,
+                                       build_id=build.build_id)
+        except (TypeError, ValueError, RecursionError) as error:
+            raise ServiceError(strings.COMMAND_FAILED, QUERY_EXECUTION_FAILED, 503, build_id=build.build_id) from error
         return value
 
 

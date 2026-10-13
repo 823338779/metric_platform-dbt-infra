@@ -4,6 +4,7 @@ import logging
 
 import uvicorn
 
+from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.api.app import create_app
 from dbt_metricflow_service.settings import Settings
 
@@ -18,5 +19,5 @@ def run() -> None:
     uvicorn.run(app, host=settings.server_host, port=settings.server_port)
 
 
-if __name__ == "__main__":
+if __name__ == strings.MODULE_ENTRYPOINT:
     run()

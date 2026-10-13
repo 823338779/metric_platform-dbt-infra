@@ -1,25 +1,30 @@
 """执行 profile、物理命名空间和外部 secret 解析的边界。"""
 
 import json
-from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 import yaml
 
+from dbt_metricflow_service.models.configuration import ExecutionCredential, ExecutionInstance
 from dbt_metricflow_service.platform.execution_profile import (
     materialized_profile,
     validate_execution_manifest,
     validate_execution_target,
 )
+from dbt_metricflow_service.settings import Settings
 from tests.test_execution_snapshot_storage import snapshot
 
 
 def settings():
-    return SimpleNamespace(
-        execution_instances={"warehouse": {"type": "starrocks", "hosts": ["localhost", "127.0.0.1"], "port": 9030}},
-        execution_credentials={"warehouse-test": {
-            "userEnv": "DBT_ENV_SECRET_ENV_TEST_USER", "passwordEnv": "DBT_ENV_SECRET_ENV_TEST_PASSWORD",
-        }},
+    return Settings(
+        profiles_dir=Path("profiles"), command_timeout_seconds=30, max_output_bytes=1024,
+        execution_instances={"warehouse": ExecutionInstance(
+            type="starrocks", hosts=["localhost", "127.0.0.1"], port=9030,
+        )},
+        execution_credentials={"warehouse-test": ExecutionCredential(
+            user_env="DBT_ENV_SECRET_ENV_TEST_USER", password_env="DBT_ENV_SECRET_ENV_TEST_PASSWORD",
+        )},
     )
 
 

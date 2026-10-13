@@ -2,27 +2,25 @@
 
 import asyncio
 from contextlib import nullcontext
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
-from uuid import uuid4
 
 import pytest
 
 from dbt_metricflow_service.application.errors import ServiceError
 from dbt_metricflow_service.platform.execution_profile import materialized_profile
+from dbt_metricflow_service.platform.models import EngineRequest
 from dbt_metricflow_service.runtime.service import Runtime
 from dbt_metricflow_service.runtime.worker import Worker
+from tests.data_helpers import leased_job, stored_build
 from tests.test_execution_profiles import settings
 from tests.test_execution_snapshot_storage import snapshot
 
 
 def unavailable_settings(tmp_path):
-    config = settings()
-    config.execution_credentials = {}
-    config.temp_root = tmp_path
-    config.command_timeout_seconds = 30
-    config.heartbeat_seconds = 60
-    return config
+    return replace(settings(), execution_credentials={}, temp_root=tmp_path,
+                   command_timeout_seconds=30, heartbeat_seconds=60, lease_seconds=180)
 
 
 def test_query_missing_credentials_is_retryable_service_failure(tmp_path, monkeypatch):
@@ -32,10 +30,9 @@ def test_query_missing_credentials_is_retryable_service_failure(tmp_path, monkey
     runtime.jobs = SimpleNamespace(query_run=lambda _: nullcontext({}))
     monkeypatch.setattr("dbt_metricflow_service.runtime.service.materialized_workspace",
                         lambda *args: nullcontext(tmp_path))
-    build = {"build_id": str(uuid4()), "run_id": "run", "output_set_id": "output", "protocol_version": 4,
-             "config_snapshot": snapshot().model_dump(mode="json", by_alias=True)}
+    build = stored_build(run_id="run", output_set_id="output", config_snapshot=snapshot())
     with pytest.raises(ServiceError) as raised:
-        runtime.execute_query(build, {})
+        runtime.execute_query(build, EngineRequest(mode="PROBE"))
     assert raised.value.status == 503
     assert raised.value.error.code == "CREDENTIAL_UNAVAILABLE"
     assert raised.value.error.retryable
@@ -51,6 +48,6 @@ def test_worker_missing_credentials_records_specific_failure(tmp_path):
             pytest.fail("missing credential was accepted")
 
     worker.executor = SimpleNamespace(execute=execute)
-    asyncio.run(worker._execute({"job_id": "job", "lease_token": "lease", "attempt_id": "attempt"}))
+    asyncio.run(worker._execute(leased_job(job_id="job", lease_token="lease", attempt_id="attempt")))
     assert jobs.fail.call_args.args[2] == "CREDENTIAL_UNAVAILABLE"
     assert jobs.fail.call_args.kwargs["stopped"] is True

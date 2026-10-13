@@ -4,18 +4,23 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Literal
+from typing import Final, Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, field_validator
 
+from dbt_metricflow_service import constants as strings
+
 from .builds import SHA_PATTERN, BuildView, Contract, DeploymentPolicy, Origin, validate_branch
+
+INVALID_BUSINESS_TIMEZONE_MESSAGE: Final[str] = 'businessTimezone must be an IANA timezone'
+INVALID_REPOSITORY_URL_MESSAGE: Final[str] = 'repository must be a remote URL without embedded credentials'
 
 IDENTIFIER_PATTERN = r"^[a-z][a-z0-9_]{0,62}$"
 SNAPSHOT_TARGET = "execution"
-JSON_MODE = "json"
+JSON_MODE = strings.JSON_MODE
 
 
 class ConnectionTarget(Contract):
@@ -34,17 +39,17 @@ class ExecutionSnapshot(Contract):
     connection: ConnectionTarget = Field(description="完整非敏感物理连接目标")
     credential_ref: str = Field(min_length=1, max_length=128, description="运行基础设施允许的 secret 引用")
     catalog: str = Field(pattern=IDENTIFIER_PATTERN, description="目标 catalog 或适配器数据库")
-    schema_name: str = Field(alias="schema", pattern=IDENTIFIER_PATTERN, description="物理写入 schema")
+    schema_name: str = Field(alias=strings.DBT_SCHEMA_FIELD, pattern=IDENTIFIER_PATTERN, description="物理写入 schema")
     threads: int = Field(default=1, ge=1, le=32, description="单次 dbt 并行度")
-    business_timezone: str = Field(default="UTC", description="该构建查询的业务时区")
+    business_timezone: str = Field(default=strings.UTC_TIMEZONE, description="该构建查询的业务时区")
 
-    @field_validator("business_timezone")
+    @field_validator(strings.BUSINESS_TIMEZONE_FIELD)
     @classmethod
     def valid_timezone(cls, value: str) -> str:
         try:
             ZoneInfo(value)
         except (ZoneInfoNotFoundError, ValueError) as error:
-            raise ValueError("businessTimezone must be an IANA timezone") from error
+            raise ValueError(INVALID_BUSINESS_TIMEZONE_MESSAGE) from error
         return value
 
 
@@ -57,17 +62,17 @@ class SnapshotBuildRequest(Contract):
     idempotency_key: str = Field(min_length=1, max_length=256, description="一次提交的稳定请求键")
     origin: Origin | None = Field(default=None, description="调用方追溯标签")
 
-    _branch = field_validator("branch_name")(validate_branch)
+    _branch = field_validator(strings.BRANCH_NAME_FIELD)(validate_branch)
 
-    @field_validator("repository")
+    @field_validator(strings.REPOSITORY_FIELD)
     @classmethod
     def valid_repository(cls, value: str) -> str:
         parsed = urlsplit(value)
-        if (parsed.scheme not in {"http", "https", "ssh"} or not parsed.hostname
+        if (parsed.scheme not in {strings.HTTP_SCHEME, strings.HTTPS_SCHEME, strings.SSH_SCHEME} or not parsed.hostname
                 or parsed.password or parsed.query or parsed.fragment
                 or any(char.isspace() for char in value)
-                or parsed.scheme in {"http", "https"} and parsed.username):
-            raise ValueError("repository must be a remote URL without embedded credentials")
+                or parsed.scheme in {strings.HTTP_SCHEME, strings.HTTPS_SCHEME} and parsed.username):
+            raise ValueError(INVALID_REPOSITORY_URL_MESSAGE)
         return value
 
 

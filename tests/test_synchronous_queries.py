@@ -53,7 +53,8 @@ def test_query_response_contains_rows_without_persistent_identity():
     build_id, query_id = str(uuid4()), str(uuid4())
     result = {
         "buildId": build_id, "mode": "QUERY",
-        "commitSha": "a" * 40, "businessTimezone": "Asia/Shanghai", "normalizedTimeRange": {},
+        "commitSha": "a" * 40, "businessTimezone": "Asia/Shanghai",
+        "normalizedTimeRange": {"startTime": None, "endTime": None},
         "columns": [{"name": "orders", "type": "int"}], "rows": [[7]],
         "resultTruncated": False,
     }
@@ -114,18 +115,18 @@ def test_failed_query_returns_http_error_in_original_request(store, tmp_path, co
     service, parent, build = query_service(store, tmp_path)
 
     def fail_query(build, payload):
-        raise ServiceError(code, "query execution failed", status, build_id=build["build_id"])
+        raise ServiceError(code, "query execution failed", status, build_id=build.build_id)
 
     service.execute = fail_query
     app = FastAPI()
     register_exception_handlers(app)
     app.include_router(router(service, lambda: "platform"))
-    response = TestClient(app).post("/query", params={"build_id": build["build_id"]}, json={
+    response = TestClient(app).post("/query", params={"build_id": build.build_id}, json={
         "mode": "QUERY", "metricResourceIds": ["metric.sample.orders"],
     })
     assert response.status_code == status
     assert response.json()["error"]["code"] == code
-    assert response.json()["error"]["buildId"] == build["build_id"]
+    assert response.json()["error"]["buildId"] == build.build_id
 
 
 def test_post_returns_current_rows_without_persistent_identity(store, tmp_path):
@@ -135,7 +136,7 @@ def test_post_returns_current_rows_without_persistent_identity(store, tmp_path):
     app = FastAPI()
     app.include_router(router(service, lambda: "platform"))
     client = TestClient(app)
-    params = {"build_id": build["build_id"]}
+    params = {"build_id": build.build_id}
     body = {"mode": "QUERY", "metricResourceIds": ["metric.sample.orders"], "limit": 1000}
     first = client.post("/query", params=params, json=body)
     assert first.status_code == 200
@@ -151,10 +152,10 @@ def test_post_returns_current_rows_without_persistent_identity(store, tmp_path):
 
 def test_query_computes_current_dimensions_before_compiling(store, tmp_path):
     service, parent, build = query_service(store, tmp_path)
-    option = service.fixture_available_dimensions.dimensions[0]["optionId"]
+    option = service.fixture_available_dimensions.dimensions[0].option_id
     count = len(service.execute.calls)
-    service.submit(build["build_id"], QueryRequest(
+    service.submit(build.build_id, QueryRequest(
         mode="QUERY", metricResourceIds=["metric.sample.orders"], groupBy=[{"optionId": option}],
     ), "platform")
-    assert [data["mode"] for _, data in service.execute.calls[count:]] == ["OPTIONS", "QUERY"]
-    assert service.execute.calls[-1][1]["request"]["groupBy"] == ["order__region"]
+    assert [data.mode for _, data in service.execute.calls[count:]] == ["OPTIONS", "QUERY"]
+    assert service.execute.calls[-1][1].request.group_by == ["order__region"]

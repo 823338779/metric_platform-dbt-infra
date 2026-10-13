@@ -4,10 +4,15 @@ import shutil
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Final
 from uuid import UUID
 
 from dbt_metricflow_service.execution.artifacts import _is_link
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
+
+LINKED_WORKSPACE_ROOT_FORBIDDEN: Final[str] = "workspace root cannot contain links"
+LINKED_JOB_DIRECTORY_FORBIDDEN: Final[str] = "workspace job directory cannot be linked"
+WORKSPACE_PATH_CHANGED: Final[str] = "workspace path changed during execution"
 
 
 @contextmanager
@@ -17,12 +22,12 @@ def attempt_workspace(temp_root: Path, job_id: str, attempt_id: str) -> Iterator
     job_name, attempt_name = str(UUID(str(job_id))), str(UUID(str(attempt_id)))
     root = Path(temp_root)
     if any(_is_link(path) for path in (root, *root.parents)):
-        raise ValueError("workspace root cannot contain links")
+        raise ValueError(LINKED_WORKSPACE_ROOT_FORBIDDEN)
     root.mkdir(parents=True, exist_ok=True)
     root = root.resolve(strict=True)
     parent = root / job_name
     if _is_link(parent):
-        raise ValueError("workspace job directory cannot be linked")
+        raise ValueError(LINKED_JOB_DIRECTORY_FORBIDDEN)
     parent.mkdir(exist_ok=True)
     directory = parent / attempt_name
     directory.mkdir(exist_ok=False)
@@ -32,7 +37,7 @@ def attempt_workspace(temp_root: Path, job_id: str, attempt_id: str) -> Iterator
         # 清理前再次核对边界；绝不递归删除被替换为链接的目录。
         if (_is_link(parent) or _is_link(directory)
                 or directory.resolve().parent != root / job_name):
-            raise ValueError("workspace path changed during execution")
+            raise ValueError(WORKSPACE_PATH_CHANGED)
         shutil.rmtree(directory)
 
 

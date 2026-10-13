@@ -12,7 +12,6 @@ from dbt_metricflow_service.runtime.workspace import materialized_workspace
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.entities import ArtifactSet
 from dbt_metricflow_service.storage.postgres import Database
-from dbt_metricflow_service.storage.rows import row_dict
 
 # 所有集成测试使用独立项目，允许不同仓储测试并行执行。
 DATABASE_ENV = "SERVICE_TEST_DATABASE_URL"
@@ -164,7 +163,7 @@ def test_metadata_has_stable_digest_across_local_roots(store, project, tmp_path)
         sql_result = connection.exec_driver_sql(
             "SELECT raw_sha256 FROM runtime_artifact_file WHERE set_id=%s AND relative_path=%s", (second, MODEL_PATH)
         )
-        assert row_dict(sql_result)["raw_sha256"] == hashlib.sha256(MODEL_BYTES).hexdigest()
+        assert sql_result.mappings().first()["raw_sha256"] == hashlib.sha256(MODEL_BYTES).hexdigest()
 
 
 @pytest.fixture

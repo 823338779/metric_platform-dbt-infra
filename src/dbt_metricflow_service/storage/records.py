@@ -1,15 +1,134 @@
 """数据库记录类型；UUID 由连接适配器读取为字符串，时间保持 datetime。"""
 
 from datetime import datetime
-from typing import Any, NotRequired, TypeAlias, TypedDict
+from pathlib import Path
+from uuid import UUID
 
-from ..models.payloads import JsonObject
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
-# SQL 投影和历史表的开放行边界；当前构建、部署和任务使用下方固定字段类型。
-DatabaseRow: TypeAlias = dict[str, Any]
+from dbt_metricflow_service import constants as strings
+
+from ..execution.models import JobStatus
+from ..models.builds import Contract, DeploymentPolicy, Origin
+from ..models.execution import ExecutionSnapshot, SnapshotBuildRequest
+from ..models.payloads import ValidationSummary
 
 
-class StoredBuild(TypedDict):
+class StoredRecord(BaseModel):
+    """数据库列快照；只接受已声明字段，不持有 ORM 会话。"""
+
+    model_config = ConfigDict(extra=strings.EXTRA_FORBID, from_attributes=True)
+
+
+class EmptyConfig(StoredRecord):
+    """尚未配置执行绑定的内部项目。"""
+
+
+class JobRequest(Contract):
+    """持久任务请求；清理任务和底层队列任务允许空请求。"""
+
+    repository: str | None = None
+    branch_name: str | None = None
+    commit_sha: str | None = None
+    execution: ExecutionSnapshot | None = None
+    deployment_policy: DeploymentPolicy | None = None
+    idempotency_key: str | None = None
+    origin: Origin | None = None
+    build_id: str | None = None
+    binding: ExecutionSnapshot | None = None
+    project_digest: str | None = None
+
+
+class JobErrorDetail(StoredRecord):
+    """脱敏执行诊断，保持引擎记录原有的 JSON 字段名称。"""
+
+    model_config = ConfigDict(extra=strings.EXTRA_FORBID, populate_by_name=True)
+    message: str | None = None
+    type: str | None = None
+    external_outcome_unknown: bool | None = Field(default=None, alias=strings.EXTERNAL_OUTCOME_UNKNOWN_ALIAS)
+    validation_summary: ValidationSummary | None = Field(default=None, alias=strings.VALIDATION_SUMMARY_FIELD)
+    id: UUID | None = None
+    project: str | None = None
+    status: JobStatus | None = None
+    submitted_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    exit_code: int | None = None
+    stdout: str | None = None
+    stderr: str | None = None
+    output_truncated: bool | None = None
+
+
+class ArtifactValidation(Contract):
+    all_tests_passed: StrictBool | None = None
+    representative_query_passed: StrictBool | None = None
+    relations_verified: StrictBool | None = None
+
+
+class ArtifactMetadata(StoredRecord):
+    source_set_id: str | None = None
+    source_commit_sha: str | None = None
+    project_digest: str | None = None
+    config_version: str | None = strings.DEFAULT_CONFIG_VERSION
+    toolchain_version: str | None = strings.DEFAULT_TOOLCHAIN_VERSION
+    format_version: str = strings.ARTIFACT_FORMAT_VERSION
+    validation_json: ArtifactValidation = Field(default_factory=ArtifactValidation)
+
+
+class StoredProject(StoredRecord):
+    project_id: str
+    binding_config: ExecutionSnapshot | EmptyConfig
+    config_version: str
+    source_set_id: str | None
+    busy_job_id: str | None
+    revision: int
+
+
+class BuildChangeSummary(StoredRecord):
+    phase: str
+    build_status: str
+    error_code: str | None
+
+
+class BuildLogRecord(StoredRecord):
+    sequence: int
+    summary: BuildChangeSummary
+
+
+class StoredArtifactSet(ArtifactMetadata):
+    set_id: str
+    project_id: str
+    producer_attempt_id: str | None
+    kind: str
+    state: str
+    content_digest: str | None
+    file_count: int
+    raw_bytes: int
+    created_at: datetime
+    sealed_at: datetime | None
+
+
+class ArtifactDigestEntry(StoredRecord):
+    relative_path: str
+    raw_sha256: str
+    raw_size: int
+
+
+class CaptureFile(ArtifactDigestEntry):
+    path: Path
+    executable: bool
+
+
+class StoredArtifactFile(ArtifactDigestEntry):
+    set_id: str
+    content: bytes
+    codec: str
+    stored_size: int
+    media_type: str
+    executable: bool
+
+
+class StoredBuild(StoredRecord):
     """engine_build 完整记录，包含可选的执行生命周期关联列。"""
 
     build_id: str  # 一次构建的公开身份。
@@ -24,8 +143,8 @@ class StoredBuild(TypedDict):
     caller: str  # 可信调用来源。
     idempotency_key: str  # 构建受理幂等键。
     request_digest: str  # 原请求的规范化摘要。
-    request_json: JsonObject  # 已校验请求的序列化副本。
-    config_snapshot: JsonObject  # 固定执行配置，不含凭据。
+    request_json: SnapshotBuildRequest  # 已校验请求。
+    config_snapshot: ExecutionSnapshot  # 固定执行配置，不含凭据。
     requested_commit_sha: str | None  # 请求显式指定的源码版本。
     commit_sha: str | None  # 实际解析并固定的源码版本。
     build_status: str  # 构建状态，与部署状态独立。
@@ -38,10 +157,10 @@ class StoredBuild(TypedDict):
     created_at: datetime  # 受理时间。
     updated_at: datetime  # 最近更新时间。
     finished_at: datetime | None  # 终态时间。
-    run_lifecycle: NotRequired[str | None]  # 关联查询附加的物理执行生命周期。
+    run_lifecycle: str | None = None  # 关联查询附加的物理执行生命周期。
 
 
-class StoredDeploymentTarget(TypedDict):
+class StoredDeploymentTarget(StoredRecord):
     """部署自然键、并发版本和实际生效指针。"""
 
     repository: str  # 目标仓库。
@@ -55,7 +174,7 @@ class StoredDeploymentTarget(TypedDict):
     source_state: str  # 远端分支相对部署的状态。
 
 
-class StoredDeploymentAttempt(TypedDict):
+class StoredDeploymentAttempt(StoredRecord):
     """一次持久部署意图。"""
 
     repository: str  # 目标仓库。
@@ -75,14 +194,26 @@ class StoredDeploymentAttempt(TypedDict):
     last_checked_at: datetime | None  # 后台最近检查时间。
 
 
-class StoredJob(TypedDict):
+class StoredJob(StoredRecord):
     """执行任务持久字段；领取后附加的租约信息由 LeasedJob 描述。"""
 
+    physical_target_key: str | None
+    target_claimed: bool
+    idempotency_scope: str | None
+    idempotency_key: str | None
+    attempt_no: int
+    available_at: datetime
+    deadline_at: datetime
+    max_attempts: int
+    retry_policy: str
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
     job_id: str  # 内部任务身份。
     kind: str  # 构建或清理类型。
     project_id: str  # 内部执行容器身份。
     parent_run_id: str | None  # 清理引用的构建任务。
-    request_json: JsonObject  # 固定执行请求。
+    request_json: JobRequest  # 固定执行请求。
     request_fingerprint: str  # 幂等请求摘要。
     status: str  # 执行状态。
     phase: str  # 执行阶段。
@@ -95,7 +226,7 @@ class StoredJob(TypedDict):
     run_lifecycle: str | None  # 构建物理对象的生命周期。
     current_attempt_id: str | None  # 当前执行尝试身份。
     error_code: str | None  # 稳定错误码。
-    error_detail: JsonObject | None  # 脱敏错误元数据。
+    error_detail: JobErrorDetail | None  # 脱敏错误元数据。
 
 
 class LeasedJob(StoredJob):
@@ -103,3 +234,5 @@ class LeasedJob(StoredJob):
 
     attempt_id: str  # 领取或租约查询附加的尝试身份。
     lease_token: str  # 用于 fencing 的租约凭据。
+
+    execution_stage: str = strings.PREPARING

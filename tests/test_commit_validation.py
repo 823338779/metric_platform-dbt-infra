@@ -18,7 +18,7 @@ def test_commit_validation_pins_request_and_recovers_after_config_change(store):
     first = app.submit_snapshot(body, CALLER)
     assert app.snapshot_view(first.build_id).commit_sha == body.commit_sha
     row = app.store.get(first.build_id)
-    assert "changes" not in row["request_json"]
+    assert not hasattr(row.request_json, "changes")
     with pytest.raises(ServiceError):
         app.snapshot_view(uuid4())
     changed = body.model_copy(update={"idempotency_key": uuid4().hex,

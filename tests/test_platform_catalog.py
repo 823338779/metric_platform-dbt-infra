@@ -46,12 +46,12 @@ def artifacts(tmp_path: Path) -> Path:
 
 def test_catalog_maps_metric_dimension_semantic_model_table_and_view(tmp_path: Path) -> None:
     result = catalog_from_artifacts(artifacts(tmp_path))
-    kinds = {resource["kind"] for resource in result["resources"]}
+    kinds = {resource.kind for resource in result.resources}
     assert kinds == {"METRIC", "DIMENSION", "SEMANTIC_MODEL", "TABLE", "VIEW"}
-    table = next(item for item in result["resources"] if item["kind"] == "TABLE")
-    assert table["columns"]["order_id"]["type"] == "integer"
-    assert result["dependencies"]
-    assert result["artifactSchemas"]["manifest"].endswith("v12.json")
+    table = next(item for item in result.resources if item.kind == "TABLE")
+    assert table.columns["order_id"].type == "integer"
+    assert result.dependencies
+    assert result.artifact_schemas.manifest.endswith("v12.json")
 
 
 def test_catalog_rejects_schema_version_or_missing_relation(tmp_path: Path) -> None:
@@ -76,9 +76,9 @@ def test_catalog_source_path_uses_git_separators_on_windows(tmp_path: Path) -> N
     manifest["metrics"]["metric.sample.revenue"]["original_file_path"] = "models\\orders.yml"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    metric = next(item for item in catalog_from_artifacts(target)["resources"] if item["kind"] == "METRIC")
+    metric = next(item for item in catalog_from_artifacts(target).resources if item.kind == "METRIC")
 
-    assert metric["sourcePath"] == "models/orders.yml"
+    assert metric.source_path == "models/orders.yml"
 
 
 def test_catalog_includes_external_source_table(tmp_path: Path) -> None:
@@ -97,9 +97,9 @@ def test_catalog_includes_external_source_table(tmp_path: Path) -> None:
     catalog["sources"] = {source_id: {"columns": {"order_id": {"name": "order_id", "type": "bigint"}}}}
     catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
 
-    table = next(item for item in catalog_from_artifacts(target)["resources"] if item["nativeId"] == source_id)
+    table = next(item for item in catalog_from_artifacts(target).resources if item.native_id == source_id)
 
-    assert table["kind"] == "TABLE"
-    assert table["relation"] == "`ecommerce_raw`.`orders`"
-    assert table["columns"]["order_id"]["type"] == "bigint"
-    assert table["queryable"] is True
+    assert table.kind == "TABLE"
+    assert table.relation == "`ecommerce_raw`.`orders`"
+    assert table.columns["order_id"].type == "bigint"
+    assert table.queryable is True

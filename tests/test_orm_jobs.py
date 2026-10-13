@@ -6,6 +6,7 @@ import pytest
 
 from dbt_metricflow_service.storage.entities import ArtifactSet, Base, RuntimeJob, RuntimeProject
 from dbt_metricflow_service.storage.jobs import JobStore
+from dbt_metricflow_service.storage.records import JobRequest
 
 
 def test_runtime_schema_has_no_obsolete_result_or_publication_storage():
@@ -27,4 +28,4 @@ def test_finish_accepts_status_and_artifact_reference_only():
 @pytest.mark.parametrize("kind", ["DBT_COMMAND", "MF_COMMAND", "METRIC_QUERY", "DRAFT_VALIDATION", "unknown"])
 def test_reserve_rejects_unsupported_kind_before_database_access(kind):
     with pytest.raises(ValueError, match="Unsupported job kind"):
-        JobStore(None).reserve(kind, "project", {})
+        JobStore(None).reserve(kind, "project", JobRequest())

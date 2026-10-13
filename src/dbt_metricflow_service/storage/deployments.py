@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import cast
+from typing import Final
 from uuid import UUID
 
 from sqlalchemy import func, select, tuple_, update
@@ -12,6 +12,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
+from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.models.deployments import DeploymentAttemptView, DeploymentKey, DeploymentRequest
 from dbt_metricflow_service.storage.postgres import Database
 from dbt_metricflow_service.storage.records import StoredBuild, StoredDeploymentAttempt, StoredDeploymentTarget
@@ -19,23 +20,28 @@ from dbt_metricflow_service.storage.records import StoredBuild, StoredDeployment
 from .entities import Build, DeploymentAttempt, DeploymentTarget, RuntimeJob
 from .jobs import StoreConflict
 from .paging import HISTORY_CURSOR_VERSION, read_cursor, write_cursor
-from .rows import entity_dict
+from .rows import entity_record
 
-BUILD_OPERATION = "BUILD"
-DEPLOYMENT_OPERATION = "DEPLOYMENT"
-BUILD_KEY_PREFIX = "build:"
-SUCCEEDED = "SUCCEEDED"
-PENDING = "PENDING"
-WAITING_FOR_BUILD = "WAITING_FOR_BUILD"
-CHECKING = "CHECKING"
-DEPLOYED = "DEPLOYED"
-STALE = "STALE"
-NEWER_INTENT = "NEWER_INTENT"
-TARGET_OR_BUILD_CHANGED = "TARGET_OR_BUILD_CHANGED"
-MATCHED = "MATCHED"
-MISSING = "MISSING"
-ACTIVE = "ACTIVE"
-TERMINAL = frozenset({DEPLOYED, STALE, "FAILED", "CANCELLED"})
+DEPLOYMENT_INPUT_CONFLICT_MESSAGE: Final = "deployment key already binds another input"
+DEPLOYMENT_VERSION_CONFLICT_MESSAGE: Final = "deployment target version changed"
+INVALID_CURSOR_IDENTITY_MESSAGE: Final = "invalid cursor identity"
+INVALID_CURSOR_MESSAGE: Final = strings.INVALID_CURSOR_MESSAGE
+
+BUILD_OPERATION = strings.BUILD
+DEPLOYMENT_OPERATION = strings.DEPLOYMENT
+BUILD_KEY_PREFIX = strings.BUILD_IDEMPOTENCY_PREFIX
+SUCCEEDED = strings.SUCCEEDED
+PENDING = strings.PENDING
+WAITING_FOR_BUILD = strings.WAITING_FOR_BUILD
+CHECKING = strings.CHECKING
+DEPLOYED = strings.DEPLOYED
+STALE = strings.STALE
+NEWER_INTENT = strings.NEWER_INTENT
+TARGET_OR_BUILD_CHANGED = strings.TARGET_OR_BUILD_CHANGED
+MATCHED = strings.MATCHED
+MISSING = strings.MISSING
+ACTIVE = strings.ACTIVE
+TERMINAL = frozenset({DEPLOYED, STALE, strings.FAILED, strings.CANCELLED})
 PENDING_STATUSES = (WAITING_FOR_BUILD, PENDING, CHECKING)
 
 
@@ -69,7 +75,7 @@ class DeploymentStore:
         branch: str,
         operation: str = DEPLOYMENT_OPERATION,
     ) -> StoredDeploymentAttempt:
-        natural_key = (build["repository"], build["environment"], branch)
+        natural_key = (build.repository, build.environment, branch)
         session.execute(
             pg_insert(DeploymentTarget)
             .values(repository=natural_key[0], environment=natural_key[1], branch_name=branch)
@@ -85,16 +91,16 @@ class DeploymentStore:
             environment=natural_key[1],
             branch_name=branch,
             generation=target.desired_generation,
-            build_id=build["build_id"],
+            build_id=build.build_id,
             caller=caller,
             idempotency_key=key,
             request_digest=fingerprint,
-            deployment_status=PENDING if build["build_status"] == SUCCEEDED else WAITING_FOR_BUILD,
+            deployment_status=PENDING if build.build_status == SUCCEEDED else WAITING_FOR_BUILD,
             operation=operation,
         )
         session.add(attempt)
         session.flush()
-        return cast(StoredDeploymentAttempt, entity_dict(attempt))
+        return entity_record(attempt, StoredDeploymentAttempt)
 
     def initial(self, build_id: UUID | str) -> StoredDeploymentAttempt | None:
         return self.initials([str(build_id)]).get(str(build_id))
@@ -108,17 +114,17 @@ class DeploymentStore:
                 DeploymentAttempt.operation == BUILD_OPERATION,
                 DeploymentAttempt.idempotency_key == func.concat(BUILD_KEY_PREFIX, DeploymentAttempt.build_id),
             ))
-            return {row.build_id: cast(StoredDeploymentAttempt, entity_dict(row)) for row in rows}
+            return {row.build_id: entity_record(row, StoredDeploymentAttempt) for row in rows}
 
     def current(self, key: DeploymentKey) -> StoredDeploymentTarget | None:
         with self.db.session() as session:
             row = session.get(DeploymentTarget, natural(key))
-            return cast(StoredDeploymentTarget | None, entity_dict(row))
+            return entity_record(row, StoredDeploymentTarget)
 
     def attempt(self, key: DeploymentKey, generation: int) -> StoredDeploymentAttempt | None:
         with self.db.session() as session:
             row = session.get(DeploymentAttempt, (*natural(key), generation))
-            return cast(StoredDeploymentAttempt | None, entity_dict(row))
+            return entity_record(row, StoredDeploymentAttempt)
 
     def by_key(self, repository: str, caller: str, key: str) -> StoredDeploymentAttempt | None:
         with self.db.session() as session:
@@ -130,18 +136,18 @@ class DeploymentStore:
                     DeploymentAttempt.idempotency_key == key,
                 )
             )
-            return cast(StoredDeploymentAttempt | None, entity_dict(row))
+            return entity_record(row, StoredDeploymentAttempt)
 
     def submit(
         self, build: StoredBuild, caller: str, request: DeploymentRequest, fingerprint: str
     ) -> StoredDeploymentAttempt:
         with self.db.fact_session() as session:
             # 使用同一 advisory lock 键序列化部署幂等受理，不依赖构建层的 SQL 常量。
-            scope = build["repository"] + caller + request.idempotency_key
+            scope = build.repository + caller + request.idempotency_key
             session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(scope, 0))))
             prior = session.scalar(
                 select(DeploymentAttempt).where(
-                    DeploymentAttempt.repository == build["repository"],
+                    DeploymentAttempt.repository == build.repository,
                     DeploymentAttempt.caller == caller,
                     DeploymentAttempt.operation == DEPLOYMENT_OPERATION,
                     DeploymentAttempt.idempotency_key == request.idempotency_key,
@@ -149,9 +155,9 @@ class DeploymentStore:
             )
             if prior:
                 if prior.request_digest != fingerprint:
-                    raise StoreConflict("deployment key already binds another input")
-                return cast(StoredDeploymentAttempt, entity_dict(prior))
-            key = (build["repository"], build["environment"], request.branch_name)
+                    raise StoreConflict(DEPLOYMENT_INPUT_CONFLICT_MESSAGE)
+                return entity_record(prior, StoredDeploymentAttempt)
+            key = (build.repository, build.environment, request.branch_name)
             session.execute(
                 pg_insert(DeploymentTarget)
                 .values(repository=key[0], environment=key[1], branch_name=key[2])
@@ -159,7 +165,7 @@ class DeploymentStore:
             )
             current = session.get(DeploymentTarget, key, with_for_update=True)
             if current.version != request.expected_target_version:
-                raise StoreConflict("deployment target version changed")
+                raise StoreConflict(DEPLOYMENT_VERSION_CONFLICT_MESSAGE)
             return self.accept_in_transaction(
                 session, build, caller, request.idempotency_key, fingerprint, request.branch_name
             )
@@ -186,7 +192,7 @@ class DeploymentStore:
             session.flush()
             if state == MISSING:
                 _stale(session, natural(key))
-            return cast(StoredDeploymentTarget | None, entity_dict(target))
+            return entity_record(target, StoredDeploymentTarget)
 
     def settle(
         self,
@@ -202,7 +208,7 @@ class DeploymentStore:
             target = session.get(DeploymentTarget, natural(key), with_for_update=True)
             attempt = session.get(DeploymentAttempt, (*natural(key), generation))
             if not attempt or attempt.deployment_status in TERMINAL:
-                return cast(StoredDeploymentAttempt | None, entity_dict(attempt))
+                return entity_record(attempt, StoredDeploymentAttempt)
             if target.desired_generation != generation:
                 status, reason = STALE, NEWER_INTENT
             if status == DEPLOYED:
@@ -233,7 +239,7 @@ class DeploymentStore:
             if status == DEPLOYED:
                 attempt.deployed_at = func.clock_timestamp()
             session.flush()
-            return cast(StoredDeploymentAttempt, entity_dict(attempt))
+            return entity_record(attempt, StoredDeploymentAttempt)
 
     def pending(self) -> list[StoredDeploymentAttempt]:
         with self.db.session() as session:
@@ -270,8 +276,8 @@ class DeploymentStore:
                 .values(last_checked_at=func.clock_timestamp())
                 .returning(DeploymentAttempt)
             )
-            rows = session.scalars(statement, execution_options={"synchronize_session": False})
-            return cast(list[StoredDeploymentAttempt], [entity_dict(row) for row in rows])
+            rows = session.scalars(statement, execution_options={strings.SQLALCHEMY_SYNCHRONIZE_SESSION_OPTION: False})
+            return [entity_record(row, StoredDeploymentAttempt) for row in rows]
 
     def list(
         self, repository: str, environment: str | None = None, branch_name: str | None = None,
@@ -280,8 +286,10 @@ class DeploymentStore:
         scope = [repository, environment, branch_name]
         after = read_cursor(scope, cursor, limit, version=HISTORY_CURSOR_VERSION)
         columns = (
-            DeploymentAttempt.created_at, DeploymentAttempt.repository.collate("C"),
-            DeploymentAttempt.environment.collate("C"), DeploymentAttempt.branch_name.collate("C"),
+            DeploymentAttempt.created_at,
+            DeploymentAttempt.repository.collate(strings.POSTGRES_C_COLLATION),
+            DeploymentAttempt.environment.collate(strings.POSTGRES_C_COLLATION),
+            DeploymentAttempt.branch_name.collate(strings.POSTGRES_C_COLLATION),
             DeploymentAttempt.generation,
         )
         statement = select(DeploymentAttempt).where(DeploymentAttempt.repository == repository)
@@ -296,19 +304,19 @@ class DeploymentStore:
                 key = json.loads(separator + identity)
                 if (created_at.tzinfo is None or not isinstance(key, list) or len(key) != 4
                         or not all(isinstance(part, str) for part in key[:3]) or type(key[3]) is not int):
-                    raise ValueError("invalid cursor identity")
+                    raise ValueError(INVALID_CURSOR_IDENTITY_MESSAGE)
             except (ValueError, TypeError) as error:
-                raise ValueError("invalid cursor") from error
+                raise ValueError(INVALID_CURSOR_MESSAGE) from error
             statement = statement.where(tuple_(*columns) < tuple_(created_at, *key))
         with self.db.session() as session:
             rows = session.scalars(statement.order_by(*(column.desc() for column in columns)).limit(limit + 1))
-            records = cast(list[StoredDeploymentAttempt], [entity_dict(row) for row in rows])
+            records = [entity_record(row, StoredDeploymentAttempt) for row in rows]
         selected = records[:limit]
         next_cursor = None
         if len(records) > limit:
             last = selected[-1]
-            identity = json.dumps([last["repository"], last["environment"], last["branch_name"], last["generation"]])
-            next_cursor = write_cursor(scope, str(last["created_at"]) + identity, version=HISTORY_CURSOR_VERSION)
+            identity = json.dumps([last.repository, last.environment, last.branch_name, last.generation])
+            next_cursor = write_cursor(scope, str(last.created_at) + identity, version=HISTORY_CURSOR_VERSION)
         return selected, next_cursor
 
 
@@ -319,5 +327,8 @@ def natural(key: DeploymentKey) -> tuple[str, str, str]:
 def attempt_view(row: StoredDeploymentAttempt) -> DeploymentAttemptView:
     # 显式白名单防止内部幂等来源和请求摘要泄漏到 API。
     from ..models.deployments import DeploymentAttemptView
-    model = DeploymentAttemptView
-    return model(**{key: row[key] for key in model.model_fields})
+    return DeploymentAttemptView(
+        repository=row.repository, environment=row.environment, branch_name=row.branch_name,
+        generation=row.generation, build_id=UUID(row.build_id), deployment_status=row.deployment_status,
+        reason=row.reason, created_at=row.created_at, deployed_at=row.deployed_at,
+    )

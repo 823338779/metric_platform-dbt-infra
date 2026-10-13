@@ -2,9 +2,18 @@ from __future__ import annotations
 
 import logging
 import re
+from typing import Final
 
 from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+from dbt_metricflow_service import constants as strings
+
+from ..models.builds import ErrorView
+from ..models.service import ErrorResponse
+
+REQUEST_BODY_TOO_LARGE: Final[str] = "request body exceeds limit"
+
 
 logger = logging.getLogger(__name__)
 DEFAULT_MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024
@@ -22,9 +31,9 @@ class RequestBodyLimitMiddleware:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if (
-            scope["type"] != "http"
-            or scope.get("method") != "POST"
-            or not ENGINE_WRITE_PATH.fullmatch(scope.get("path", ""))
+            scope[strings.ASGI_TYPE_FIELD] != strings.ASGI_HTTP_SCOPE
+            or scope.get(strings.ASGI_METHOD_FIELD) != strings.HTTP_POST_METHOD
+            or not ENGINE_WRITE_PATH.fullmatch(scope.get(strings.ASGI_PATH_FIELD, ""))
         ):
             await self._app(scope, receive, send)
             return
@@ -37,15 +46,15 @@ class RequestBodyLimitMiddleware:
         body = bytearray()
         while True:
             message = await receive()
-            if message["type"] == "http.disconnect":
+            if message[strings.ASGI_TYPE_FIELD] == strings.ASGI_HTTP_DISCONNECT:
                 return
-            if message["type"] != "http.request":
+            if message[strings.ASGI_TYPE_FIELD] != strings.ASGI_HTTP_REQUEST:
                 continue
-            body.extend(message.get("body", b""))
+            body.extend(message.get(strings.ASGI_BODY_FIELD, b""))
             if len(body) > self._max_bytes:
                 await self._reject(scope, receive, send)
                 return
-            if not message.get("more_body", False):
+            if not message.get(strings.ASGI_MORE_BODY_FIELD, False):
                 break
 
         replayed = False
@@ -54,14 +63,18 @@ class RequestBodyLimitMiddleware:
             nonlocal replayed
             if not replayed:
                 replayed = True
-                return {"type": "http.request", "body": bytes(body), "more_body": False}
+                return {
+                    strings.ASGI_TYPE_FIELD: strings.ASGI_HTTP_REQUEST,
+                    strings.ASGI_BODY_FIELD: bytes(body),
+                    strings.ASGI_MORE_BODY_FIELD: False,
+                }
             return await receive()
 
         await self._app(scope, replay_receive, send)
 
     @staticmethod
     def _content_length(scope: Scope) -> int | None:
-        for name, value in scope.get("headers", []):
+        for name, value in scope.get(strings.ASGI_HEADERS_FIELD, []):
             if name.lower() == b"content-length":
                 try:
                     return int(value)
@@ -73,12 +86,8 @@ class RequestBodyLimitMiddleware:
     async def _reject(scope: Scope, receive: Receive, send: Send) -> None:
         response = JSONResponse(
             status_code=413,
-            content={
-                "error": {
-                    "code": "REQUEST_TOO_LARGE",
-                    "message": "request body exceeds limit",
-                    "retryable": False, "phase": None, "buildId": None,
-                }
-            },
+            content=ErrorResponse(error=ErrorView(
+                code=strings.REQUEST_TOO_LARGE, message=REQUEST_BODY_TOO_LARGE,
+            )).model_dump(mode=strings.JSON_MODE, by_alias=True),
         )
         await response(scope, receive, send)

@@ -21,6 +21,4 @@ class ServiceError(Exception):
         super().__init__(message)
         # 结构化错误仅包含可公开信息，不包裹驱动异常文本。
         self.status = status
-        self.error = ErrorView.model_validate(
-            {"code": code, "message": message, "retryable": retryable, "phase": phase, "build_id": build_id}
-        )
+        self.error = ErrorView(code=code, message=message, retryable=retryable, phase=phase, build_id=build_id)

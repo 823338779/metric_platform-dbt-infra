@@ -42,7 +42,8 @@ def test_sessions_use_separate_connections_in_parallel_threads():
 
 def test_entity_defaults_and_string_uuid_survive_session_close():
     from dbt_metricflow_service.storage.entities import ArtifactSet, RuntimeProject
-    from dbt_metricflow_service.storage.rows import entity_dict
+    from dbt_metricflow_service.storage.records import StoredArtifactSet
+    from dbt_metricflow_service.storage.rows import entity_record
 
     with isolated_database() as db:
         db.initialize()
@@ -53,11 +54,13 @@ def test_entity_defaults_and_string_uuid_survive_session_close():
             session.add(ArtifactSet(set_id=identifier, project_id="orm-project", kind="SOURCE",
                                     validation_json={"relationsVerified": True}))
         with db.session() as session:
-            record = entity_dict(session.scalars(select(ArtifactSet).where(ArtifactSet.set_id == identifier)).one())
-        assert record["set_id"] == identifier
-        assert record["state"] == "STAGING"
-        assert record["validation_json"] == {"relationsVerified": True}
-        assert record["sealed_at"] is None
+            record = entity_record(
+                session.scalars(select(ArtifactSet).where(ArtifactSet.set_id == identifier)).one(), StoredArtifactSet,
+            )
+        assert record.set_id == identifier
+        assert record.state == "STAGING"
+        assert record.validation_json.relations_verified is True
+        assert record.sealed_at is None
 
 
 def test_entity_columns_match_initialized_schema():

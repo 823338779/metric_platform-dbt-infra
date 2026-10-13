@@ -19,12 +19,13 @@ from psycopg2.extras import Json
 import dbt_metricflow_service.runtime.executor as runtime_execution
 from dbt_metricflow_service.execution.models import CommandSpec
 from dbt_metricflow_service.platform import metricflow
+from dbt_metricflow_service.platform.models import EngineRequest, EngineResult
 from dbt_metricflow_service.runtime.executor import ExecutionError, RuntimeExecutor
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.jobs import JobStore
 from dbt_metricflow_service.storage.postgres import Database
-from dbt_metricflow_service.storage.rows import row_dict
+from dbt_metricflow_service.storage.records import JobRequest
 
 # 测试使用真实存储和执行线程，仅替换访问外部仓库的 SDK 调用。
 DATABASE_ENV = "SERVICE_TEST_DATABASE_URL"
@@ -56,7 +57,7 @@ DIAGNOSTIC = "x" * 1000
 DBT = "dbt"
 BUILD = "build"
 CLEANUP_JOB = "RUN_CLEANUP"
-CLEANUP_PAYLOAD = {}
+CLEANUP_PAYLOAD = JobRequest()
 COMPLETED_FILE = "completed"
 BUILD_CODE = """
 import json, os, sys
@@ -105,10 +106,13 @@ def claimed(execution, kind, request):
     executor, database, project_id, set_id = execution
     toolchain = str(uuid4())
     with database.transaction() as connection:
-        connection.exec_driver_sql(INSERT_JOB_SQL, (str(uuid4()), kind, project_id, Json(request), toolchain, set_id))
+        connection.exec_driver_sql(INSERT_JOB_SQL, (
+            str(uuid4()), kind, project_id,
+            Json(request.model_dump(mode="json", by_alias=True, exclude_unset=True)), toolchain, set_id,
+        ))
     job = executor.jobs.claim(str(uuid4()), toolchain_version=toolchain)
     if kind == "RUN_CLEANUP":
-        job["parent_run_id"] = str(uuid4())
+        job.parent_run_id = str(uuid4())
     return job
 
 
@@ -119,7 +123,7 @@ def programmatic_engine(monkeypatch, execute=None):
         assert (project / PROJECT_FILE).exists()
         assert os.environ[SCHEMA_ENV] == FIXTURE_SCHEMA
         assert os.environ[TARGET_ENV] == FIXTURE_TARGET
-        return {} if data[MODE_KEY] == CLEANUP_MODE else {OBSERVED_KEY: data}
+        return EngineResult(cleaned=True) if data.mode == CLEANUP_MODE else EngineResult(query_capability=True)
 
     def forbidden(*args, **kwargs):
         raise AssertionError("runtime must execute the engine in process")
@@ -156,52 +160,52 @@ def execution(tmp_path):
 
 
 @pytest.mark.parametrize("kind,payload", [
-    ("RUN_CLEANUP", {"mode": "CLEANUP", "schema": "run_fixture"}),
-    ("RUN_CLEANUP", {}),
+    ("RUN_CLEANUP", JobRequest(build_id=str(uuid4()))),
+    ("RUN_CLEANUP", JobRequest()),
 ])
 async def test_cleanup_preserves_shared_objects_without_result_payload(execution, monkeypatch, kind, payload):
     executor, _, _, _ = execution
     job = claimed(execution, kind, payload)
     if kind == "RUN_CLEANUP":
-        job["parent_run_id"] = str(uuid4())
+        job.parent_run_id = str(uuid4())
     programmatic_engine(monkeypatch)
     result = await executor.execute(job)
     assert result.output_set_id is None
-    assert not (executor.settings.temp_root / str(job["job_id"]) / str(job["attempt_id"])).exists()
+    assert not (executor.settings.temp_root / str(job.job_id) / str(job.attempt_id)).exists()
 
 
 async def test_cleanup_before_source_attachment_has_no_external_work(execution):
     executor, database, _, _ = execution
-    job = claimed(execution, "RUN_CLEANUP", {})
+    job = claimed(execution, "RUN_CLEANUP", JobRequest())
     with database.transaction() as connection:
         sql_result = connection.exec_driver_sql(
-            "UPDATE runtime_job SET input_set_id=NULL WHERE job_id=%s", (job["job_id"],)
+            "UPDATE runtime_job SET input_set_id=NULL WHERE job_id=%s", (job.job_id,)
         )
-    job["input_set_id"] = None
+    job.input_set_id = None
     result = await executor.execute(job)
     assert result.output_set_id is None
     with database.transaction() as connection:
-        sql_result = connection.exec_driver_sql(GET_ATTEMPT_SQL, (job["attempt_id"],))
-        assert row_dict(sql_result)["execution_stage"] == "PREPARING"
+        sql_result = connection.exec_driver_sql(GET_ATTEMPT_SQL, (job.attempt_id,))
+        assert sql_result.scalar_one() == "PREPARING"
 
 
 async def test_expired_lease_does_not_start_engine(execution, monkeypatch, tmp_path):
     executor, database, _, _ = execution
     marker = tmp_path / "must-not-exist"
-    job = claimed(execution, "RUN_CLEANUP", {})
+    job = claimed(execution, "RUN_CLEANUP", JobRequest())
     with database.transaction() as connection:
         connection.exec_driver_sql(
             "UPDATE runtime_attempt SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE attempt_id=%s",
-            (job["attempt_id"],),
+            (job.attempt_id,),
         )
     # 保留真实租约过期检查，SDK 的副作用绝不能出现。
     def execute(project, profiles, data):
         marker.touch()
-        return {}
+        return EngineResult()
 
     programmatic_engine(monkeypatch, execute)
     with pytest.raises(ExecutionError) as error:
-        await executor._metricflow(job, tmp_path, {"mode": "PROBE"})
+        await executor._metricflow(job, tmp_path, EngineRequest(mode="PROBE"))
     assert error.value.code == "LEASE_LOST"
     assert not marker.exists()
 
@@ -215,7 +219,7 @@ async def test_cancellation_or_timeout_waits_for_engine_before_workspace_removal
         executor.settings, command_timeout_seconds=5 if cancel else 0.02,
     )
     job = claimed(execution, CLEANUP_JOB, CLEANUP_PAYLOAD)
-    workspace = executor.settings.temp_root / str(job["job_id"]) / str(job["attempt_id"])
+    workspace = executor.settings.temp_root / str(job.job_id) / str(job.attempt_id)
 
     # 取消或超时后引擎仍可写工作目录；必须等待这次写入结束才能移除目录。
     def execute(project, profiles, data):
@@ -224,17 +228,17 @@ async def test_cancellation_or_timeout_waits_for_engine_before_workspace_removal
         marker = project / COMPLETED_FILE
         marker.touch()
         finished.append(marker.exists())
-        return {}
+        return EngineResult()
 
     programmatic_engine(monkeypatch, execute)
 
     async def run_engine():
         with runtime_execution.attempt_workspace(
-            executor.settings.temp_root, job["job_id"], job["attempt_id"]
+            executor.settings.temp_root, job.job_id, job.attempt_id
         ) as attempt:
             project = attempt / "project"
-            await runtime_execution._thread(executor.artifacts.materialize, job["input_set_id"], project)
-            await executor._metricflow(job, project, {"mode": "PROBE"})
+            await runtime_execution._thread(executor.artifacts.materialize, job.input_set_id, project)
+            await executor._metricflow(job, project, EngineRequest(mode="PROBE"))
 
     task = asyncio.create_task(run_engine())
     try:
@@ -268,26 +272,26 @@ async def test_cancellation_or_timeout_waits_for_engine_before_workspace_removal
 async def test_timeout_retains_bounded_diagnostics_and_unknown_stop(execution, monkeypatch):
     executor, _, project_id, _ = execution
     executor.settings = dataclasses.replace(executor.settings, command_timeout_seconds=0.2, max_output_bytes=32)
-    job = claimed(execution, "RUN_CLEANUP", {})
+    job = claimed(execution, "RUN_CLEANUP", JobRequest())
     # 诊断经过真实 SDK 日志收集器，超时仍需等线程返回后才能上报。
     def execute(project, profiles, data):
         logging.getLogger(ENGINE_LOGGER).warning(DIAGNOSTIC)
         time.sleep(0.3)
-        return {}
+        return EngineResult()
 
     programmatic_engine(monkeypatch, execute)
     with pytest.raises(ExecutionError) as error:
-        await executor._metricflow(job, executor.settings.temp_root, {"mode": "PROBE"})
+        await executor._metricflow(job, executor.settings.temp_root, EngineRequest(mode="PROBE"))
     assert error.value.code == "COMMAND_TIMEOUT"
     assert error.value.stopped is False
-    assert error.value.payload["status"] == "timed_out"
-    assert len(error.value.payload["stdout"].encode()) <= 32
-    assert error.value.payload["output_truncated"] is True
+    assert error.value.payload.status == "timed_out"
+    assert len(error.value.payload.stdout.encode()) <= 32
+    assert error.value.payload.output_truncated is True
 
 
 async def test_write_engine_connection_loss_does_not_confirm_external_stop(execution, monkeypatch):
     executor, _, _, _ = execution
-    job = claimed(execution, "BUILD_RUN", {})
+    job = claimed(execution, "BUILD_RUN", JobRequest())
     spec = CommandSpec((DBT, BUILD),
                        executor.settings.temp_root, dict(os.environ), True)
     spec.cwd.mkdir(parents=True, exist_ok=True)
@@ -330,7 +334,7 @@ async def test_source_only_cleanup_preserves_schema_without_semantic_manifest(ex
     connection = parse_dsn(os.environ[DATABASE_ENV])
     for name, key in [("HOST", "host"), ("PORT", "port"), ("USER", "user"), ("DATABASE", "dbname")]:
         monkeypatch.setenv("CLEANUP_TEST_" + name, connection[key])
-    monkeypatch.setenv("DBT_ENV_SECRET_CLEANUP_PASSWORD", connection["password"])
+    monkeypatch.setenv("DBT_ENV_SECRET_CLEANUP_PASSWORD", connection.get("password", ""))
     schema = "run_" + uuid4().hex
     profiles = executor.settings.profiles_dir
     profiles.mkdir()
@@ -347,19 +351,21 @@ async def test_source_only_cleanup_preserves_schema_without_semantic_manifest(ex
     source.mkdir()
     (source / PROJECT_FILE).write_text(PROJECT_TEXT + "profile: cleanup_fixture\n", encoding="utf-8")
     set_id = executor.artifacts.capture(project_id, source)
-    job = claimed(execution, "RUN_CLEANUP", {})
+    job = claimed(execution, "RUN_CLEANUP", JobRequest())
     with database.transaction() as connection:
         sql_result = connection.exec_driver_sql(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
         sql_result = connection.exec_driver_sql("UPDATE runtime_job SET input_set_id=%s,schema_name=%s WHERE job_id=%s",
-                       (set_id, schema, job["job_id"]))
-    job.update(input_set_id=set_id, schema_name=schema, parent_run_id=str(UUID(schema.removeprefix("run_"))))
+                       (set_id, schema, job.job_id))
+    job.input_set_id = set_id
+    job.schema_name = schema
+    job.parent_run_id = str(UUID(schema.removeprefix("run_")))
     executor.settings = dataclasses.replace(executor.settings, command_timeout_seconds=30)
     try:
         result = await executor.execute(job)
         assert result.output_set_id is None
         with database.transaction() as connection:
             sql_result = connection.exec_driver_sql("SELECT 1 FROM pg_namespace WHERE nspname=%s", (schema,))
-            assert row_dict(sql_result) is not None
+            assert sql_result.mappings().first() is not None
     finally:
         with database.transaction() as connection:
             sql_result = connection.exec_driver_sql(

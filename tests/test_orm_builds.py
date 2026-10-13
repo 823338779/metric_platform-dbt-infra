@@ -21,12 +21,12 @@ def test_pending_skips_locked_attempts_and_persists_scan_time(store):
         ).all()
         pending = deployments.pending()
     assert len(pending) == 1
-    assert pending[0]["build_id"] == str(build.build_id)
-    assert pending[0]["last_checked_at"] is not None
-    assert deployments.initial(build.build_id)["last_checked_at"] == pending[0]["last_checked_at"]
+    assert pending[0].build_id == str(build.build_id)
+    assert pending[0].last_checked_at is not None
+    assert deployments.initial(build.build_id).last_checked_at == pending[0].last_checked_at
     # 本候选被锁住时，应跳过它而不是等待该行锁。
     with store.db.session() as session:
         session.scalar(
             select(DeploymentAttempt).where(DeploymentAttempt.build_id == str(build.build_id)).with_for_update()
         )
-        assert all(row["build_id"] != str(build.build_id) for row in deployments.pending())
+        assert all(row.build_id != str(build.build_id) for row in deployments.pending())

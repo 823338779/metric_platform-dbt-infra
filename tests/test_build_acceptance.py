@@ -49,11 +49,11 @@ def test_acceptance_is_atomic_before_fetch(store):
         ids = list(pool.map(lambda _: app.submit_snapshot(body, CALLER).build_id, range(4)))
     assert len(set(ids)) == 1
     row = app.store.get(str(ids[0]))
-    job = JobStore(store.db).get(row["run_id"])
-    assert job["input_set_id"] is None
-    assert job["status"] == "QUEUED"
-    assert str(ids[0]) != job["job_id"]
-    assert app.snapshot_view(ids[0]).initial_deployment["generation"] >= 1
+    job = JobStore(store.db).get(row.run_id)
+    assert job.input_set_id is None
+    assert job.status == "QUEUED"
+    assert str(ids[0]) != job.job_id
+    assert app.snapshot_view(ids[0]).initial_deployment.generation >= 1
 
 
 def test_build_only_does_not_allocate_generation(store):
@@ -89,8 +89,8 @@ def test_request_schema_is_persisted_and_part_of_idempotency(store):
     body = request(execution=snapshot(schema=schema))
     first = app.submit_snapshot(body, CALLER)
     row = app.store.get(first.build_id)
-    assert JobStore(store.db).get(row["run_id"])["schema_name"] == schema
-    assert row["request_json"]["execution"]["schema"] == schema
+    assert JobStore(store.db).get(row.run_id).schema_name == schema
+    assert row.request_json.execution.schema_name == schema
     with pytest.raises(ServiceError) as failure:
         app.submit_snapshot(
             body.model_copy(update={"execution": body.execution.model_copy(update={"schema_name": "other_schema"})}),
@@ -98,4 +98,4 @@ def test_request_schema_is_persisted_and_part_of_idempotency(store):
         )
     assert failure.value.status == 409
     second = app.submit_snapshot(request(execution=body.execution), CALLER)
-    assert JobStore(store.db).get(app.store.get(second.build_id)["run_id"])["schema_name"] == schema
+    assert JobStore(store.db).get(app.store.get(second.build_id).run_id).schema_name == schema

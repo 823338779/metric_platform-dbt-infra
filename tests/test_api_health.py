@@ -1,3 +1,4 @@
+from dataclasses import replace
 from importlib.metadata import version
 from types import SimpleNamespace
 
@@ -6,7 +7,6 @@ from fastapi.testclient import TestClient
 
 from dbt_metricflow_service import __version__
 from dbt_metricflow_service.api.app import VERSION_DISTRIBUTIONS, create_app
-from dbt_metricflow_service.settings import Settings
 from tests.test_execution_profiles import settings as infrastructure
 
 # 基础接口保留原有开放响应契约，避免函数注解触发 FastAPI 响应推断。
@@ -20,8 +20,9 @@ def application(monkeypatch, tmp_path):
     import dbt_metricflow_service.api.app as module
 
     (tmp_path / "profiles.yml").write_text("fixture: {}")
-    settings = Settings(
-        tmp_path, 30, 1024, database_url="postgresql://unused/test", temp_root=tmp_path, **vars(infrastructure())
+    settings = replace(
+        infrastructure(), profiles_dir=tmp_path, command_timeout_seconds=30, max_output_bytes=1024,
+        database_url="postgresql://unused/test", temp_root=tmp_path,
     )
     runtime = SimpleNamespace(
         settings=settings,

@@ -1,28 +1,33 @@
-"""Convert a result row to the mutable dictionaries exposed by runtime stores."""
+"""Validate SQL boundary rows into declared, session-independent records."""
 
-from typing import Any, overload
+from datetime import date, datetime
+from decimal import Decimal
+from typing import TypeAlias, TypeVar, overload
+from uuid import UUID
 
-from sqlalchemy import Result, inspect
+from pydantic import BaseModel, JsonValue
+from sqlalchemy import Result
 
 from dbt_metricflow_service.storage.entities import Base
-from dbt_metricflow_service.storage.records import DatabaseRow
+
+Record = TypeVar("Record", bound=BaseModel)
+DatabaseValue: TypeAlias = JsonValue | bytes | date | datetime | Decimal | UUID
+RowTuple = TypeVar("RowTuple", bound=tuple[DatabaseValue, ...])
 
 
-def row_dict(result: Result[Any]) -> DatabaseRow | None:
+def row_record(result: Result[RowTuple], model: type[Record]) -> Record | None:
     row = result.mappings().fetchone()
-    return dict(row) if row is not None else None
+    return model.model_validate(row) if row is not None else None
 
 
 @overload
-def entity_dict(entity: Base) -> DatabaseRow: ...
+def entity_record(entity: Base, model: type[Record]) -> Record: ...
 
 
 @overload
-def entity_dict(entity: None) -> None: ...
+def entity_record(entity: None, model: type[Record]) -> None: ...
 
 
-def entity_dict(entity: Base | None) -> DatabaseRow | None:
-    """在 Session 内读取实体列，返回不依赖懒加载的现有字典快照。"""
-    if entity is None:
-        return None
-    return {field.columns[0].name: getattr(entity, field.key) for field in inspect(type(entity)).column_attrs}
+def entity_record(entity: Base | None, model: type[Record]) -> Record | None:
+    """Read declared columns while the session is open; never expose ORM state."""
+    return model.model_validate(entity, from_attributes=True) if entity is not None else None

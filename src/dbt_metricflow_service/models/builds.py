@@ -2,59 +2,33 @@
 
 from __future__ import annotations
 
-import re
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Generic, TypeVar
+from typing import Generic, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
-from pydantic.alias_generators import to_camel
+from pydantic import Field
 
-SHA_PATTERN = r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$"
-REF_PREFIX = "refs/"
-MAIN_BRANCH = "main"
-INVALID_REF = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]")
-REF_SUFFIX = ".lock"
+from dbt_metricflow_service import constants as strings
+
+from .contracts import SHA_PATTERN, Contract, validate_branch  # noqa: F401
+from .deployments import DeploymentAttemptView
+
 T = TypeVar("T")
 
 
-class Contract(BaseModel):
-    """公开 JSON 统一 camelCase，拒绝未声明的历史别名。"""
-
-    model_config = ConfigDict(extra="forbid", populate_by_name=True, alias_generator=to_camel)
-
-
 class DeploymentPolicy(StrEnum):
-    NONE = "NONE"
-    ON_SUCCESS = "ON_SUCCESS"
+    NONE = strings.NONE
+    ON_SUCCESS = strings.ON_SUCCESS
 
 
 class BuildStatus(StrEnum):
-    QUEUED = "QUEUED"
-    RUNNING = "RUNNING"
-    SUCCEEDED = "SUCCEEDED"
-    FAILED = "FAILED"
-    CANCELLED = "CANCELLED"
-    OUTCOME_UNKNOWN = "OUTCOME_UNKNOWN"
-
-
-def validate_branch(value: str | None) -> str | None:
-    """校验 Git 短分支名，防止 ref 或选项被混入远端读取。"""
-    if value is None:
-        return value
-    if (
-        not value
-        or value.startswith((REF_PREFIX, "-", "/"))
-        or value.endswith(("/", "."))
-        or INVALID_REF.search(value)
-        or ".." in value
-        or "@{" in value
-        or value == "@"
-        or any(not part or part.startswith(".") or part.endswith(REF_SUFFIX) for part in value.split("/"))
-    ):
-        raise ValueError("branchName must be a short Git branch name")
-    return value
+    QUEUED = strings.QUEUED
+    RUNNING = strings.RUNNING
+    SUCCEEDED = strings.SUCCEEDED
+    FAILED = strings.FAILED
+    CANCELLED = strings.CANCELLED
+    OUTCOME_UNKNOWN = strings.OUTCOME_UNKNOWN
 
 
 class Origin(Contract):
@@ -90,7 +64,7 @@ class BuildView(Contract):
     query_available: bool = Field(default=False, description="是否可受理新的查询")
     query_unavailable_reason: str | None = Field(default=None, description="不可查询原因")
     error: ErrorView | None = Field(default=None, description="脱敏错误摘要")
-    initial_deployment: dict[str, Any] | None = Field(default=None, description="受理时附带的部署意图")
+    initial_deployment: DeploymentAttemptView | None = Field(default=None, description="受理时附带的部署意图")
 
 
 class Page(Contract, Generic[T]):

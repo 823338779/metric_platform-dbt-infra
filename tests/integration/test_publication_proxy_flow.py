@@ -16,9 +16,11 @@ from dbt_metricflow_service.application.catalog import CatalogService
 from dbt_metricflow_service.application.deployments import DeploymentService
 from dbt_metricflow_service.application.errors import ServiceError
 from dbt_metricflow_service.application.queries import QueryService
+from dbt_metricflow_service.models.configuration import ExecutionCredential, ExecutionInstance
 from dbt_metricflow_service.models.deployments import DeploymentKey
 from dbt_metricflow_service.models.execution import ExecutionSnapshot
 from dbt_metricflow_service.models.execution import SnapshotBuildRequest as BuildRequest
+from dbt_metricflow_service.models.native import NativeProject
 from dbt_metricflow_service.models.queries import AvailableDimensionsRequest, QueryRequest
 from dbt_metricflow_service.platform.source import is_ancestor, remote_head
 from dbt_metricflow_service.runtime.executor import ExecutionError, RuntimeExecutor
@@ -43,14 +45,18 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
     shutil.copytree(FIXTURE, repo)
     # 原始工程声明非默认输出位置，执行副本和封存仍必须使用同一受控路径。
     project_file = repo / "dbt_project.yml"
-    project_config = yaml.safe_load(project_file.read_text(encoding="utf-8"))
-    project_config["target-path"] = "custom-target"
-    project_file.write_text(yaml.safe_dump(project_config), encoding="utf-8")
+    project_config = NativeProject.model_validate(yaml.safe_load(project_file.read_text(encoding="utf-8")))
+    project_config.target_path = "custom-target"
+    project_file.write_text(yaml.safe_dump(project_config.native_details()), encoding="utf-8")
     git(repo, "init", "-b", "main")
     git(repo, "config", "user.name", "Test")
     git(repo, "config", "user.email", "test@example.invalid")
     git(repo, "add", ".")
     git(repo, "commit", "-m", "fixture")
+    repository_url = "https://fixture.invalid/metrics.git"
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.{repo.as_posix()}.insteadOf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", repository_url)
     profiles = tmp_path / "profiles"
     profiles.mkdir()
     host, port = os.environ["PLATFORM_TEST_PGHOST"], int(os.environ["PLATFORM_TEST_PGPORT"])
@@ -76,9 +82,11 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
         database_url=os.environ["SERVICE_TEST_DATABASE_URL"],
         temp_root=tmp_path / "runtime",
         toolchain_version=uuid4().hex,
-        execution_instances={"fixture": {"type": "postgres", "hosts": [host], "port": port}},
+        execution_instances={"fixture": ExecutionInstance(type="postgres", hosts=[host], port=port)},
         execution_credentials={
-            "fixture": {"userEnv": "DBT_ENV_SECRET_FIXTURE_USER", "passwordEnv": "DBT_ENV_SECRET_FIXTURE_PASSWORD"}
+            "fixture": ExecutionCredential(
+                user_env="DBT_ENV_SECRET_FIXTURE_USER", password_env="DBT_ENV_SECRET_FIXTURE_PASSWORD",
+            )
         },
     )
     runtime = Runtime(settings)
@@ -94,30 +102,30 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
         builds=builds,
         catalogs=catalogs,
     )
-    target = DeploymentKey(repository=str(repo), branchName="main", environment=str(snapshot.environment_id))
+    target = DeploymentKey(repository=repository_url, branchName="main", environment=str(snapshot.environment_id))
 
     async def execute(kind):
         job = runtime.jobs.claim(str(uuid4()), toolchain_version=runtime.toolchain, kinds=[kind])
         assert job
         result = await RuntimeExecutor(settings, runtime.jobs, runtime.artifacts).execute(job)
-        assert runtime.jobs.finish(job["job_id"], job["lease_token"], output_set_id=result.output_set_id)
+        assert runtime.jobs.finish(job.job_id, job.lease_token, output_set_id=result.output_set_id)
         return result
 
     async def build():
         view = builds.submit_snapshot(
             BuildRequest(
-                repository="https://fixture.invalid/metrics.git",
+                repository=repository_url,
                 branchName="main",
                 commitSha=git(repo, "rev-parse", "HEAD"),
                 execution=snapshot,
                 deploymentPolicy="ON_SUCCESS",
                 idempotencyKey=uuid4().hex,
-            ).model_copy(update={"repository": str(repo)}),
+            ),
             "integration",
         )
         await execute("BUILD_RUN")
         assert builds.snapshot_view(view.build_id).build_status == "SUCCEEDED"
-        assert deployments.reconcile(target, view.initial_deployment["generation"]).deployment_status == "DEPLOYED"
+        assert deployments.reconcile(target, view.initial_deployment.generation).deployment_status == "DEPLOYED"
         return view
 
     async def query(build_id, **fields):
@@ -131,7 +139,7 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
             paths = set(
                 session.scalars(
                     select(ArtifactFile.relative_path).where(
-                        ArtifactFile.set_id == store.get(first.build_id)["output_set_id"],
+                        ArtifactFile.set_id == store.get(first.build_id).output_set_id,
                     )
                 )
             )
@@ -149,9 +157,9 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
             "target/publication_state.json",
         }.intersection(paths)
         assert yaml.safe_load(project_file.read_text(encoding="utf-8"))["target-path"] == "custom-target"
-        resources = catalogs.list(first.build_id).model_dump(mode="json", by_alias=True)["items"]
-        metric = next(item["resourceId"] for item in resources if item["kind"] == "METRIC")
-        dataset = next(item["resourceId"] for item in resources if "PREVIEW" in item["capabilities"])
+        resources = catalogs.list(first.build_id).items
+        metric = next(item.resource_id for item in resources if item.kind == "METRIC")
+        dataset = next(item.resource_id for item in resources if "PREVIEW" in item.capabilities)
         result = await asyncio.to_thread(
             queries.available_dimensions,
             first.build_id,
@@ -159,7 +167,7 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
             "integration",
         )
         dimensions = result.dimensions
-        dimension = next(item["optionId"] for item in dimensions if item["dimensionType"] != "time")
+        dimension = next(item.option_id for item in dimensions if item.dimension_type != "time")
         first_result = await query(first.build_id, mode="QUERY", metricResourceIds=[metric])
         assert Decimal(str(first_result.rows[0][0])) == Decimal("31.00")
         explain = await query(first.build_id, mode="EXPLAIN", metricResourceIds=[metric])
@@ -177,10 +185,10 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
         git(repo, "commit", "-am", "semantic-change")
         semantic = await build()
         after = catalogs.read(semantic.build_id)[1]
-        assert {item["relation"]["identifier"] for item in after["relationBindings"]} == {
-            item["relation"]["identifier"] for item in before["relationBindings"]
+        assert {item.relation.identifier for item in after.relation_bindings} == {
+            item.relation.identifier for item in before.relation_bindings
         }
-        assert all(item["mode"] == "BUILT" for item in after["relationBindings"])
+        assert all(item.mode == "BUILT" for item in after.relation_bindings)
         completed = await asyncio.to_thread(
             queries.submit,
             first.build_id,
@@ -208,27 +216,27 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
         git(repo, "commit", "-m", "unsafe-candidate")
         rejected = builds.submit_snapshot(
             BuildRequest(
-                repository="https://fixture.invalid/metrics.git",
+                repository=repository_url,
                 branchName="main",
                 commitSha=git(repo, "rev-parse", "HEAD"),
                 execution=snapshot,
                 deploymentPolicy="ON_SUCCESS",
                 idempotencyKey=uuid4().hex,
-            ).model_copy(update={"repository": str(repo)}),
+            ),
             "integration",
         )
         job = runtime.jobs.claim(str(uuid4()), toolchain_version=runtime.toolchain, kinds=["BUILD_RUN"])
         with pytest.raises((ValueError, ExecutionError)):
             await RuntimeExecutor(settings, runtime.jobs, runtime.artifacts).execute(job)
-        runtime.jobs.fail(job["job_id"], job["lease_token"], "INVALID_DEFINITION")
-        assert deployments.reconcile(target, rejected.initial_deployment["generation"]).deployment_status == "FAILED"
+        runtime.jobs.fail(job.job_id, job.lease_token, "INVALID_DEFINITION")
+        assert deployments.reconcile(target, rejected.initial_deployment.generation).deployment_status == "FAILED"
         assert deployments.current(target).active_build_id == second.build_id
         assert Decimal(
             str((await query(first.build_id, mode="QUERY", metricResourceIds=[metric])).rows[0][0])
         ) == Decimal("32.00")
         # 清理结束旧构建查询生命周期，保留共享物理表、历史目录和源码。
-        first_run = store.get(first.build_id)["run_id"]
-        first_schema = runtime.jobs.get(first_run)["schema_name"]
+        first_run = store.get(first.build_id).run_id
+        first_schema = runtime.jobs.get(first_run).schema_name
         runtime.jobs.reserve_cleanup(first_run)
         await execute("RUN_CLEANUP")
         with runtime.db.transaction() as connection:
@@ -240,7 +248,7 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
                 is not None
             )
         assert catalogs.list(first.build_id).items
-        assert catalogs.resource(first.build_id, dataset, "source")["content"]
+        assert catalogs.resource(first.build_id, dataset, "source").content
         with pytest.raises(ServiceError):
             await query(first.build_id, mode="QUERY", metricResourceIds=[metric])
         assert (await query(second.build_id, mode="QUERY", metricResourceIds=[metric])).rows

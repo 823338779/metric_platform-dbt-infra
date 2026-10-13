@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from dbt_metricflow_service.platform.models import PlatformQueryRequest
+from dbt_metricflow_service.platform.models import EngineResult, PlatformQueryRequest
 from dbt_metricflow_service.platform.queries import available_dimensions, serialize_rows, validate_query
 
 
@@ -27,8 +27,8 @@ class FakeEngine:
 
 def test_multi_metric_available_dimensions_return_common_dimensions_and_time_tokens() -> None:
     available = available_dimensions(FakeEngine(), ("revenue", "orders"))
-    assert available["dimensions"][0]["token"] == "customer__region"
-    assert {item["token"] for item in available["timeDimensions"]} == {
+    assert available.dimensions[0].token == "customer__region"
+    assert {item.token for item in available.time_dimensions} == {
         "metric_time__day", "metric_time__month",
     }
 
@@ -39,8 +39,8 @@ def test_dimension_values_are_bounded_and_typed() -> None:
         rows=(("A",), ("B",), ("C",)),
     )
     result = serialize_rows(table, limit=2)
-    assert result["rows"] == [["A"], ["B"]]
-    assert result["truncated"] is True
+    assert result.rows == [["A"], ["B"]]
+    assert result.truncated is True
 
 
 def test_query_rejects_unlisted_filter_operator_and_foreign_run() -> None:
@@ -49,7 +49,7 @@ def test_query_rejects_unlisted_filter_operator_and_foreign_run() -> None:
         "groupBy": [], "filters": [{"field": "region", "operator": "DROP", "value": "A"}],
     })
     with pytest.raises(ValueError):
-        validate_query(request, {"metrics": [{"name": "revenue"}], "dimensions": [], "timeDimensions": []})
+        validate_query(request, EngineResult(metrics=[{"name": "revenue"}], dimensions=[], timeDimensions=[]))
     with pytest.raises(ValidationError):
         PlatformQueryRequest.model_validate({
             "runId": "a" * 32, "mode": "QUERY", "metrics": ["revenue"],
@@ -63,7 +63,7 @@ def test_decimal_result_preserves_precision() -> None:
         rows=((Decimal("123456789.123456789"),),),
     )
     result = serialize_rows(table, limit=10)
-    assert result["rows"] == [["123456789.123456789"]]
+    assert result.rows == [["123456789.123456789"]]
 
 
 def test_time_dimensions_advertise_only_verified_grains_on_their_own_join_path():
@@ -83,7 +83,7 @@ def test_time_dimensions_advertise_only_verified_grains_on_their_own_join_path()
             return object()
 
     available = available_dimensions(TimeEngine(), ("revenue", "orders"))
-    assert [entry["grainTokens"] for entry in available["dimensions"]] == [
+    assert [entry.grain_tokens for entry in available.dimensions] == [
         {"day": "metric_time__day", "month": "metric_time__month"},
         {"month": "order__day__month"},
         {"year": "return__day__year"},

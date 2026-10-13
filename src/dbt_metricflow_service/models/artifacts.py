@@ -2,39 +2,43 @@
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, PlainSerializer
 from pydantic.alias_generators import to_camel
 
+from dbt_metricflow_service import constants as strings
+
+from .native import NativeColumn, NativeConversion, NativeCumulative, NativeReference
+
 CATALOG_SCHEMA_VERSION = 1
-PUBLISHED_CATALOG_FILE = "published_catalog.json"
+PUBLISHED_CATALOG_FILE = strings.PUBLISHED_CATALOG_FILE
 
 
 class Contract(BaseModel):
     """拒绝未约定字段，Python 内部名称映射为公开 camelCase。"""
 
-    model_config = ConfigDict(extra="forbid", populate_by_name=True, alias_generator=to_camel)
+    model_config = ConfigDict(extra=strings.EXTRA_FORBID, populate_by_name=True, alias_generator=to_camel)
 
 
 class ResourceKind(StrEnum):
-    METRIC = "METRIC"
-    DIMENSION = "DIMENSION"
-    SEMANTIC_MODEL = "SEMANTIC_MODEL"
-    TABLE = "TABLE"
-    VIEW = "VIEW"
+    METRIC = strings.METRIC
+    DIMENSION = strings.DIMENSION
+    SEMANTIC_MODEL = strings.SEMANTIC_MODEL
+    TABLE = strings.TABLE
+    VIEW = strings.VIEW
 
 
 class BindingMode(StrEnum):
-    BUILT = "BUILT"
-    EXTERNAL = "EXTERNAL"
+    BUILT = strings.BUILT
+    EXTERNAL = strings.EXTERNAL
 
 
 class RelationName(Contract):
     # database 在不区分 catalog 的 adapter 中可以为空；schema/identifier 必须存在。
     database: str | None = None
-    schema_name: str = Field(alias="schema", min_length=1)
+    schema_name: str = Field(alias=strings.DBT_SCHEMA_FIELD, min_length=1)
     identifier: str = Field(min_length=1)
 
 
@@ -44,8 +48,22 @@ class RelationBinding(Contract):
     relation: RelationName
     creator_run_id: UUID | None
     mode: BindingMode
-    definition_digest: str = Field(pattern="^[a-f0-9]{64}$")
+    definition_digest: str = Field(pattern=strings.SHA256_PATTERN)
     verified_at: datetime
+
+
+# Native fragments retain vendor keys and omit defaults that were not in the artifact.
+NativeEntityView = Annotated[NativeReference, PlainSerializer(lambda value: value.native_details())]
+NativeColumnView = Annotated[NativeColumn, PlainSerializer(lambda value: value.native_details())]
+NativeCumulativeView = Annotated[NativeCumulative, PlainSerializer(lambda value: value.native_details())]
+NativeConversionView = Annotated[NativeConversion, PlainSerializer(lambda value: value.native_details())]
+
+
+class MetricTimeConfig(Contract):
+    time_granularity: str | None = None
+    window: JsonValue = None
+    cumulative: NativeCumulativeView = Field(default_factory=NativeCumulative)
+    conversion: NativeConversionView = Field(default_factory=NativeConversion)
 
 
 class MetricAttributes(Contract):
@@ -54,8 +72,9 @@ class MetricAttributes(Contract):
     definition_summary: str
     input_metric_ids: list[str]
     dataset_ids: list[str]
-    filters: dict[str, Any] | None = None
-    time_config: dict[str, Any]
+    filters: dict[str, JsonValue] | None = None
+    time_config: Annotated[MetricTimeConfig, PlainSerializer(
+        lambda value: value.model_dump(mode=strings.JSON_MODE, by_alias=True, exclude_unset=True))]
 
 
 class DimensionAttributes(Contract):
@@ -70,8 +89,8 @@ class DatasetAttributes(Contract):
     # 语义模型的物理来源、字段归属及原生实体/度量展示信息。
     model_resource_id: str
     dimension_ids: list[str]
-    entities: list[dict[str, Any]]
-    measures: list[dict[str, Any]]
+    entities: list[NativeEntityView]
+    measures: list[NativeEntityView]
     default_time_dimension: str | None = None
 
 
@@ -79,7 +98,7 @@ class PhysicalAttributes(Contract):
     # 列来自 docs catalog，关系来自验证后的实际绑定。
     origin: BindingMode
     relation: RelationName
-    columns: dict[str, dict[str, Any]]
+    columns: dict[str, NativeColumnView]
 
 
 class ResourceBase(Contract):
@@ -91,7 +110,7 @@ class ResourceBase(Contract):
     description: str | None = None
     source_path: str | None = None
     capabilities: list[str]
-    native_details: dict[str, Any]
+    native_details: dict[str, JsonValue]
 
 
 class MetricResource(ResourceBase):
@@ -115,7 +134,8 @@ class PhysicalResource(ResourceBase):
 
 
 PublishedResource = Annotated[
-    MetricResource | DimensionResource | DatasetResource | PhysicalResource, Field(discriminator="kind")
+    MetricResource | DimensionResource | DatasetResource | PhysicalResource,
+    Field(discriminator=strings.RESOURCE_KIND_FIELD),
 ]
 
 

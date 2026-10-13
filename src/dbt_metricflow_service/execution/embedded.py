@@ -10,6 +10,8 @@ from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import contextmanager
 from typing import TypeVar, cast
 
+from dbt_metricflow_service import constants as strings
+
 from .output import REDACTION_MARKER, SECRET_ENVIRONMENT_PREFIX, _RedactingTailBuffer
 
 # 共享线程调度只保留调用方的返回类型，不解释引擎请求或结果。
@@ -18,18 +20,24 @@ T = TypeVar("T")
 # 锁属于整个服务进程，多个 Runtime 或事件循环也不能同时修改 dbt 全局状态。
 ENGINE_LOCK = threading.Lock()
 LOCK_POLL_SECONDS = 0.01
-UTF8 = "utf-8"
+UTF8 = strings.UTF8
 NEWLINE = "\n"
-PROJECT_ENV = "DBT_PROJECT_DIR"
-PROFILES_ENV = "DBT_PROFILES_DIR"
-LOG_LEVEL_ENV = "DBT_LOG_LEVEL"
-LOG_LEVEL_FILE_ENV = "DBT_LOG_LEVEL_FILE"
-NO_LOGGING = "none"
+PROJECT_ENV = strings.DBT_PROJECT_DIR
+PROFILES_ENV = strings.DBT_PROFILES_DIR
+LOG_LEVEL_ENV = strings.DBT_LOG_LEVEL
+LOG_LEVEL_FILE_ENV = strings.DBT_LOG_LEVEL_FILE
+NO_LOGGING = strings.DISABLED_LOG_LEVEL
 ENGINE_ENVIRONMENT_KEYS = (
-    PROJECT_ENV, PROFILES_ENV, "DBT_TARGET_PATH", "DBT_PLATFORM_SCHEMA", "DBT_TARGET",
-    "DBT_SEND_ANONYMOUS_USAGE_STATS", "PYTHONUTF8",
+    PROJECT_ENV, PROFILES_ENV, strings.DBT_TARGET_PATH, strings.DBT_PLATFORM_SCHEMA, strings.DBT_TARGET,
+    strings.DBT_SEND_ANONYMOUS_USAGE_STATS, strings.PYTHONUTF8,
 )
-ENGINE_LOGGERS = ("dbt", "dbt_common", "dbt_metricflow", "metricflow", "metricflow_semantics")
+ENGINE_LOGGERS = (
+    strings.DBT_MODULE,
+    strings.DBT_COMMON_MODULE,
+    strings.DBT_METRICFLOW_MODULE,
+    strings.METRICFLOW_PACKAGE,
+    strings.METRICFLOW_SEMANTICS_MODULE,
+)
 
 
 class _EngineLogHandler(logging.Handler):

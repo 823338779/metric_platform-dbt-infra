@@ -1,16 +1,19 @@
 """当前结构的显式初始化；连接及事务由调用方管理。"""
 
 from pathlib import Path
+from typing import Final
 
 from sqlalchemy import Connection, inspect
 
+from dbt_metricflow_service import constants as strings
+
 from .entities import Base
 
-SCHEMA_FILE = Path(__file__).with_suffix(".sql")
+SCHEMA_FILE = Path(__file__).with_suffix(strings.SQL_EXTENSION)
 REQUIRED_TABLES = frozenset(Base.metadata.tables)
-NOT_INITIALIZED = "Runtime database is not initialized; run dbt-service-admin init-db on an empty schema"
+NOT_INITIALIZED: Final = "Runtime database is not initialized; run dbt-service-admin init-db on an empty schema"
 CURRENT_SCHEMA = "SELECT current_schema()"
-SCHEMA_MISMATCH = "Runtime database schema is incompatible; initialize a new empty schema"
+SCHEMA_MISMATCH: Final = "Runtime database schema is incompatible; initialize a new empty schema"
 INITIALIZATION_LOCK = "SELECT pg_advisory_xact_lock(609302026)"
 
 
@@ -23,8 +26,11 @@ def _tables(connection: Connection) -> set[str]:
 def check(connection: Connection) -> None:
     if _tables(connection) != REQUIRED_TABLES:
         raise RuntimeError(NOT_INITIALIZED)
-    columns = {column["name"] for column in inspect(connection).get_columns("engine_build")}
-    if not {"environment_id", "physical_target_key"}.issubset(columns) or "execution_binding" in columns:
+    columns = {column[strings.NAME_FIELD] for column in inspect(connection).get_columns(strings.ENGINE_BUILD_TABLE)}
+    if (
+        not {strings.ENVIRONMENT_ID_FIELD, strings.PHYSICAL_TARGET_KEY_FIELD}.issubset(columns)
+        or strings.EXECUTION_BINDING_FIELD in columns
+    ):
         raise RuntimeError(SCHEMA_MISMATCH)
 
 
@@ -36,5 +42,7 @@ def initialize(connection: Connection) -> None:
         return
     if existing:
         raise RuntimeError(NOT_INITIALIZED)
-    connection.exec_driver_sql(SCHEMA_FILE.read_text(encoding="utf-8"), execution_options={"no_parameters": True})
+    connection.exec_driver_sql(
+        SCHEMA_FILE.read_text(encoding=strings.UTF8), execution_options={strings.SQLALCHEMY_NO_PARAMETERS_OPTION: True}
+    )
     check(connection)

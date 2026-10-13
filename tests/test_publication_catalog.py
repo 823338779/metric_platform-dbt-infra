@@ -5,6 +5,9 @@ from uuid import UUID
 
 import pytest
 
+from dbt_metricflow_service.models.artifacts import RelationBinding
+from dbt_metricflow_service.models.catalog import NativeCatalog
+from dbt_metricflow_service.models.native import SemanticManifest
 from dbt_metricflow_service.platform.sealed_catalog import build_published_catalog, write_publication_catalog
 
 PROJECT = "catalog-test"
@@ -45,10 +48,13 @@ def package():
 
 def build(native=None, semantic=None, bindings=None):
     defaults = package()
-    return build_published_catalog(project_id=PROJECT, release_id=RELEASE,
-                                   native_catalog=defaults[0] if native is None else native,
-                                   semantic_manifest=defaults[1] if semantic is None else semantic,
-                                   relation_bindings=defaults[2] if bindings is None else bindings)
+    return build_published_catalog(
+        project_id=PROJECT, release_id=RELEASE,
+        native_catalog=NativeCatalog.model_validate(defaults[0] if native is None else native),
+        semantic_manifest=SemanticManifest.model_validate(defaults[1] if semantic is None else semantic),
+        relation_bindings=[RelationBinding.model_validate(item)
+                           for item in (defaults[2] if bindings is None else bindings)],
+    )
 
 
 def test_typed_catalog_is_complete():
@@ -106,7 +112,7 @@ def test_write_catalog_requires_matching_physical_binding(tmp_path):
             resource["definition"].update({"database": "db", "schema": "s", "alias": resource["name"]})
     (tmp_path / "semantic_manifest.json").write_text(json.dumps(semantic))
     result = write_publication_catalog(tmp_path, project_id=PROJECT, release_id=RELEASE, run_id=RELEASE,
-                                       native_catalog=native)
+                                       native_catalog=NativeCatalog.model_validate(native))
     assert (tmp_path / "published_catalog.json").exists()
-    assert result["projectId"] == PROJECT
-    assert len(result["relationBindings"]) == 2
+    assert result.project_id == PROJECT
+    assert len(result.relation_bindings) == 2

@@ -7,6 +7,7 @@ import pytest
 
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.jobs import JobStore
+from dbt_metricflow_service.storage.records import ArtifactMetadata, ArtifactValidation
 from tests.synchronous_queries import inline_executor
 from tests.test_build_acceptance import CALLER, request, service
 from tests.test_publication_storage import store as store
@@ -17,10 +18,10 @@ def ready_build(store, tmp_path, before_finish=None):
     app.toolchain = uuid4().hex
     build = app.submit_snapshot(request(branchName="feature/" + uuid4().hex), CALLER)
     jobs = JobStore(store.db)
-    run = app.store.get(build.build_id)["run_id"]
+    run = app.store.get(build.build_id).run_id
     job = jobs.claim(str(uuid4()), toolchain_version=app.toolchain, kinds=["BUILD_RUN"])
-    while job["job_id"] != run:
-        jobs.fail(job["job_id"], job["lease_token"], "TEST_FINISHED")
+    while job.job_id != run:
+        jobs.fail(job.job_id, job.lease_token, "TEST_FINISHED")
         job = jobs.claim(str(uuid4()), toolchain_version=app.toolchain, kinds=["BUILD_RUN"])
     directory = tmp_path / uuid4().hex
     target = directory / "target"
@@ -30,16 +31,16 @@ def ready_build(store, tmp_path, before_finish=None):
     evidence = {
         "source_commit_sha": build.commit_sha,
         "project_digest": "a" * 64,
-        "config_version": job["config_version"],
-        "toolchain_version": job["toolchain_version"],
+        "config_version": job.config_version,
+        "toolchain_version": job.toolchain_version,
     }
-    source = artifacts.capture(job["project_id"], directory, metadata=evidence)
-    assert jobs.attach_input(run, job["lease_token"], source, project_digest=evidence["project_digest"])
+    source = artifacts.capture(job.project_id, directory, metadata=ArtifactMetadata.model_validate(evidence))
+    assert jobs.attach_input(run, job.lease_token, source, project_digest=evidence["project_digest"])
     for name in ("manifest.json", "semantic_manifest.json", "catalog.json"):
         (target / name).write_text("{}", encoding="utf-8")
     catalog = {
         "schemaVersion": 1,
-        "projectId": job["project_id"],
+        "projectId": job.project_id,
         "releaseId": str(build.build_id),
         "resources": [
             {
@@ -64,19 +65,20 @@ def ready_build(store, tmp_path, before_finish=None):
     }
     (target / "published_catalog.json").write_text(json.dumps(catalog), encoding="utf-8")
     output = artifacts.capture(
-        job["project_id"],
+        job.project_id,
         directory,
         kind="EXECUTION",
-        producer_attempt_id=job["attempt_id"],
-        metadata={
-            **evidence,
-            "source_set_id": source,
-            "validation_json": {"allTestsPassed": True, "representativeQueryPassed": True, "relationsVerified": True},
-        },
+        producer_attempt_id=job.attempt_id,
+        metadata=ArtifactMetadata(**evidence,
+            source_set_id=source,
+            validation_json=ArtifactValidation(
+                allTestsPassed=True, representativeQueryPassed=True, relationsVerified=True
+            ),
+        ),
     )
     if before_finish:
         before_finish(app, build, job, output)
-    assert jobs.finish(run, job["lease_token"], output_set_id=output)
+    assert jobs.finish(run, job.lease_token, output_set_id=output)
     return app, build, jobs, artifacts
 
 
@@ -107,7 +109,7 @@ def test_catalog_survives_physical_removal(store, tmp_path):
     app, build, jobs, artifacts = ready_build(store, tmp_path)
     with store.db.transaction() as connection:
         connection.exec_driver_sql(
-            "UPDATE runtime_job SET run_lifecycle='CLEANED' WHERE job_id=%s", (app.store.get(build.build_id)["run_id"],)
+            "UPDATE runtime_job SET run_lifecycle='CLEANED' WHERE job_id=%s", (app.store.get(build.build_id).run_id,)
         )
     catalogs = CatalogService(app.store, artifacts)
     assert catalogs.list(build.build_id).items[0].resource_id == "metric.revenue"
@@ -117,15 +119,14 @@ def test_catalog_survives_physical_removal(store, tmp_path):
 
 @pytest.mark.parametrize("lifecycle", ["CLEANING", "CLEANED"])
 def test_build_retry_preserves_physical_availability(store, tmp_path, lifecycle):
-    from dbt_metricflow_service.models.execution import SnapshotBuildRequest as BuildRequest
 
     app, build, jobs, artifacts = ready_build(store, tmp_path)
     row = app.store.get(build.build_id)
     with store.db.transaction() as connection:
         connection.exec_driver_sql(
-            "UPDATE runtime_job SET run_lifecycle=%s WHERE job_id=%s", (lifecycle, row["run_id"]),
+            "UPDATE runtime_job SET run_lifecycle=%s WHERE job_id=%s", (lifecycle, row.run_id),
         )
-    retry = app.submit_snapshot(BuildRequest.model_validate(row["request_json"]), CALLER)
+    retry = app.submit_snapshot(row.request_json, CALLER)
     assert retry.build_id == build.build_id
     assert retry.catalog_available
     assert not retry.query_available
@@ -137,10 +138,10 @@ def test_cleanup_completion_preserves_catalog_and_source(store, tmp_path):
     from dbt_metricflow_service.application.catalog import CatalogService
 
     app, build, jobs, artifacts = ready_build(store, tmp_path)
-    run = app.store.get(build.build_id)["run_id"]
+    run = app.store.get(build.build_id).run_id
     jobs.reserve_cleanup(run)
     cleanup = jobs.claim(str(uuid4()), toolchain_version=app.toolchain, kinds=["RUN_CLEANUP"])
-    assert jobs.finish(cleanup["job_id"], cleanup["lease_token"])
+    assert jobs.finish(cleanup.job_id, cleanup.lease_token)
     assert CatalogService(app.store, artifacts).list(build.build_id).items
     assert app.snapshot_view(build.build_id).catalog_available
     assert app.snapshot_view(build.build_id).query_unavailable_reason == "PHYSICAL_OBJECTS_REMOVED"

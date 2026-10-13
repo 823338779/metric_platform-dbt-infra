@@ -11,6 +11,8 @@ from sqlalchemy import Connection, create_engine, event, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import ConnectionPoolEntry
 
+from dbt_metricflow_service import constants as strings
+
 from .entities import ChangeCounter
 
 CONNECTION_OPTIONS = "-c statement_timeout=10000 -c lock_timeout=5000"
@@ -23,13 +25,15 @@ class Database:
 
     def __init__(self, dsn: str, max_connections: int = 8) -> None:
         parameters = parse_dsn(dsn)
-        parameters["options"] = (parameters.get("options", "") + " " + CONNECTION_OPTIONS).strip()
-        parameters["connect_timeout"] = 5
+        parameters[strings.POSTGRES_OPTIONS_FIELD] = (
+            parameters.get(strings.POSTGRES_OPTIONS_FIELD, "") + " " + CONNECTION_OPTIONS
+        ).strip()
+        parameters[strings.POSTGRES_CONNECT_TIMEOUT_FIELD] = 5
         self.engine = create_engine(
-            "postgresql+psycopg2://", connect_args=parameters,
+            strings.POSTGRES_URL, connect_args=parameters,
             pool_size=max_connections, max_overflow=0, pool_timeout=5, pool_pre_ping=True,
         )
-        event.listen(self.engine, "connect", _string_uuids)
+        event.listen(self.engine, strings.SQLALCHEMY_CONNECT_EVENT, _string_uuids)
         # 每次 Store 事务独立创建 Session；显式写入避免 autoflush 改变加锁顺序。
         self._sessions = sessionmaker(bind=self.engine, autoflush=False, expire_on_commit=False)
 
@@ -73,6 +77,6 @@ class Database:
 
 def _string_uuids(connection: PsycopgConnection, _record: ConnectionPoolEntry) -> None:
     # 只配置本 Engine 的连接，保留 Store 既有的字符串 UUID 契约。
-    uuid_type = new_type((2950,), "RUNTIME_UUID", lambda value, _cursor: value)
+    uuid_type = new_type((2950,), strings.RUNTIME_UUID, lambda value, _cursor: value)
     register_type(uuid_type, connection)
-    register_type(new_array_type((2951,), "RUNTIME_UUID_ARRAY", uuid_type), connection)
+    register_type(new_array_type((2951,), strings.RUNTIME_UUID_ARRAY, uuid_type), connection)

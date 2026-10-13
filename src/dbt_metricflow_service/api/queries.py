@@ -7,6 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends
 
+from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.application.queries import QueryService
 
 from ..models.queries import AvailableDimensionsRequest, AvailableDimensionsView, QueryRequest, QueryResult
@@ -14,9 +15,9 @@ from ..models.queries import AvailableDimensionsRequest, AvailableDimensionsView
 
 def router(service: QueryService, guard: Callable[..., Awaitable[str]]) -> APIRouter:
     dependency = Depends(guard)
-    routes = APIRouter(prefix="/query")
+    routes = APIRouter(prefix=strings.ROUTE_QUERY)
 
-    @routes.post("/available-dimensions", response_model=AvailableDimensionsView)
+    @routes.post(strings.ROUTE_AVAILABLE_DIMENSIONS, response_model=AvailableDimensionsView)
     def available_dimensions(
         request: AvailableDimensionsRequest, build_id: UUID, caller: str=dependency,
     ) -> AvailableDimensionsView:

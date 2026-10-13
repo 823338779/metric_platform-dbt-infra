@@ -13,12 +13,12 @@ from tests.test_publication_storage import store as store
 def test_recomputed_available_dimensions_keep_stable_option_ids(store, tmp_path):
     service, job, build = query_service(store, tmp_path)
     request = AvailableDimensionsRequest(metricResourceIds=["metric.sample.orders"])
-    result = service.available_dimensions(build["build_id"], request, "platform")
+    result = service.available_dimensions(build.build_id, request, "platform")
     assert result.dimensions == service.fixture_available_dimensions.dimensions
     count = len(service.execute.calls)
-    assert service.available_dimensions(build["build_id"], request, "platform") == result
+    assert service.available_dimensions(build.build_id, request, "platform") == result
     assert len(service.execute.calls) == count + 1
     with pytest.raises(ServiceError):
         service.available_dimensions(uuid4(), request, "platform")
     ready_build(store, tmp_path)
-    assert service.available_dimensions(build["build_id"], request, "platform").dimensions == result.dimensions
+    assert service.available_dimensions(build.build_id, request, "platform").dimensions == result.dimensions

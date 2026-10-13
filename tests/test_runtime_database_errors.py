@@ -13,6 +13,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError, TimeoutError
 from dbt_metricflow_service.api.app import create_app
 from dbt_metricflow_service.runtime.worker import Worker
 from dbt_metricflow_service.storage.entities import ArtifactSet
+from tests.data_helpers import leased_job
 from tests.test_runtime_api import runtime_pair as runtime_pair
 
 
@@ -72,7 +73,7 @@ async def test_heartbeat_failure_cancels_unconfirmed_execution(runtime_pair, mon
     monkeypatch.setattr(worker.runtime.jobs, "heartbeat", offline)
     execution = asyncio.create_task(asyncio.sleep(10))
     try:
-        await asyncio.wait_for(worker._heartbeat({"job_id": str(uuid4()), "lease_token": str(uuid4())}, execution), 1)
+        await asyncio.wait_for(worker._heartbeat(leased_job(), execution), 1)
         await asyncio.gather(execution, return_exceptions=True)
         assert execution.cancelled()
     finally:
@@ -83,7 +84,7 @@ async def test_heartbeat_failure_cancels_unconfirmed_execution(runtime_pair, mon
 def test_gc_only_swallows_foreign_key_violation(runtime_pair):
     runtimes, project = runtime_pair
     runtime = runtimes[0]
-    source_id = runtime.jobs.project(project)["source_set_id"]
+    source_id = runtime.jobs.project(project).source_set_id
     unique_violation = False
 
     def inject_failure(connection, cursor, statement, parameters, context, executemany):

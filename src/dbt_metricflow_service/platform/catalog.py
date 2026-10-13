@@ -1,100 +1,87 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from typing import Any
+from typing import Final
+
+from dbt_metricflow_service import constants as strings
+
+from ..models.artifacts import CatalogRelation, ResourceKind
+from ..models.catalog import ArtifactSchemas, NativeCatalog, NativeResource
+from ..models.native import NativeManifest, NativeNode, NativePhysicalCatalog, SemanticManifest
+
+ARTIFACT_VERSION_INCOMPATIBLE_MESSAGE: Final[str] = 'dbt 产物版本不兼容'
+PHYSICAL_DETAILS_MISSING_MESSAGE: Final[str] = 'dbt 物理关系或列信息缺失'
+SOURCE_PHYSICAL_DETAILS_MISSING_MESSAGE: Final[str] = 'dbt source 物理关系或列信息缺失'
+DIMENSION_NAME_MISSING_MESSAGE: Final[str] = 'dbt 维度定义无名称'
 
 MANIFEST_SCHEMA = "https://schemas.getdbt.com/dbt/manifest/v12.json"
 CATALOG_SCHEMA = "https://schemas.getdbt.com/dbt/catalog/v1.json"
 SEMANTIC_SCHEMA = "dbt-metricflow/0.15.0"
 
 
-def _read(path: Path) -> dict[str, Any]:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict):
-        raise ValueError("dbt 原生产物格式无效")
-    return data
-
-
-def catalog_from_artifacts(target: Path, *, query_capability: bool = True) -> dict[str, Any]:
+def catalog_from_artifacts(target: Path, *, query_capability: bool = True) -> NativeCatalog:
     """只按已知 dbt 产物版本派生发布目录；原生定义完整保留。"""
+    manifest = NativeManifest.model_validate_json((target / strings.MANIFEST_FILE).read_bytes())
+    SemanticManifest.model_validate_json((target / strings.SEMANTIC_MANIFEST_FILE).read_bytes())
+    catalog = NativePhysicalCatalog.model_validate_json((target / strings.CATALOG_FILE).read_bytes())
+    if (manifest.metadata.dbt_schema_version != MANIFEST_SCHEMA
+            or catalog.metadata.dbt_schema_version != CATALOG_SCHEMA):
+        raise ValueError(ARTIFACT_VERSION_INCOMPATIBLE_MESSAGE)
+    resources: list[NativeResource] = []
+    dependencies: list[CatalogRelation] = []
 
-    manifest = _read(target / "manifest.json")
-    semantic = _read(target / "semantic_manifest.json")
-    catalog = _read(target / "catalog.json")
-    manifest_version = manifest.get("metadata", {}).get("dbt_schema_version")
-    catalog_version = catalog.get("metadata", {}).get("dbt_schema_version")
-    if manifest_version != MANIFEST_SCHEMA or catalog_version != CATALOG_SCHEMA:
-        raise ValueError("dbt 产物版本不兼容")
-    if not isinstance(semantic.get("semantic_models"), list) or not isinstance(semantic.get("metrics"), list):
-        raise ValueError("MetricFlow 原生产物格式无效")
-    resources: list[dict[str, Any]] = []
-    dependencies: list[dict[str, str]] = []
-
-    def add_resource(native_id: str, kind: str, definition: dict[str, Any], **extra: Any) -> None:
-        resource = {
-            "resourceId": native_id, "nativeId": native_id, "kind": kind,
-            "name": definition.get("name", native_id), "description": definition.get("description"),
-            "sourcePath": (
-                definition["original_file_path"].replace("\\", "/")
-                if isinstance(definition.get("original_file_path"), str) else None
-            ), "definition": definition,
-            "queryable": query_capability and kind in {"METRIC", "DIMENSION", "SEMANTIC_MODEL", "TABLE", "VIEW"},
-            **extra,
-        }
+    def add_resource(resource: NativeResource) -> None:
         resources.append(resource)
-        for upstream in definition.get("depends_on", {}).get("nodes", []):
-            dependencies.append({
-                "upstreamResourceId": upstream, "downstreamResourceId": native_id, "kind": "DBT_DEPENDS_ON"
-            })
+        for upstream in resource.definition.depends_on.nodes:
+            dependencies.append(CatalogRelation(
+                upstream_resource_id=upstream, downstream_resource_id=resource.native_id, kind=strings.DBT_DEPENDS_ON
+            ))
 
-    # 物理 table/view 由 manifest materialization 与 catalog 列共同核实。
-    catalog_nodes = catalog.get("nodes", {})
-    for native_id, definition in manifest.get("nodes", {}).items():
-        if definition.get("resource_type") != "model":
-            continue
-        materialized = definition.get("config", {}).get("materialized")
-        if materialized not in {"table", "view"}:
-            continue
-        relation = definition.get("relation_name")
-        details = catalog_nodes.get(native_id)
-        if not isinstance(relation, str) or not relation or not isinstance(details, dict):
-            raise ValueError("dbt 物理关系或列信息缺失")
-        add_resource(
-            native_id, materialized.upper(), definition,
-            relation=relation, columns=details.get("columns", {}),
+    def resource(native_id: str, kind: ResourceKind, definition: NativeNode) -> NativeResource:
+        return NativeResource(
+            resource_id=native_id, native_id=native_id, kind=kind,
+            name=definition.name or native_id, description=definition.description,
+            source_path=definition.original_file_path.replace("\\", "/") if definition.original_file_path else None,
+            definition=definition, queryable=query_capability,
         )
 
-    # StarRocks 原始表属于 dbt source，使用原生产物中的关系与列供平台查看和预览。
-    catalog_sources = catalog.get("sources", {})
-    for native_id, definition in manifest.get("sources", {}).items():
-        relation = definition.get("relation_name")
-        details = catalog_sources.get(native_id)
-        if not isinstance(relation, str) or not relation or not isinstance(details, dict):
-            raise ValueError("dbt source 物理关系或列信息缺失")
-        add_resource(native_id, "TABLE", definition, relation=relation, columns=details.get("columns", {}))
+    for native_id, definition in manifest.nodes.items():
+        if definition.resource_type != strings.DBT_MODEL_RESOURCE or definition.config.materialized not in {
+            strings.DBT_TABLE_MATERIALIZATION,
+            strings.DBT_VIEW_MATERIALIZATION,
+        }:
+            continue
+        details = catalog.nodes.get(native_id)
+        if not definition.relation_name or details is None:
+            raise ValueError(PHYSICAL_DETAILS_MISSING_MESSAGE)
+        item = resource(native_id, ResourceKind(definition.config.materialized.upper()), definition)
+        item.relation, item.columns = definition.relation_name, details.columns
+        add_resource(item)
 
-    # 语义模型和指标直接取 manifest 原生定义；维度保留所属语义模型路径。
-    for native_id, definition in manifest.get("semantic_models", {}).items():
-        add_resource(native_id, "SEMANTIC_MODEL", definition)
-        for dimension in definition.get("dimensions", []):
-            name = dimension.get("name")
-            if not isinstance(name, str) or not name:
-                raise ValueError("dbt 维度定义无名称")
-            dimension_id = f"{native_id}.dimension.{name}"
-            add_resource(dimension_id, "DIMENSION", {
-                **dimension, "original_file_path": definition.get("original_file_path"),
-            }, semanticModelId=native_id)
-            dependencies.append({
-                "upstreamResourceId": native_id, "downstreamResourceId": dimension_id,
-                "kind": "SEMANTIC_DIMENSION",
-            })
-    for native_id, definition in manifest.get("metrics", {}).items():
-        add_resource(native_id, "METRIC", definition)
+    for native_id, definition in manifest.sources.items():
+        details = catalog.sources.get(native_id)
+        if not definition.relation_name or details is None:
+            raise ValueError(SOURCE_PHYSICAL_DETAILS_MISSING_MESSAGE)
+        item = resource(native_id, ResourceKind.TABLE, definition)
+        item.relation, item.columns = definition.relation_name, details.columns
+        add_resource(item)
 
-    return {
-        "resources": resources, "dependencies": dependencies,
-        "artifactSchemas": {
-            "manifest": manifest_version, "semanticManifest": SEMANTIC_SCHEMA, "catalog": catalog_version,
-        },
-    }
+    for native_id, definition in manifest.semantic_models.items():
+        add_resource(resource(native_id, ResourceKind.SEMANTIC_MODEL, definition))
+        for dimension in definition.dimensions:
+            if not dimension.name:
+                raise ValueError(DIMENSION_NAME_MISSING_MESSAGE)
+            dimension_id = f"{native_id}.dimension.{dimension.name}"
+            dimension = dimension.model_copy(deep=True)
+            dimension.original_file_path = definition.original_file_path
+            item = resource(dimension_id, ResourceKind.DIMENSION, dimension)
+            item.semantic_model_id = native_id
+            add_resource(item)
+            dependencies.append(CatalogRelation(
+                upstream_resource_id=native_id, downstream_resource_id=dimension_id, kind=strings.SEMANTIC_DIMENSION
+            ))
+    for native_id, definition in manifest.metrics.items():
+        add_resource(resource(native_id, ResourceKind.METRIC, definition))
+    return NativeCatalog(resources=resources, dependencies=dependencies, artifact_schemas=ArtifactSchemas(
+        manifest=MANIFEST_SCHEMA, semantic_manifest=SEMANTIC_SCHEMA, catalog=CATALOG_SCHEMA,
+    ))
