@@ -287,3 +287,98 @@ def test_dimension_errors_keep_http_semantics_and_release_workspace(realtime, mo
     assert "private-details" not in str(caught.value)
     assert all(not path.exists() for path in paths)
     assert events == ["lock", "unlock"]
+
+
+@pytest.mark.parametrize("dimensions", [True, False])
+@pytest.mark.parametrize("late_failure", [False, True])
+def test_cancelled_queries_wait_for_worker_and_restore_environment(realtime, monkeypatch, dimensions, late_failure):
+    import asyncio
+    import os
+    import threading
+
+    import dbt_metricflow_service.platform.metricflow as engine
+    import dbt_metricflow_service.runtime.service as service
+    from dbt_metricflow_service.execution.embedded import ENGINE_LOCK
+
+    runtime, build, events = realtime
+    started, release = threading.Event(), threading.Event()
+    paths, profile_paths = [], []
+    original_environment = dict(os.environ)
+    original_run = asyncio.run
+
+    def execute(project, profiles, **kwargs):
+        paths.append(project)
+        profile_paths.append(profiles)
+        os.environ["DBT_ENV_SECRET_QUERY_CANCEL"] = "private-query-value"
+        started.set()
+        assert release.wait(5)
+        assert project.exists()
+        assert (profiles / "profiles.yml").exists()
+        assert events == ["lock"]
+        if late_failure:
+            raise ConnectionError("private-query-value")
+        return DimensionQueryResult() if dimensions else DataQueryResult(rows=[[1]])
+
+    async def cancel_while_running(coroutine):
+        task = asyncio.create_task(coroutine)
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            task.cancel()
+            await asyncio.sleep(0.02)
+            task.cancel()
+            await asyncio.sleep(0.02)
+            assert not task.done()
+            assert ENGINE_LOCK.locked()
+            assert paths[0].exists()
+            assert profile_paths[0].exists()
+            assert events == ["lock"]
+        finally:
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(service.asyncio, "run", lambda coroutine: original_run(cancel_while_running(coroutine)))
+    monkeypatch.setattr(engine, "execute_available_dimensions" if dimensions else "execute_programmatic", execute)
+    with pytest.raises(asyncio.CancelledError):
+        if dimensions:
+            runtime.available_dimensions(build, ("orders",))
+        else:
+            runtime.execute_query(build, PlatformQueryRequest(runId=uuid4(), mode="QUERY"))
+    assert not ENGINE_LOCK.locked()
+    assert events == ["lock", "unlock"]
+    assert all(not path.exists() for path in paths + profile_paths)
+    assert dict(os.environ) == original_environment
+
+
+@pytest.mark.parametrize("dimensions", [True, False])
+@pytest.mark.parametrize("invalid_dimensions", [False, True])
+def test_timeout_takes_precedence_over_late_engine_errors(realtime, monkeypatch, dimensions, invalid_dimensions):
+    import time
+
+    import dbt_metricflow_service.platform.metricflow as engine
+
+    runtime, build, events = realtime
+    runtime.settings = replace(runtime.settings, command_timeout_seconds=0.01)
+    paths = []
+
+    def execute(project, profiles, **kwargs):
+        paths.append(project)
+        time.sleep(0.04)
+        assert project.exists()
+        assert events == ["lock"]
+        raise engine.InvalidDimensionsRequest("private-late-error") if invalid_dimensions else ConnectionError(
+            "private-late-error"
+        )
+
+    monkeypatch.setattr(engine, "execute_available_dimensions" if dimensions else "execute_programmatic", execute)
+    with pytest.raises(ServiceError) as caught:
+        if dimensions:
+            runtime.available_dimensions(build, ("orders",))
+        else:
+            runtime.execute_query(build, PlatformQueryRequest(runId=uuid4(), mode="QUERY"))
+    assert caught.value.error.code == "COMMAND_TIMEOUT"
+    assert caught.value.status == 504
+    assert "private-late-error" not in str(caught.value)
+    assert events == ["lock", "unlock"]
+    assert all(not path.exists() for path in paths)

@@ -16,8 +16,9 @@
 
 内部维度发现和数据查询使用独立入口：`Runtime.available_dimensions(build, metrics)` 返回
 `DimensionQueryResult`，`Runtime.execute_query(build, request)` 接收 `PlatformQueryRequest` 并返回
-`DataQueryResult`。执行层只共享串行、超时和脱敏保护，不再通过 `EngineRequest.mode` 分派两种查询；
-构建验收单独调用 `probe_query_capability`。HTTP 请求和响应保持不变。
+`DataQueryResult`。两个入口直接调用各自的平台函数；共享的 `_query_context` 仅管理构建保护、
+工作区、profile 和引擎环境。上下文在 `run_serialized` 的执行线程内打开，超时或取消仍须等底层
+执行结束再释放锁和资源。构建验收单独调用 `probe_query_capability`。HTTP 请求和响应保持不变。
 
 无额外 Repository/Port/Facade 镜像层。持久化通过 SQLAlchemy ORM 实现，封存产物与物理引用保护由具体 Store 和数据库约束维护。
 

@@ -4,8 +4,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Callable
-from functools import partial
+from collections.abc import Iterator
+from contextlib import contextmanager
 from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
@@ -13,9 +13,7 @@ from uuid import uuid4
 
 from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.application.errors import ServiceError
-from dbt_metricflow_service.execution.embedded import run_serialized
-from dbt_metricflow_service.execution.metricflow import MetricFlowRequest, MetricFlowResult, ResultT, invoke_metricflow
-from dbt_metricflow_service.execution.models import JobStatus
+from dbt_metricflow_service.execution.embedded import create_output, engine_environment, run_serialized
 from dbt_metricflow_service.platform.execution_profile import ExecutionConfigurationError
 from dbt_metricflow_service.platform.models import DataQueryResult, DimensionQueryResult, PlatformQueryRequest
 from dbt_metricflow_service.runtime.executor import build_engine_environment
@@ -24,7 +22,7 @@ from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.jobs import CleanupBlocked, JobStore
 from dbt_metricflow_service.storage.postgres import Database
-from dbt_metricflow_service.storage.records import StoredBuild, StoredJob
+from dbt_metricflow_service.storage.records import StoredBuild
 
 EXECUTION_CONFIGURATION_UNAVAILABLE: Final[str] = "execution configuration unavailable"
 BUILD_CLEANUP_IN_PROGRESS: Final[str] = "build is being cleaned"
@@ -60,6 +58,11 @@ def current_toolchain() -> str:
     return digest.hexdigest()
 
 
+async def _before_query_start() -> None:
+    # 同步查询无持久租约；构建保护在取得串行槽位之后、执行线程内部获取。
+    return None
+
+
 class Runtime:
     def __init__(self, settings: Settings) -> None:
         # 数据库 schema 必须预先通过管理命令安装，启动不得修改其他实例任务。
@@ -77,62 +80,88 @@ class Runtime:
     def available_dimensions(self, build: StoredBuild, metrics: tuple[str, ...]) -> DimensionQueryResult:
         """查询所选指标的维度能力，返回专用元数据结果。"""
         from ..platform.metricflow import execute_available_dimensions
-        return self._execute_query(build, partial(execute_available_dimensions, metrics=metrics), DimensionQueryResult)
+
+        def invoke() -> DimensionQueryResult | ServiceError:
+            try:
+                with self._query_context(build) as (project, profiles):
+                    return execute_available_dimensions(project, profiles, metrics=metrics)
+            except ServiceError as error:
+                # 将引擎错误带回调用线程，超时发生时优先丢弃迟到结果或错误。
+                return error
+
+        value, timed_out = asyncio.run(run_serialized(
+            invoke, self.settings.command_timeout_seconds, _before_query_start,
+        ))
+        if timed_out:
+            raise ServiceError(strings.COMMAND_TIMEOUT, QUERY_EXECUTION_TIMED_OUT, 504, build_id=build.build_id)
+        if isinstance(value, ServiceError):
+            raise value
+        if not isinstance(value, DimensionQueryResult):
+            raise ServiceError(strings.RESULT_INVALID, INVALID_QUERY_RESULT, 503, build_id=build.build_id)
+        self._check_query_size(build, value)
+        return value
 
     def execute_query(self, build: StoredBuild, request: PlatformQueryRequest) -> DataQueryResult:
         """执行数据请求，返回数据行或 SQL。"""
         from ..platform.metricflow import execute_programmatic
-        return self._execute_query(build, partial(execute_programmatic, request=request), DataQueryResult)
 
-    def _execute_query(
-        self, build: StoredBuild, operation: Callable[[Path, Path], ResultT], result_type: type[ResultT],
-    ) -> ResultT:
-        """直接执行固定构建的查询，输入、结果和诊断均不落库。"""
-        async def before_start() -> None:
-            # 无持久租约；执行线程内的 query_run 会在引擎调用前校验并保护构建。
-            return None
+        def invoke() -> DataQueryResult | ServiceError:
+            try:
+                with self._query_context(build) as (project, profiles):
+                    return execute_programmatic(project, profiles, request=request)
+            except ServiceError as error:
+                return error
 
-        def invoke() -> MetricFlowResult[ResultT]:
+        value, timed_out = asyncio.run(run_serialized(
+            invoke, self.settings.command_timeout_seconds, _before_query_start,
+        ))
+        if timed_out:
+            raise ServiceError(strings.COMMAND_TIMEOUT, QUERY_EXECUTION_TIMED_OUT, 504, build_id=build.build_id)
+        if isinstance(value, ServiceError):
+            raise value
+        if not isinstance(value, DataQueryResult):
+            raise ServiceError(strings.RESULT_INVALID, INVALID_QUERY_RESULT, 503, build_id=build.build_id)
+        self._check_query_size(build, value)
+        return value
+
+    @contextmanager
+    def _query_context(self, build: StoredBuild) -> Iterator[tuple[Path, Path]]:
+        """在持有引擎串行锁的执行线程内获取资源，底层调用退出后才清理。"""
+        from ..platform.execution_profile import materialized_profile
+        from ..platform.metricflow import InvalidDimensionsRequest
+
+        try:
             with self.jobs.query_run(cast(str, build.run_id)) as parent:
                 with materialized_workspace(
                     self.artifacts, cast(str, build.output_set_id), self.settings.temp_root,
                     str(uuid4()), str(uuid4()),
                 ) as project:
-                    from ..platform.execution_profile import materialized_profile
-                    profile = materialized_profile(build.config_snapshot,
-                                                   self.settings.temp_root, self.settings, project)
-                    with profile as profiles:
-                        return invoke_with_profile(profiles, parent, project)
-
-        def invoke_with_profile(profiles: Path, parent: StoredJob, project: Path) -> MetricFlowResult[ResultT]:
-            environment = build_engine_environment(
-                project, profiles,
-                cast(str, parent.schema_name), cast(str, parent.profile_binding_id),
-            )
-            return invoke_metricflow(
-                parent.project_id, MetricFlowRequest(environment, operation),
-                self.settings.max_output_bytes,
-            )
-
-        try:
-            # 先取得引擎串行槽位，再占用清理保护连接，避免排队请求耗尽连接池。
-            result, timed_out = asyncio.run(run_serialized(invoke, self.settings.command_timeout_seconds, before_start))
+                    with materialized_profile(build.config_snapshot, self.settings.temp_root,
+                                              self.settings, project) as profiles:
+                        environment = build_engine_environment(
+                            project, profiles, cast(str, parent.schema_name), cast(str, parent.profile_binding_id),
+                        )
+                        output = create_output(self.settings.max_output_bytes)
+                        try:
+                            with engine_environment(environment, output):
+                                yield project, profiles
+                        except InvalidDimensionsRequest:
+                            raise ServiceError(strings.INVALID_QUERY, QUERY_EXECUTION_FAILED, 422,
+                                               build_id=build.build_id) from None
+                        except Exception:
+                            raise ServiceError(strings.COMMAND_FAILED, QUERY_EXECUTION_FAILED, 503,
+                                               build_id=build.build_id) from None
+                        finally:
+                            output.finish()
         except ExecutionConfigurationError as error:
-            # 凭据或实例清单是运行基础设施，恢复配置后可重试同一个构建查询。
             raise ServiceError(error.code, EXECUTION_CONFIGURATION_UNAVAILABLE, 503, retryable=True,
                                build_id=build.build_id) from error
         except CleanupBlocked as error:
             raise ServiceError(strings.PHYSICAL_OBJECTS_REMOVED, BUILD_CLEANUP_IN_PROGRESS, 410,
                                build_id=build.build_id) from error
-        if timed_out or result.record.status == JobStatus.TIMED_OUT:
-            raise ServiceError(strings.COMMAND_TIMEOUT, QUERY_EXECUTION_TIMED_OUT, 504, build_id=build.build_id)
-        if result.record.status != JobStatus.SUCCEEDED:
-            code = result.error_code or strings.COMMAND_FAILED
-            raise ServiceError(code, QUERY_EXECUTION_FAILED, 422 if code == strings.INVALID_QUERY else 503,
-                               build_id=build.build_id)
-        value = result.payload
-        if not isinstance(value, result_type):
-            raise ServiceError(strings.RESULT_INVALID, INVALID_QUERY_RESULT, 503, build_id=build.build_id)
+
+    def _check_query_size(self, build: StoredBuild, value: DimensionQueryResult | DataQueryResult) -> None:
+        """两类结果使用同一 JSON 编码和 UTF-8 大小上限。"""
         size = 0
         try:
             for chunk in json.JSONEncoder(ensure_ascii=False).iterencode(
@@ -144,7 +173,6 @@ class Runtime:
                                        build_id=build.build_id)
         except (TypeError, ValueError, RecursionError) as error:
             raise ServiceError(strings.COMMAND_FAILED, QUERY_EXECUTION_FAILED, 503, build_id=build.build_id) from error
-        return value
 
 
     async def start(self, *, deployments: DeploymentService | None = None) -> None:
