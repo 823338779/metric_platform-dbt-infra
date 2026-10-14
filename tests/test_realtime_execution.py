@@ -10,7 +10,7 @@ from uuid import uuid4
 import pytest
 
 from dbt_metricflow_service.application.errors import ServiceError
-from dbt_metricflow_service.platform.models import EngineRequest, EngineResult, PlatformQueryRequest
+from dbt_metricflow_service.platform.models import DataQueryResult, DimensionQueryResult, PlatformQueryRequest
 from dbt_metricflow_service.runtime.service import Runtime
 from tests.data_helpers import leased_job, stored_build
 from tests.test_execution_profiles import secrets as secrets
@@ -52,19 +52,19 @@ def test_repeated_calls_execute_in_memory_and_remove_workspaces(realtime, monkey
 
     runtime, build, events = realtime
     calls, paths = [], []
-    payload = EngineRequest(mode="OPTIONS", metrics=["orders"])
+    payload = PlatformQueryRequest(runId=uuid4(), mode="QUERY", metrics=["orders"])
 
-    def execute(project, profiles, data):
-        assert data is payload
+    def execute(project, profiles, request):
+        assert request is payload
         assert events[-1] == "lock"
         assert (project / "dbt_project.yml").is_file()
         paths.append(project)
-        calls.append(data)
-        return EngineResult(rows=[[len(calls)]])
+        calls.append(request)
+        return DataQueryResult(rows=[[len(calls)]])
 
     monkeypatch.setattr(engine, "execute_programmatic", execute)
-    assert runtime.execute_query(build, payload) == EngineResult(rows=[[1]])
-    assert runtime.execute_query(build, payload) == EngineResult(rows=[[2]])
+    assert runtime.execute_query(build, payload) == DataQueryResult(rows=[[1]])
+    assert runtime.execute_query(build, payload) == DataQueryResult(rows=[[2]])
     assert paths[0] != paths[1]
     assert all(not path.exists() for path in paths)
     assert events == ["lock", "unlock", "lock", "unlock"]
@@ -88,7 +88,7 @@ def test_errors_release_lock_and_do_not_publish_late_results(realtime, monkeypat
     if failure == "timeout":
         runtime.settings = replace(runtime.settings, command_timeout_seconds=0.01)
 
-    def execute(project, profiles, data):
+    def execute(project, profiles, request):
         paths.append(project)
         if failure == "invalid":
             raise engine.InvalidDimensionsRequest("private-details")
@@ -97,11 +97,11 @@ def test_errors_release_lock_and_do_not_publish_late_results(realtime, monkeypat
         time.sleep(0.04)
         assert events == ["lock"]
         assert project.exists()
-        return EngineResult(rows=[[123]])
+        return DataQueryResult(rows=[[123]])
 
     monkeypatch.setattr(engine, "execute_programmatic", execute)
     with pytest.raises(ServiceError) as caught:
-        runtime.execute_query(build, EngineRequest(mode="OPTIONS", metrics=["orders"]))
+        runtime.execute_query(build, PlatformQueryRequest(runId=uuid4(), mode="QUERY", metrics=["orders"]))
     assert caught.value.status == status
     assert caught.value.error.code == code
     assert "private-details" not in str(caught.value)
@@ -112,10 +112,10 @@ def test_errors_release_lock_and_do_not_publish_late_results(realtime, monkeypat
 @pytest.mark.parametrize(
     "value,limit,error_code",
     [
-        (EngineResult(rows=[["中"]]), 0, None),
-        (EngineResult(rows=[["中"]]), -1, "RESULT_TOO_LARGE"),
-        (EngineResult(), 0, None),
-        (EngineResult(), -1, "RESULT_TOO_LARGE"),
+        (DataQueryResult(rows=[["中"]]), 0, None),
+        (DataQueryResult(rows=[["中"]]), -1, "RESULT_TOO_LARGE"),
+        (DataQueryResult(), 0, None),
+        (DataQueryResult(), -1, "RESULT_TOO_LARGE"),
         ([], 1024, "RESULT_INVALID"),
         (None, 1024, "RESULT_INVALID"),
     ],
@@ -123,7 +123,7 @@ def test_errors_release_lock_and_do_not_publish_late_results(realtime, monkeypat
 def test_realtime_result_size_and_shape(realtime, monkeypatch, value, limit, error_code):
     import dbt_metricflow_service.platform.metricflow as engine
 
-    if isinstance(value, EngineResult):
+    if isinstance(value, DataQueryResult):
         serialized = json.dumps(
             value.model_dump(mode="python", by_alias=True, exclude_unset=True), ensure_ascii=False,
         )
@@ -131,12 +131,12 @@ def test_realtime_result_size_and_shape(realtime, monkeypatch, value, limit, err
 
     runtime, build, events = realtime
     runtime.settings = replace(runtime.settings, max_result_bytes=limit)
-    monkeypatch.setattr(engine, "execute_programmatic", lambda *args: value)
+    monkeypatch.setattr(engine, "execute_programmatic", lambda *args, **kwargs: value)
     if error_code is None:
-        assert runtime.execute_query(build, EngineRequest(mode="OPTIONS")) is value
+        assert runtime.execute_query(build, PlatformQueryRequest(runId=uuid4(), mode="QUERY")) is value
     else:
         with pytest.raises(ServiceError) as caught:
-            runtime.execute_query(build, EngineRequest(mode="OPTIONS"))
+            runtime.execute_query(build, PlatformQueryRequest(runId=uuid4(), mode="QUERY"))
         assert caught.value.error.code == error_code
     assert events == ["lock", "unlock"]
 
@@ -152,9 +152,9 @@ def test_realtime_non_json_result_is_a_sanitized_service_failure(realtime, monke
             return "private-cell-details"
 
     cell = b"private-cell-details" if binary else PrivateCell()
-    monkeypatch.setattr(engine, "execute_programmatic", lambda *args: EngineResult(rows=[[cell]]))
+    monkeypatch.setattr(engine, "execute_programmatic", lambda *args, **kwargs: DataQueryResult(rows=[[cell]]))
     with pytest.raises(ServiceError) as caught:
-        runtime.execute_query(build, EngineRequest(mode="OPTIONS"))
+        runtime.execute_query(build, PlatformQueryRequest(runId=uuid4(), mode="QUERY"))
     assert caught.value.status == 503
     assert caught.value.error.code == "COMMAND_FAILED"
     assert "private-cell-details" not in str(caught.value)
@@ -168,14 +168,16 @@ def test_waiting_queries_do_not_hold_cleanup_connections(realtime, monkeypatch):
 
     runtime, build, events = realtime
 
-    def execute(*args):
+    def execute(*args, **kwargs):
         time.sleep(0.01)
-        return EngineResult(rows=[[1]])
+        return DataQueryResult(rows=[[1]])
 
     monkeypatch.setattr(engine, "execute_programmatic", execute)
     with ThreadPoolExecutor(max_workers=9) as pool:
-        results = list(pool.map(lambda _: runtime.execute_query(build, EngineRequest(mode="OPTIONS")), range(9)))
-    assert results == [EngineResult(rows=[[1]])] * 9
+        results = list(pool.map(
+            lambda _: runtime.execute_query(build, PlatformQueryRequest(runId=uuid4(), mode="QUERY")), range(9),
+        ))
+    assert results == [DataQueryResult(rows=[[1]])] * 9
     assert events == ["lock", "unlock"] * 9
 
 
@@ -190,12 +192,13 @@ def test_real_database_query_path_only_reads_without_persisting_records(store, t
     runtime.settings = replace(infrastructure(), profiles_dir=tmp_path, command_timeout_seconds=5,
                                max_output_bytes=64, temp_root=tmp_path / "queries")
     runtime.jobs, runtime.artifacts = jobs, artifacts
-    monkeypatch.setattr(engine, "execute_programmatic", lambda *args: EngineResult(rows=[[1]]))
+    monkeypatch.setattr(engine, "execute_programmatic", lambda *args, **kwargs: DataQueryResult(rows=[[1]]))
+    monkeypatch.setattr(engine, "execute_available_dimensions", lambda *args, **kwargs: DimensionQueryResult())
     with reads(store.db) as statements:
-        options = EngineRequest(mode="OPTIONS", metrics=["revenue"])
-        query = EngineRequest(mode="QUERY", request=PlatformQueryRequest(runId=uuid4(), mode="QUERY"))
-        assert runtime.execute_query(build, options) == EngineResult(rows=[[1]])
-        assert runtime.execute_query(build, query) == EngineResult(rows=[[1]])
+        options = ("revenue",)
+        query = PlatformQueryRequest(runId=uuid4(), mode="QUERY")
+        assert runtime.available_dimensions(build, options) == DimensionQueryResult()
+        assert runtime.execute_query(build, query) == DataQueryResult(rows=[[1]])
     assert statements
     assert all(statement.lstrip().upper().startswith("SELECT") for statement in statements)
     with store.db.transaction() as connection:
@@ -206,3 +209,81 @@ def test_real_database_query_path_only_reads_without_persisting_records(store, t
             ).scalar_one()
             == 0
         )
+
+
+def test_dimension_runtime_repeats_calls_with_explicit_metrics(realtime, monkeypatch):
+    import dbt_metricflow_service.platform.metricflow as engine
+
+    runtime, build, events = realtime
+    metrics = ("orders",)
+    paths = []
+
+    def discover(project, profiles, *, metrics):
+        assert metrics == ("orders",)
+        assert events[-1] == "lock"
+        assert (project / "dbt_project.yml").is_file()
+        paths.append(project)
+        return DimensionQueryResult(allowed_filters=["="] if len(paths) == 1 else ["IN"])
+
+    monkeypatch.setattr(engine, "execute_available_dimensions", discover)
+    monkeypatch.setattr(engine, "execute_programmatic", lambda *args, **kwargs: pytest.fail("data API was called"))
+    assert runtime.available_dimensions(build, metrics).allowed_filters == ["="]
+    assert runtime.available_dimensions(build, metrics).allowed_filters == ["IN"]
+    assert paths[0] != paths[1]
+    assert all(not path.exists() for path in paths)
+    assert events == ["lock", "unlock", "lock", "unlock"]
+
+
+@pytest.mark.parametrize("dimensions", [True, False])
+def test_runtime_rejects_the_other_operations_result_type(realtime, monkeypatch, dimensions):
+    import dbt_metricflow_service.platform.metricflow as engine
+
+    runtime, build, events = realtime
+    if dimensions:
+        monkeypatch.setattr(engine, "execute_available_dimensions", lambda *args, **kwargs: DataQueryResult())
+        def execute():
+            return runtime.available_dimensions(build, ("orders",))
+    else:
+        monkeypatch.setattr(engine, "execute_programmatic", lambda *args, **kwargs: DimensionQueryResult())
+        def execute():
+            return runtime.execute_query(build, PlatformQueryRequest(runId=uuid4(), mode="QUERY"))
+    with pytest.raises(ServiceError) as caught:
+        execute()
+    assert caught.value.error.code == "RESULT_INVALID"
+    assert caught.value.status == 503
+    assert events == ["lock", "unlock"]
+
+
+@pytest.mark.parametrize("failure,code,status", [
+    ("invalid", "INVALID_QUERY", 422), ("connection", "COMMAND_FAILED", 503),
+    ("timeout", "COMMAND_TIMEOUT", 504),
+])
+def test_dimension_errors_keep_http_semantics_and_release_workspace(realtime, monkeypatch, failure, code, status):
+    import time
+
+    import dbt_metricflow_service.platform.metricflow as engine
+
+    runtime, build, events = realtime
+    paths = []
+    if failure == "timeout":
+        runtime.settings = replace(runtime.settings, command_timeout_seconds=0.01)
+
+    def discover(project, profiles, *, metrics):
+        paths.append(project)
+        if failure == "invalid":
+            raise engine.InvalidDimensionsRequest("private-details")
+        if failure == "connection":
+            raise ConnectionError("private-details")
+        time.sleep(0.04)
+        assert project.exists()
+        assert events == ["lock"]
+        return DimensionQueryResult()
+
+    monkeypatch.setattr(engine, "execute_available_dimensions", discover)
+    with pytest.raises(ServiceError) as caught:
+        runtime.available_dimensions(build, ("orders",))
+    assert caught.value.error.code == code
+    assert caught.value.status == status
+    assert "private-details" not in str(caught.value)
+    assert all(not path.exists() for path in paths)
+    assert events == ["lock", "unlock"]

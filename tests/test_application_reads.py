@@ -75,7 +75,8 @@ def test_history_cursor_filters_and_concurrent_insert(store, deployments):
 
 def test_query_submission_does_not_read_deployments(store, tmp_path):
     app, build, jobs, artifacts = ready_build(store, tmp_path)
-    queries = QueryService(app, CatalogService(app.store, artifacts), inline_executor())
+    execute = inline_executor()
+    queries = QueryService(app, CatalogService(app.store, artifacts), execute, execute.discover_dimensions)
     with reads(store.db) as statements:
         view = queries.submit(
             build.build_id,

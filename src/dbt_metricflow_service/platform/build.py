@@ -12,7 +12,6 @@ from sqlglot import exp
 
 from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.models.native import NativeManifest, NativeNode, NativePhysicalCatalog, NativeResults
-from dbt_metricflow_service.platform.models import EngineRequest
 from dbt_metricflow_service.storage.records import ArtifactValidation, JobErrorDetail, LeasedJob
 
 from ..platform.namespace import TABLE_NAME_PATTERN, prepare_fixed_schema_project
@@ -274,8 +273,8 @@ async def execute_publication(
     if len(raw_results) > settings.max_artifact_file_bytes:
         raise ValueError(BUILD_PROOF_LIMIT_MESSAGE)
     await command(DOCS, GENERATE)
-    probe = (await executor._metricflow(job, project, EngineRequest(mode=strings.PROBE), profiles=profiles)
-             if request.execution else await executor._metricflow(job, project, EngineRequest(mode=strings.PROBE)))
+    probe = (await executor.probe_query_capability(job, project, profiles=profiles)
+             if request.execution else await executor.probe_query_capability(job, project))
     manifest = NativeManifest.model_validate_json((target / MANIFEST_FILE).read_bytes())
     physical_catalog = NativePhysicalCatalog.model_validate_json((target / CATALOG_FILE).read_bytes())
     records = NativeResults.model_validate_json(raw_results).results

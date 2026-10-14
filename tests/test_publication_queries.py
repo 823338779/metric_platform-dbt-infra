@@ -31,7 +31,8 @@ def query_service(store, tmp_path):
     catalog = build()
     catalogs = CatalogService(builds.store, artifacts)
     catalogs.read_build = lambda build: deepcopy(catalog)
-    service = QueryService(builds, catalogs, inline_executor())
+    execute = inline_executor()
+    service = QueryService(builds, catalogs, execute, execute.discover_dimensions)
     request = AvailableDimensionsRequest(metricResourceIds=["metric.sample.orders"])
     service.fixture_available_dimensions = service.available_dimensions(view.build_id, request, "platform")
     return service, jobs.get(record.run_id), record
@@ -67,14 +68,14 @@ def test_query_pins_run_and_reexecutes_after_replacement(store, tmp_path):
     request = PublishedQueryRequest(mode="QUERY", metricResourceIds=["metric.sample.orders"])
     first = service.submit(release.build_id, request, "platform")
     assert service.execute.calls[-1][0].run_id == job.job_id
-    assert service.execute.calls[-1][1].request.metrics == ["orders"]
+    assert service.execute.calls[-1][1].metrics == ["orders"]
     count = len(service.execute.calls)
     ready_build(store, tmp_path)
     second = service.submit(release.build_id, request, "platform")
     assert second.build_id == first.build_id
     assert len(service.execute.calls) == count + 1
     service.submit(release.build_id, request.model_copy(update={"limit": 5}), "platform")
-    assert service.execute.calls[-1][1].request.limit == 5
+    assert service.execute.calls[-1][1].limit == 5
 
 
 def test_concurrent_identical_requests_both_execute(store, tmp_path):

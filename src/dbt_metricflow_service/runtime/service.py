@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from collections.abc import Callable
+from functools import partial
 from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
@@ -12,10 +14,10 @@ from uuid import uuid4
 from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.application.errors import ServiceError
 from dbt_metricflow_service.execution.embedded import run_serialized
-from dbt_metricflow_service.execution.metricflow import MetricFlowRequest, MetricFlowResult, invoke_metricflow
+from dbt_metricflow_service.execution.metricflow import MetricFlowRequest, MetricFlowResult, ResultT, invoke_metricflow
 from dbt_metricflow_service.execution.models import JobStatus
 from dbt_metricflow_service.platform.execution_profile import ExecutionConfigurationError
-from dbt_metricflow_service.platform.models import EngineRequest, EngineResult
+from dbt_metricflow_service.platform.models import DataQueryResult, DimensionQueryResult, PlatformQueryRequest
 from dbt_metricflow_service.runtime.executor import build_engine_environment
 from dbt_metricflow_service.runtime.workspace import materialized_workspace
 from dbt_metricflow_service.settings import Settings
@@ -72,13 +74,25 @@ class Runtime:
                                        max_set_bytes=settings.max_artifact_bytes)
         self.worker = None
 
-    def execute_query(self, build: StoredBuild, payload: EngineRequest) -> EngineResult:
+    def available_dimensions(self, build: StoredBuild, metrics: tuple[str, ...]) -> DimensionQueryResult:
+        """查询所选指标的维度能力，返回专用元数据结果。"""
+        from ..platform.metricflow import execute_available_dimensions
+        return self._execute_query(build, partial(execute_available_dimensions, metrics=metrics), DimensionQueryResult)
+
+    def execute_query(self, build: StoredBuild, request: PlatformQueryRequest) -> DataQueryResult:
+        """执行数据请求，返回数据行或 SQL。"""
+        from ..platform.metricflow import execute_programmatic
+        return self._execute_query(build, partial(execute_programmatic, request=request), DataQueryResult)
+
+    def _execute_query(
+        self, build: StoredBuild, operation: Callable[[Path, Path], ResultT], result_type: type[ResultT],
+    ) -> ResultT:
         """直接执行固定构建的查询，输入、结果和诊断均不落库。"""
         async def before_start() -> None:
             # 无持久租约；执行线程内的 query_run 会在引擎调用前校验并保护构建。
             return None
 
-        def invoke() -> MetricFlowResult:
+        def invoke() -> MetricFlowResult[ResultT]:
             with self.jobs.query_run(cast(str, build.run_id)) as parent:
                 with materialized_workspace(
                     self.artifacts, cast(str, build.output_set_id), self.settings.temp_root,
@@ -90,13 +104,13 @@ class Runtime:
                     with profile as profiles:
                         return invoke_with_profile(profiles, parent, project)
 
-        def invoke_with_profile(profiles: Path, parent: StoredJob, project: Path) -> MetricFlowResult:
+        def invoke_with_profile(profiles: Path, parent: StoredJob, project: Path) -> MetricFlowResult[ResultT]:
             environment = build_engine_environment(
                 project, profiles,
                 cast(str, parent.schema_name), cast(str, parent.profile_binding_id),
             )
             return invoke_metricflow(
-                parent.project_id, MetricFlowRequest(environment, payload),
+                parent.project_id, MetricFlowRequest(environment, operation),
                 self.settings.max_output_bytes,
             )
 
@@ -117,7 +131,7 @@ class Runtime:
             raise ServiceError(code, QUERY_EXECUTION_FAILED, 422 if code == strings.INVALID_QUERY else 503,
                                build_id=build.build_id)
         value = result.payload
-        if not isinstance(value, EngineResult):
+        if not isinstance(value, result_type):
             raise ServiceError(strings.RESULT_INVALID, INVALID_QUERY_RESULT, 503, build_id=build.build_id)
         size = 0
         try:

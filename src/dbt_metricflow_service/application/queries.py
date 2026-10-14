@@ -17,7 +17,7 @@ from dbt_metricflow_service.models.queries import (
     QueryRequest,
     QueryResult,
 )
-from dbt_metricflow_service.platform.models import EngineRequest, EngineResult
+from dbt_metricflow_service.platform.models import DataQueryResult, DimensionQueryResult, PlatformQueryRequest
 from dbt_metricflow_service.storage.records import StoredBuild
 
 from ..platform.dimensions import DimensionBinding, map_available_dimensions
@@ -35,11 +35,13 @@ MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 class QueryService:
     def __init__(
         self, builds: BuildService, catalogs: CatalogService,
-        execute: Callable[[StoredBuild, EngineRequest], EngineResult],
+        execute: Callable[[StoredBuild, PlatformQueryRequest], DataQueryResult],
+        discover_dimensions: Callable[[StoredBuild, tuple[str, ...]], DimensionQueryResult],
     ) -> None:
         self.builds = builds
         self.catalogs = catalogs
         self.execute = execute
+        self.discover_dimensions = discover_dimensions
 
     def _available(self, build: StoredBuild) -> None:
         code = self.builds.query_unavailable_reason(build)
@@ -75,9 +77,7 @@ class QueryService:
         self, build: StoredBuild, selected: list[str], catalog: PublishedCatalog,
     ) -> tuple[AvailableDimensions, dict[str, DimensionBinding]]:
         indexed = self._metrics(catalog, selected)
-        native = self.execute(
-            build, EngineRequest(mode=strings.OPTIONS, metrics=[indexed[key].name for key in selected])
-        )
+        native = self.discover_dimensions(build, tuple(indexed[key].name for key in selected))
         return map_available_dimensions(build.build_id, selected, catalog, native)
 
     def submit(self, build_id: UUID | str, request: QueryRequest, caller: str) -> QueryResult:
@@ -94,7 +94,7 @@ class QueryService:
             available, mapping = self._available_dimensions(build, body.metric_resource_ids, catalog)
             dimensions = available.dimensions
         engine = compile_query(request, cast(str, build.run_id), indexed, dimensions, mapping)
-        payload = self.execute(build, EngineRequest(mode=strings.QUERY, request=engine))
+        payload = self.execute(build, engine)
         metadata = query_time_metadata(body, timezone)
         result = QueryResult(
             build_id=build.build_id, mode=request.mode, commit_sha=build.commit_sha,

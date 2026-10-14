@@ -6,13 +6,19 @@ from dbt_metricflow_service.models.artifacts import MetricTimeConfig
 from dbt_metricflow_service.models.catalog import NativeCatalog
 from dbt_metricflow_service.models.native import NativeNode
 from dbt_metricflow_service.models.payloads import ResultColumn
-from dbt_metricflow_service.platform.models import EngineRequest, EngineResult
+from dbt_metricflow_service.platform.models import (
+    DataQueryResult,
+    DimensionQueryResult,
+    PlatformQueryRequest,
+    ProbeResult,
+)
 
 
 @pytest.mark.parametrize("model,payload", [
     (NativeCatalog, {"resources": [], "dependencies": []}),
-    (EngineRequest, {"mode": "PROBE"}),
-    (EngineResult, {}),
+    (DimensionQueryResult, {}),
+    (ProbeResult, {"queryCapability": True}),
+    (DataQueryResult, {}),
     (ResultColumn, {"name": "total", "type": "Decimal"}),
     (MetricTimeConfig, {}),
 ])
@@ -34,6 +40,12 @@ def test_native_projection_preserves_nulls_extensions_and_both_hook_spellings():
     assert node.native_details() == payload
 
 
-def test_query_engine_request_requires_query_body():
+def test_data_query_requires_a_fixed_run():
     with pytest.raises(ValidationError):
-        EngineRequest(mode="QUERY")
+        PlatformQueryRequest(mode="QUERY")
+
+
+@pytest.mark.parametrize("mode", ["OPTIONS", "PROBE", "CLEANUP"])
+def test_data_query_cannot_select_metadata_or_lifecycle_operations(mode):
+    with pytest.raises(ValidationError):
+        PlatformQueryRequest(runId="a" * 32, mode=mode)

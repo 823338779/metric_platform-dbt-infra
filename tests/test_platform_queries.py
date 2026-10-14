@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from dbt_metricflow_service.platform.models import EngineResult, PlatformQueryRequest
+from dbt_metricflow_service.platform.models import DimensionQueryResult, PlatformQueryRequest
 from dbt_metricflow_service.platform.queries import available_dimensions, serialize_rows, validate_query
 
 
@@ -49,7 +49,7 @@ def test_query_rejects_unlisted_filter_operator_and_foreign_run() -> None:
         "groupBy": [], "filters": [{"field": "region", "operator": "DROP", "value": "A"}],
     })
     with pytest.raises(ValueError):
-        validate_query(request, EngineResult(metrics=[{"name": "revenue"}], dimensions=[], timeDimensions=[]))
+        validate_query(request, DimensionQueryResult(metrics=[{"name": "revenue"}], dimensions=[], timeDimensions=[]))
     with pytest.raises(ValidationError):
         PlatformQueryRequest.model_validate({
             "runId": "a" * 32, "mode": "QUERY", "metrics": ["revenue"],

@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from dbt_metricflow_service.application.queries import QueryService
 from dbt_metricflow_service.models.queries import AvailableDimensionsRequest, QueryRequest
-from dbt_metricflow_service.platform.models import EngineResult
+from dbt_metricflow_service.platform.models import DataQueryResult, DimensionQueryResult
 from tests.catalog_helpers import catalog, resource
 from tests.data_helpers import stored_build
 from tests.synchronous_queries import NATIVE_AVAILABLE_DIMENSIONS
@@ -21,19 +21,21 @@ def live_service():
     build = stored_build(build_id=build_id, run_id=run_id, repository="repository", commit_sha="a" * 40)
     executions = []
 
+    def discover_dimensions(build, metrics):
+        executions.append(metrics)
+        payload = deepcopy(NATIVE_AVAILABLE_DIMENSIONS)
+        count = sum(isinstance(item, tuple) for item in executions)
+        payload["allowedFilters"] = ["="] if count == 1 else ["IN"]
+        return DimensionQueryResult.model_validate(payload)
+
     def execute(build, request):
         executions.append(request)
-        if request.mode == "OPTIONS":
-            payload = deepcopy(NATIVE_AVAILABLE_DIMENSIONS)
-            count = sum(item.mode == "OPTIONS" for item in executions)
-            payload["allowedFilters"] = ["="] if count == 1 else ["IN"]
-            return EngineResult.model_validate(payload)
-        count = sum(item.mode == "QUERY" for item in executions)
-        return EngineResult(columns=[{"name": "orders", "type": "int"}], rows=[[count]], truncated=False)
+        count = sum(not isinstance(item, tuple) for item in executions)
+        return DataQueryResult(columns=[{"name": "orders", "type": "int"}], rows=[[count]], truncated=False)
 
     builds = SimpleNamespace(load=lambda _: build, query_unavailable_reason=lambda _: None, timeout=30)
     catalogs = SimpleNamespace(read_build=lambda _: catalog([resource("metric.orders", capabilities=["QUERY"])]))
-    return QueryService(builds, catalogs, execute), build_id, executions
+    return QueryService(builds, catalogs, execute, discover_dimensions), build_id, executions
 
 
 def test_identical_queries_execute_again_and_return_updated_rows(live_service):
@@ -54,7 +56,7 @@ def test_available_dimensions_are_recomputed_with_updated_metadata(live_service)
     second = service.available_dimensions(build_id, request, "platform")
     assert first.dimensions[0].operators == ["="]
     assert second.dimensions[0].operators == ["IN"]
-    assert [item.mode for item in executions] == ["OPTIONS", "OPTIONS"]
+    assert executions == [("orders",), ("orders",)]
 
 
 def test_query_rejects_removed_idempotency_key():

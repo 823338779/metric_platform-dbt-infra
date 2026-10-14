@@ -2,17 +2,15 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Final, Literal, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, StrictBool, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, StrictBool
 
 from dbt_metricflow_service import constants as strings
 
 from ..models.artifacts import Contract
 from ..models.payloads import ResultColumn
 
-QUERY_BODY_REQUIRED_MESSAGE: Final[str] = 'QUERY requires a request'
 
 class QueryMode(StrEnum):
     """MetricFlow 平台查询模式。"""
@@ -68,26 +66,25 @@ class NativeTimeDimension(Contract):
     granularity: str
 
 
-class EngineRequest(Contract):
-    mode: Literal["OPTIONS", "QUERY", "PROBE", "CLEANUP"]
-    metrics: list[str] = Field(default_factory=list)
-    request: PlatformQueryRequest | None = None
+class DimensionQueryResult(Contract):
+    """所选指标的可组合维度、时间粒度和过滤能力；不包含数据行。"""
 
-    @model_validator(mode=strings.VALIDATOR_AFTER)
-    def require_query(self) -> Self:
-        if self.mode == strings.QUERY and self.request is None:
-            raise ValueError(QUERY_BODY_REQUIRED_MESSAGE)
-        return self
-
-
-class EngineResult(Contract):
-    query_capability: StrictBool | None = None
-    columns: list[ResultColumn] = Field(default_factory=list)
-    rows: list[list[JsonValue]] = Field(default_factory=list)
-    truncated: bool = False
-    sql: str | None = None
     dimensions: list[NativeDimension] = Field(default_factory=list)
     metrics: list[NativeMetric] = Field(default_factory=list)
     time_dimensions: list[NativeTimeDimension] = Field(default_factory=list)
     allowed_filters: list[str] = Field(default_factory=list)
-    cleaned: bool | None = None
+
+
+class DataQueryResult(Contract):
+    """数据查询、维度值和预览的有界结果，或 explain 生成的 SQL。"""
+
+    columns: list[ResultColumn] = Field(default_factory=list)
+    rows: list[list[JsonValue]] = Field(default_factory=list)
+    truncated: bool = False
+    sql: str | None = None
+
+
+class ProbeResult(Contract):
+    """构建验收的真实查询能力证明。"""
+
+    query_capability: StrictBool

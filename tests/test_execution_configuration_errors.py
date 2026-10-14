@@ -10,7 +10,6 @@ import pytest
 
 from dbt_metricflow_service.application.errors import ServiceError
 from dbt_metricflow_service.platform.execution_profile import materialized_profile
-from dbt_metricflow_service.platform.models import EngineRequest
 from dbt_metricflow_service.runtime.service import Runtime
 from dbt_metricflow_service.runtime.worker import Worker
 from tests.data_helpers import leased_job, stored_build
@@ -32,7 +31,7 @@ def test_query_missing_credentials_is_retryable_service_failure(tmp_path, monkey
                         lambda *args: nullcontext(tmp_path))
     build = stored_build(run_id="run", output_set_id="output", config_snapshot=snapshot())
     with pytest.raises(ServiceError) as raised:
-        runtime.execute_query(build, EngineRequest(mode="PROBE"))
+        runtime.available_dimensions(build, ("orders",))
     assert raised.value.status == 503
     assert raised.value.error.code == "CREDENTIAL_UNAVAILABLE"
     assert raised.value.error.retryable

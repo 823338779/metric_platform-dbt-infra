@@ -2,7 +2,7 @@
 
 from copy import deepcopy
 
-from dbt_metricflow_service.platform.models import EngineResult
+from dbt_metricflow_service.platform.models import DataQueryResult, DimensionQueryResult
 
 NATIVE_AVAILABLE_DIMENSIONS = {
     "metrics": [{"name": "orders"}],
@@ -17,11 +17,16 @@ QUERY_RESULT = {"sql": "select 1", "columns": [], "rows": [], "truncated": False
 
 
 def inline_executor(*, query_result=None):
-    def execute(build, payload):
-        execute.calls.append((build, deepcopy(payload)))
-        return EngineResult.model_validate(deepcopy(NATIVE_AVAILABLE_DIMENSIONS if payload.mode == "OPTIONS" else (
-            QUERY_RESULT if query_result is None else query_result
-        )))
+    calls = []
 
-    execute.calls = []
+    def execute(build, request):
+        calls.append((build, deepcopy(request)))
+        return DataQueryResult.model_validate(deepcopy(QUERY_RESULT if query_result is None else query_result))
+
+    def discover_dimensions(build, metrics):
+        calls.append((build, metrics))
+        return DimensionQueryResult.model_validate(deepcopy(NATIVE_AVAILABLE_DIMENSIONS))
+
+    execute.calls = calls
+    execute.discover_dimensions = discover_dimensions
     return execute

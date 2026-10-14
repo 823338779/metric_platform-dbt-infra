@@ -153,7 +153,8 @@ def test_option_scope_includes_build_and_metric_set(store, tmp_path):
     from dbt_metricflow_service.models.queries import AvailableDimensionsRequest
 
     app, build, jobs, artifacts = ready_build(store, tmp_path)
-    queries = QueryService(app, CatalogService(app.store, artifacts), inline_executor())
+    execute = inline_executor()
+    queries = QueryService(app, CatalogService(app.store, artifacts), execute, execute.discover_dimensions)
     body = AvailableDimensionsRequest(metricResourceIds=["metric.revenue"])
     first = queries.available_dimensions(build.build_id, body, CALLER)
     assert first.dimensions == queries.available_dimensions(build.build_id, body, CALLER).dimensions
@@ -169,7 +170,8 @@ def test_historical_environment_missing_is_503(store, tmp_path):
 
     app, build, jobs, artifacts = ready_build(store, tmp_path)
     app.toolchain = "different"
-    query = QueryService(app, CatalogService(app.store, artifacts), inline_executor())
+    execute = inline_executor()
+    query = QueryService(app, CatalogService(app.store, artifacts), execute, execute.discover_dimensions)
     with pytest.raises(ServiceError) as failure:
         query.available_dimensions(
             build.build_id, AvailableDimensionsRequest(metricResourceIds=["metric.revenue"]), CALLER
@@ -184,7 +186,8 @@ def test_explain_returns_in_memory_without_result_store(store, tmp_path, monkeyp
 
     app, build, jobs, artifacts = ready_build(store, tmp_path)
     monkeypatch.setattr(jobs, "reserve", lambda *_: pytest.fail("query created a task"))
-    queries = QueryService(app, CatalogService(app.store, artifacts), inline_executor())
+    execute = inline_executor()
+    queries = QueryService(app, CatalogService(app.store, artifacts), execute, execute.discover_dimensions)
     result = queries.submit(build.build_id, QueryRequest(mode="EXPLAIN", metricResourceIds=["metric.revenue"]), CALLER)
     assert result.sql == "select 1"
     assert not hasattr(result, "query_id")

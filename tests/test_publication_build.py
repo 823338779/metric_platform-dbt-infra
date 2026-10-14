@@ -18,7 +18,7 @@ from dbt_metricflow_service.platform.build import (
     validate_bound_manifest,
     validate_readonly_sql,
 )
-from dbt_metricflow_service.platform.models import EngineResult
+from dbt_metricflow_service.platform.models import ProbeResult
 from dbt_metricflow_service.storage.records import ArtifactValidation, JobRequest
 from tests.data_helpers import leased_job
 
@@ -59,14 +59,14 @@ def publication_executor(tmp_path):
             (target / "run_results.json").write_text('{"results": []}')
 
     async def metricflow(*_args):
-        return EngineResult(query_capability=True)
+        return ProbeResult(query_capability=True)
 
     def capture(_project_id, _project, **kwargs):
         captured.update(kwargs)
         return "sealed-output"
 
     executor = SimpleNamespace(settings=SimpleNamespace(profiles_dir=tmp_path, max_artifact_file_bytes=1024 * 1024),
-                               _dbt=dbt, _metricflow=metricflow, _metadata=RuntimeExecutor._metadata,
+                               _dbt=dbt, probe_query_capability=metricflow, _metadata=RuntimeExecutor._metadata,
                                artifacts=SimpleNamespace(capture=capture))
     return executor, job, project, results, physical, captured
 

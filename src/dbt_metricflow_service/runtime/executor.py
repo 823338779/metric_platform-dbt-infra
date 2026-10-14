@@ -10,13 +10,13 @@ from typing import Final, ParamSpec, TypeVar, cast
 
 from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.execution.dbt import run_dbt
-from dbt_metricflow_service.execution.metricflow import MetricFlowRequest, run_metricflow
+from dbt_metricflow_service.execution.metricflow import MetricFlowRequest, ResultT, run_metricflow
 from dbt_metricflow_service.execution.models import (
     CommandSpec,
     JobRecord,
     JobStatus,
 )
-from dbt_metricflow_service.platform.models import EngineRequest, EngineResult
+from dbt_metricflow_service.platform.models import ProbeResult
 from dbt_metricflow_service.runtime.workspace import attempt_workspace
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
@@ -222,9 +222,16 @@ class RuntimeExecutor:
                 stopped=not timed_out and not may_write,
             )
 
+    async def probe_query_capability(
+        self, job: LeasedJob, project: Path, profiles: Path | None = None,
+    ) -> ProbeResult:
+        from ..platform.metricflow import probe_query_capability
+        return await self._metricflow(job, project, probe_query_capability, ProbeResult, profiles)
+
     async def _metricflow(
-        self, job: LeasedJob, project: Path, body: EngineRequest, profiles: Path | None = None,
-    ) -> EngineResult:
+        self, job: LeasedJob, project: Path, operation: Callable[[Path, Path], ResultT],
+        result_type: type[ResultT], profiles: Path | None = None,
+    ) -> ResultT:
         # 请求作为内存对象交给执行线程，结果也不经过临时控制文件。
         environment = build_engine_environment(
             project, profiles or self.settings.profiles_dir, cast(str, job.schema_name),
@@ -232,7 +239,7 @@ class RuntimeExecutor:
         )
         external = job.kind == RUN_CLEANUP
         result = await run_metricflow(
-            job.project_id, MetricFlowRequest(environment, body), self.settings.command_timeout_seconds,
+            job.project_id, MetricFlowRequest(environment, operation), self.settings.command_timeout_seconds,
             self.settings.max_output_bytes,
             lambda: self._authorize(job, VALIDATING, external=external),
         )
@@ -241,7 +248,7 @@ class RuntimeExecutor:
             raise ExecutionError(ERROR_INVALID_QUERY)
         self._check_record(result.record, may_write=job.kind == RUN_CLEANUP)
         value = result.payload
-        if not isinstance(value, EngineResult):
+        if not isinstance(value, result_type):
             raise ExecutionError(ERROR_RESULT_INVALID)
         size = 0
         try:

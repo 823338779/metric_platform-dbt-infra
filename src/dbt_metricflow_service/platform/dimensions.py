@@ -8,7 +8,7 @@ from dbt_metricflow_service import constants as strings
 
 from ..models.artifacts import PublishedCatalog, ResourceKind
 from ..models.payloads import AvailableDimensions, DimensionOption
-from .models import EngineResult, NativeDimension
+from .models import DimensionQueryResult, NativeDimension
 
 METRIC_TIME = strings.METRIC_TIME
 PATH_SEPARATOR = "__"
@@ -21,7 +21,7 @@ class DimensionBinding:
 
 
 def map_available_dimensions(
-    build_id: str, metric_ids: list[str], catalog: PublishedCatalog, native: EngineResult,
+    build_id: str, metric_ids: list[str], catalog: PublishedCatalog, native: DimensionQueryResult,
 ) -> tuple[AvailableDimensions, dict[str, DimensionBinding]]:
     selected = sorted(set(metric_ids))
     output: list[DimensionOption] = []

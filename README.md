@@ -14,6 +14,11 @@
 | `platform` | 固定 Git 读取、完整工程构建、原生目录与查询适配 |
 | `execution` / `adapters` | 进程内引擎调用、串行与取消控制、脱敏及底层引擎适配 |
 
+内部维度发现和数据查询使用独立入口：`Runtime.available_dimensions(build, metrics)` 返回
+`DimensionQueryResult`，`Runtime.execute_query(build, request)` 接收 `PlatformQueryRequest` 并返回
+`DataQueryResult`。执行层只共享串行、超时和脱敏保护，不再通过 `EngineRequest.mode` 分派两种查询；
+构建验收单独调用 `probe_query_capability`。HTTP 请求和响应保持不变。
+
 无额外 Repository/Port/Facade 镜像层。持久化通过 SQLAlchemy ORM 实现，封存产物与物理引用保护由具体 Store 和数据库约束维护。
 
 构建响应统一读取包含物理生命周期的快照；可查询性判断和响应组装不执行 I/O。

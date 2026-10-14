@@ -19,7 +19,7 @@ from psycopg2.extras import Json
 import dbt_metricflow_service.runtime.executor as runtime_execution
 from dbt_metricflow_service.execution.models import CommandSpec
 from dbt_metricflow_service.platform import metricflow
-from dbt_metricflow_service.platform.models import EngineRequest, EngineResult
+from dbt_metricflow_service.platform.models import ProbeResult
 from dbt_metricflow_service.runtime.executor import ExecutionError, RuntimeExecutor
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
@@ -119,17 +119,17 @@ def claimed(execution, kind, request):
 def programmatic_engine(monkeypatch, execute=None):
     """保留线程、租约和内存载荷传递，仅替换需要仓库访问的 SDK 函数。"""
 
-    def default_execute(project, profiles, data):
+    def default_execute(project, profiles):
         assert (project / PROJECT_FILE).exists()
         assert os.environ[SCHEMA_ENV] == FIXTURE_SCHEMA
         assert os.environ[TARGET_ENV] == FIXTURE_TARGET
-        return EngineResult(cleaned=True) if data.mode == CLEANUP_MODE else EngineResult(query_capability=True)
+        return ProbeResult(query_capability=True)
 
     def forbidden(*args, **kwargs):
         raise AssertionError("runtime must execute the engine in process")
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden)
-    monkeypatch.setattr(metricflow, "execute_programmatic", execute or default_execute)
+    monkeypatch.setattr(metricflow, "probe_query_capability", execute or default_execute)
 
 
 @pytest.fixture
@@ -199,13 +199,13 @@ async def test_expired_lease_does_not_start_engine(execution, monkeypatch, tmp_p
             (job.attempt_id,),
         )
     # 保留真实租约过期检查，SDK 的副作用绝不能出现。
-    def execute(project, profiles, data):
+    def execute(project, profiles):
         marker.touch()
-        return EngineResult()
+        return ProbeResult(query_capability=True)
 
     programmatic_engine(monkeypatch, execute)
     with pytest.raises(ExecutionError) as error:
-        await executor._metricflow(job, tmp_path, EngineRequest(mode="PROBE"))
+        await executor.probe_query_capability(job, tmp_path)
     assert error.value.code == "LEASE_LOST"
     assert not marker.exists()
 
@@ -222,13 +222,13 @@ async def test_cancellation_or_timeout_waits_for_engine_before_workspace_removal
     workspace = executor.settings.temp_root / str(job.job_id) / str(job.attempt_id)
 
     # 取消或超时后引擎仍可写工作目录；必须等待这次写入结束才能移除目录。
-    def execute(project, profiles, data):
+    def execute(project, profiles):
         started.set()
         assert release.wait(5)
         marker = project / COMPLETED_FILE
         marker.touch()
         finished.append(marker.exists())
-        return EngineResult()
+        return ProbeResult(query_capability=True)
 
     programmatic_engine(monkeypatch, execute)
 
@@ -238,7 +238,7 @@ async def test_cancellation_or_timeout_waits_for_engine_before_workspace_removal
         ) as attempt:
             project = attempt / "project"
             await runtime_execution._thread(executor.artifacts.materialize, job.input_set_id, project)
-            await executor._metricflow(job, project, EngineRequest(mode="PROBE"))
+            await executor.probe_query_capability(job, project)
 
     task = asyncio.create_task(run_engine())
     try:
@@ -274,14 +274,14 @@ async def test_timeout_retains_bounded_diagnostics_and_unknown_stop(execution, m
     executor.settings = dataclasses.replace(executor.settings, command_timeout_seconds=0.2, max_output_bytes=32)
     job = claimed(execution, "RUN_CLEANUP", JobRequest())
     # 诊断经过真实 SDK 日志收集器，超时仍需等线程返回后才能上报。
-    def execute(project, profiles, data):
+    def execute(project, profiles):
         logging.getLogger(ENGINE_LOGGER).warning(DIAGNOSTIC)
         time.sleep(0.3)
-        return EngineResult()
+        return ProbeResult(query_capability=True)
 
     programmatic_engine(monkeypatch, execute)
     with pytest.raises(ExecutionError) as error:
-        await executor._metricflow(job, executor.settings.temp_root, EngineRequest(mode="PROBE"))
+        await executor.probe_query_capability(job, executor.settings.temp_root)
     assert error.value.code == "COMMAND_TIMEOUT"
     assert error.value.stopped is False
     assert error.value.payload.status == "timed_out"

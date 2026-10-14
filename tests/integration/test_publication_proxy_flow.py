@@ -94,7 +94,7 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
     store = BuildStore(runtime.db)
     builds = BuildService(store, runtime.toolchain, 180)
     catalogs = CatalogService(store, runtime.artifacts)
-    queries = QueryService(builds, catalogs, runtime.execute_query)
+    queries = QueryService(builds, catalogs, runtime.execute_query, runtime.available_dimensions)
     deployments = DeploymentService(
         DeploymentStore(runtime.db),
         lambda repository, branch: remote_head(repository, branch, settings.temp_root),

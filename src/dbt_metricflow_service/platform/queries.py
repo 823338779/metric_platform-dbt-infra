@@ -12,7 +12,8 @@ from pydantic import TypeAdapter
 
 from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.platform.models import (
-    EngineResult,
+    DataQueryResult,
+    DimensionQueryResult,
     NativeDimension,
     NativeMetric,
     NativeTimeDimension,
@@ -51,7 +52,7 @@ def _verified_grains(engine: MetricFlowEngine, metrics: tuple[str, ...], base: s
     return tokens
 
 
-def available_dimensions(engine: MetricFlowEngine, metrics: tuple[str, ...]) -> EngineResult:
+def available_dimensions(engine: MetricFlowEngine, metrics: tuple[str, ...]) -> DimensionQueryResult:
     """按 MetricFlow 原生语义返回多指标可组合维度与经 explain 核实的时间 token。"""
 
     available = {metric.name for metric in engine.list_metrics(include_dimensions=False)}
@@ -75,13 +76,14 @@ def available_dimensions(engine: MetricFlowEngine, metrics: tuple[str, ...]) -> 
         dimension.grain_tokens = verified[base]
     time_dimensions = [NativeTimeDimension(token=token, granularity=grain)
                        for grain, token in verified[METRIC_TIME].items()]
-    return EngineResult(metrics=[NativeMetric(name=name) for name in metrics],
-                        dimensions=dimensions, time_dimensions=time_dimensions,
-                        allowed_filters=sorted(ALLOWED_OPERATORS))
+    return DimensionQueryResult(
+        metrics=[NativeMetric(name=name) for name in metrics], dimensions=dimensions,
+        time_dimensions=time_dimensions, allowed_filters=sorted(ALLOWED_OPERATORS),
+    )
 
 
 
-def validate_query(request: PlatformQueryRequest, available: EngineResult) -> None:
+def validate_query(request: PlatformQueryRequest, available: DimensionQueryResult) -> None:
     """所有查询字段先与该固定 run 的原生可用项比对。"""
 
     metrics = {item.name for item in available.metrics}
@@ -114,10 +116,10 @@ def _json_cell(value: JsonValue | Decimal | date | datetime | bytes) -> JsonValu
     return JSON_VALUE_ADAPTER.validate_python(value)
 
 
-def serialize_rows(table: MetricFlowDataTable, *, limit: int) -> EngineResult:
+def serialize_rows(table: MetricFlowDataTable, *, limit: int) -> DataQueryResult:
     """有界序列化 MetricFlowDataTable，Decimal 以字符串保留精度。"""
 
     columns = [ResultColumn(name=column.column_name, type=column.column_type.__name__)
                for column in table.column_descriptions]
     rows = [[_json_cell(cell) for cell in row] for row in table.rows[:limit]]
-    return EngineResult(columns=columns, rows=rows, truncated=len(table.rows) > limit)
+    return DataQueryResult(columns=columns, rows=rows, truncated=len(table.rows) > limit)

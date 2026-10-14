@@ -157,5 +157,6 @@ def test_query_computes_current_dimensions_before_compiling(store, tmp_path):
     service.submit(build.build_id, QueryRequest(
         mode="QUERY", metricResourceIds=["metric.sample.orders"], groupBy=[{"optionId": option}],
     ), "platform")
-    assert [data.mode for _, data in service.execute.calls[count:]] == ["OPTIONS", "QUERY"]
-    assert service.execute.calls[-1][1].request.group_by == ["order__region"]
+    assert service.execute.calls[count][1] == ("orders",)
+    assert service.execute.calls[count + 1][1].mode == "QUERY"
+    assert service.execute.calls[-1][1].group_by == ["order__region"]

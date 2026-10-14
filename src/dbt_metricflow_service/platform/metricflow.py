@@ -11,7 +11,13 @@ from metricflow.engine.metricflow_engine import MetricFlowEngine, MetricFlowQuer
 from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.adapters.starrocks import STARROCKS_ADAPTER, StarRocksSqlClient
 from dbt_metricflow_service.platform.catalog import catalog_from_artifacts
-from dbt_metricflow_service.platform.models import EngineRequest, EngineResult, PlatformQueryRequest, QueryMode
+from dbt_metricflow_service.platform.models import (
+    DataQueryResult,
+    DimensionQueryResult,
+    PlatformQueryRequest,
+    ProbeResult,
+    QueryMode,
+)
 from dbt_metricflow_service.platform.queries import _json_cell, available_dimensions, serialize_rows, validate_query
 
 from ..models.payloads import JsonValue, ResultColumn
@@ -20,7 +26,6 @@ FILTER_VALUE_UNSUPPORTED_MESSAGE: Final[str] = '筛选值类型不支持'
 IN_FILTER_LIMIT_MESSAGE: Final[str] = 'IN 筛选值超限'
 QUERYABLE_METRICS_MISSING_MESSAGE: Final[str] = 'MetricFlow 没有可查询指标'
 INVALID_METRICS_DIMENSIONS_MESSAGE: Final[str] = 'invalid metrics or dimensions'
-QUERY_REQUEST_REQUIRED_MESSAGE: Final[str] = 'query request is required'
 PREVIEW_RESOURCE_UNAVAILABLE_MESSAGE: Final[str] = '预览资源不可查询'
 METRICFLOW_RESULT_MISSING_MESSAGE: Final[str] = 'MetricFlow 未返回结果集'
 
@@ -56,37 +61,45 @@ def _where_constraints(request: PlatformQueryRequest) -> list[str]:
     return constraints
 
 
-def execute_programmatic(project: Path, profiles: Path, input_data: EngineRequest) -> EngineResult:
-    """在隔离或串行化的执行上下文中调用锁定版本 MetricFlow API。"""
-
-    if input_data.mode == strings.CLEANUP:
-        # 固定 schema 和表名由后续构建复用，不能按历史构建删除物理对象。
-        return EngineResult(cleaned=True)
+def _configuration(project: Path, profiles: Path) -> CLIConfiguration:
     configuration = CLIConfiguration()
     configuration.setup(dbt_profiles_path=profiles, dbt_project_path=project, configure_file_logging=False)
+    return configuration
+
+
+def _engine(configuration: CLIConfiguration) -> MetricFlowEngine:
     # StarRocks 复用 dbt adapter 执行查询；其他 adapter 保持上游 MetricFlow 客户端。
     if configuration.dbt_artifacts.adapter.type() == STARROCKS_ADAPTER:
-        engine = MetricFlowEngine(
+        return MetricFlowEngine(
             semantic_manifest_lookup=configuration.semantic_manifest_lookup,
             sql_client=StarRocksSqlClient(configuration.dbt_artifacts.adapter),
         )
-    else:
-        engine = configuration.mf
-    mode = input_data.mode
-    if mode == strings.PROBE:
-        metrics = engine.list_metrics(include_dimensions=False)
-        if not metrics:
-            raise ValueError(QUERYABLE_METRICS_MISSING_MESSAGE)
-        result = engine.query(MetricFlowQueryRequest.create(metric_names=[metrics[0].name], limit=1))
-        return EngineResult(query_capability=result.result_df is not None)
-    if mode == strings.OPTIONS:
-        try:
-            return available_dimensions(engine, tuple(input_data.metrics))
-        except ValueError as error:
-            raise InvalidDimensionsRequest(INVALID_METRICS_DIMENSIONS_MESSAGE) from error
-    request = input_data.request
-    if request is None:
-        raise ValueError(QUERY_REQUEST_REQUIRED_MESSAGE)
+    return configuration.mf
+
+
+def execute_available_dimensions(project: Path, profiles: Path, metrics: tuple[str, ...]) -> DimensionQueryResult:
+    """读取所选指标的可用维度；仅目录校验错误转换为可公开的业务错误。"""
+    engine = _engine(_configuration(project, profiles))
+    try:
+        return available_dimensions(engine, metrics)
+    except ValueError as error:
+        raise InvalidDimensionsRequest(INVALID_METRICS_DIMENSIONS_MESSAGE) from error
+
+
+def probe_query_capability(project: Path, profiles: Path) -> ProbeResult:
+    """独立的构建验收探针，不接收维度发现或数据查询请求。"""
+    engine = _engine(_configuration(project, profiles))
+    metrics = engine.list_metrics(include_dimensions=False)
+    if not metrics:
+        raise ValueError(QUERYABLE_METRICS_MISSING_MESSAGE)
+    result = engine.query(MetricFlowQueryRequest.create(metric_names=[metrics[0].name], limit=1))
+    return ProbeResult(query_capability=result.result_df is not None)
+
+
+def execute_programmatic(project: Path, profiles: Path, request: PlatformQueryRequest) -> DataQueryResult:
+    """执行类型化数据请求；包含数据行查询、维度值、预览和 explain。"""
+    configuration = _configuration(project, profiles)
+    engine = _engine(configuration)
     if request.mode is QueryMode.PREVIEW:
         catalog = catalog_from_artifacts(project / strings.TARGET_DIRECTORY)
         resource = next(
@@ -105,7 +118,7 @@ def execute_programmatic(project: Path, profiles: Path, input_data: EngineReques
             for index, name in enumerate(table.column_names)
         ]
         rows = [[_json_cell(cell) for cell in row] for row in table.rows[:request.limit]]
-        return EngineResult(columns=columns, rows=rows, truncated=len(table.rows) > request.limit)
+        return DataQueryResult(columns=columns, rows=rows, truncated=len(table.rows) > request.limit)
     available = available_dimensions(engine, tuple(request.metrics))
     validate_query(request, available)
     group_by = [request.dimension] if request.mode is QueryMode.DIMENSION_VALUES else request.group_by
@@ -124,7 +137,7 @@ def execute_programmatic(project: Path, profiles: Path, input_data: EngineReques
     )
     if request.mode is QueryMode.EXPLAIN:
         explained = engine.explain(mf_request)
-        return EngineResult(sql=explained.sql_statement.sql)
+        return DataQueryResult(sql=explained.sql_statement.sql)
     result = engine.query(mf_request)
     if result.result_df is None:
         raise ValueError(METRICFLOW_RESULT_MISSING_MESSAGE)

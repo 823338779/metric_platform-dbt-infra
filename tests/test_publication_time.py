@@ -14,7 +14,7 @@ def test_equivalent_offsets_share_business_calendar_but_execute_separately(store
         startTime="2026-09-30T16:00:00Z",
     )
     accepted = service.submit(release.build_id, request, "platform")
-    saved = service.execute.calls[-1][1].request
+    saved = service.execute.calls[-1][1]
     assert saved.start_time.isoformat() == "2026-10-01T00:00:00"
     equivalent = PublishedQueryRequest.model_validate(
         {**request.model_dump(by_alias=True), "startTime": "2026-10-01T00:00:00+08:00"}
@@ -34,7 +34,7 @@ def test_naive_business_calendar_is_preserved(store, tmp_path):
         startTime="2026-10-01T00:00:00",
     )
     service.submit(release.build_id, request, "platform")
-    saved = service.execute.calls[-1][1].request
+    saved = service.execute.calls[-1][1]
     assert saved.start_time.isoformat() == "2026-10-01T00:00:00"
     assert service.execute.calls[-1][0].config_snapshot.business_timezone == "Asia/Shanghai"
 
