@@ -115,6 +115,40 @@ async def test_sdk_failure_restores_environment_and_logging(tmp_path, monkeypatc
     assert (logger.handlers, logger.level, logger.propagate) == original
 
 
+@pytest.mark.parametrize("exception,stopped", [(None, True), (RuntimeError("interrupted"), False)])
+async def test_dbt_completed_failure_is_distinct_from_interrupted_write(tmp_path, monkeypatch, exception, stopped):
+    # dbt 正常报告模型失败后已经结束；异常中断的写入仍保留未知结果保护。
+    monkeypatch.setattr(dbtRunner, "invoke", lambda *_: SimpleNamespace(success=False, exception=exception))
+    executor = RuntimeExecutor(
+        SimpleNamespace(command_timeout_seconds=5, max_output_bytes=1024),
+        SimpleNamespace(phase=lambda *args, **kwargs: True), None,
+    )
+    job = leased_job(job_id=PROJECT, lease_token=PROJECT, project_id=PROJECT)
+    with pytest.raises(ExecutionError) as error:
+        await executor._dbt(job, command(tmp_path), "BUILDING")
+    assert error.value.code == "COMMAND_FAILED"
+    assert error.value.stopped is stopped
+
+
+async def test_timed_out_dbt_write_keeps_unknown_outcome(tmp_path, monkeypatch):
+    release = threading.Event()
+
+    def invoke(*_):
+        release.wait(0.05)
+        return SimpleNamespace(success=False, exception=None)
+
+    monkeypatch.setattr(dbtRunner, "invoke", invoke)
+    executor = RuntimeExecutor(
+        SimpleNamespace(command_timeout_seconds=0.001, max_output_bytes=1024),
+        SimpleNamespace(phase=lambda *args, **kwargs: True), None,
+    )
+    job = leased_job(job_id=PROJECT, lease_token=PROJECT, project_id=PROJECT)
+    with pytest.raises(ExecutionError) as error:
+        await executor._dbt(job, command(tmp_path), "BUILDING")
+    assert error.value.code == "COMMAND_TIMEOUT"
+    assert error.value.stopped is False
+
+
 @pytest.mark.parametrize("metricflow", [False, True])
 async def test_rejected_lease_never_invokes_sdk(tmp_path, monkeypatch, metricflow):
     import dbt_metricflow_service.platform.metricflow as module

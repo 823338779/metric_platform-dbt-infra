@@ -216,10 +216,12 @@ class RuntimeExecutor:
         # 仅统一已脱敏的运行诊断与超时保护，不解释引擎特有的业务结果。
         if record.status is not JobStatus.SUCCEEDED:
             timed_out = record.status is JobStatus.TIMED_OUT
+            # dbt 的退出码 1 表示已完整返回模型/测试失败；异常退出和超时仍不能证明写入停止。
+            completed_failure = record.status is JobStatus.FAILED and record.exit_code == 1
             raise ExecutionError(
                 ERROR_COMMAND_TIMEOUT if timed_out else ERROR_COMMAND_FAILED,
                 JobErrorDetail.model_validate(record, from_attributes=True),
-                stopped=not timed_out and not may_write,
+                stopped=not timed_out and (not may_write or completed_failure),
             )
 
     async def probe_query_capability(
