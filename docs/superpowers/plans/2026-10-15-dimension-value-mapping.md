@@ -161,6 +161,7 @@ assert mapping_raw_value not in available_dimensions
 - 节点文件定义 frozen DimensionValueMappingBinding：output_dimension: DimensionSpec、mapping: ResolvedValueMapping（任务 3）。builder 在原始输出及别名确定后按实际 DimensionInstance.defined_from 解析，未配置映射时不产生绑定。
 - `ApplyDimensionValueMappingsNode.create(parent_node: DataflowPlanNode, mappings: tuple[DimensionValueMappingBinding, ...], order_by_specs: tuple[OrderBySpec, ...]) -> ApplyDimensionValueMappingsNode`；单一父节点、非空绑定，提供 parent_node、accept、with_new_parents、functionally_identical、description/displayed_properties 和独立 ID prefix。
 - DataflowPlanBuilder.build_sink_node 保持静态方法，增加 `value_mapping_bindings: tuple[DimensionValueMappingBinding, ...] = ()`；build_plan 和 build_plan_for_distinct_values 在调用前使用现有输出数据集解析能力及任务 3 lookup 计算绑定。外部 QuerySpec 的展示意图不传入嵌套指标分支。
+- builder 新增 `_resolve_value_mapping_bindings(parent_node: DataflowPlanNode, output_specs: tuple[DimensionSpec, ...]) -> tuple[DimensionValueMappingBinding, ...]`，复用 _node_data_set_resolver；匹配尚未应用 alias 的父实例，绑定保留 QuerySpec 要求的最终 alias，节点在别名处理完成后使用绑定。
 - DataflowPlanNodeVisitor 新增 `visit_apply_dimension_value_mappings_node(node: ApplyDimensionValueMappingsNode) -> VisitorOutputT`，默认处理器同步扩展。通用 DagNode 基类不变。
 
 - [ ] **Step 1: 写失败测试。** QuerySpec 缺字段默认空元组，序列化和 with_time_range_constraint 保留展示规格；builder 覆盖无配置、filter-only、1/3 个映射、同字典两次及 alias。断言节点位置为 OrderByLimit → AliasSpecs（如存在）→ 映射 → Write，最多一个映射节点。
@@ -210,7 +211,7 @@ assert copied_data_set.pending_output_value_mapping == pending
 - [ ] **Step 2: 运行红测试。** `hatch run dev-env:pytest tests_metricflow/plan_conversion/test_dimension_value_mapping.py`。
 - [ ] **Step 3: 实现节点 visitor。** 用 SemanticModelToDataSetConverter.create_sql_source_data_set 解析字典，按维度实例投影匹配值/显示值；验证绑定与父输出来源一致，尊重 expr。按实际 associated_columns 绑定 SQL 列，排序规格重新关联到别名处理后的原始列，不按字符串猜列名。
 - [ ] **Step 4: 保持转换传递。** with_copied_sql_node、两个 Write visitor 和 CTE 收集/组装保留待处理操作；终点重排列时同步确认列关联。映射节点及其终点不能被提取为供指标计算复用的 CTE。仅合法终点链允许承载待处理映射，意外将其接入聚合、过滤等计算节点时明确失败。
-- [ ] **Step 5: 消费输出转换。** convert_using_specifics 先执行既有原始 SQL 优化，再构造外层 SELECT 和 N 个独立 JOIN。ON 均引用 q 的原始列，SELECT 用 COALESCE/文本 CAST；保留列名、顺序、CTE、参数和内层 limit，外层恢复原始值排序。同目标不去重，没有 pending 时完全保留旧路径。
+- [ ] **Step 5: 消费输出转换。** convert_using_specifics 先执行既有原始 SQL 优化，再按最终输出列顺序构造外层 SELECT 和 N 个独立 JOIN。ON 均引用 q 的原始列，SELECT 用 COALESCE/文本 CAST；保留列名、顺序、CTE、参数和内层 limit，外层恢复原始值排序。同目标不去重，没有 pending 时完全保留旧路径。
 - [ ] **Step 6: 覆盖 CTAS 与重试。** 根为 SqlCreateTableAsNode 时只转换 parent_node 的 SELECT，保留 sql_table；完成后不再执行会下推展示 JOIN 的优化。优化级别回退使用每次独立 visitor 结果，待处理操作不能重复消费或丢失；最终计划可直接渲染和执行。
 - [ ] **Step 7: 方言、快照和提交。** 新测试及 `hatch run dev-env:pytest tests_metricflow/sql/test_sql_plan_render.py tests_metricflow/sql/test_engine_specific_rendering.py tests_metricflow/plan_conversion/dataflow_to_sql/test_cte_sql.py tests_metricflow/plan_conversion/dataflow_to_sql/test_exception_retry.py` 通过。快照用 --overwrite-snapshots 生成并审阅；提交 `feat: lower mapping nodes into final SQL joins`。
 
@@ -290,7 +291,7 @@ assert "valueMappings" not in public_request_schema["properties"]
 **Interfaces:** 不增加生产接口；组合任务 1–8 的正式 YAML 字段、显式数据流节点、原生 query/explain 和现有服务入口验证完整链路。
 
 - [ ] **Step 1: 建立真实工程。** 临时 source 字典表、包装 view、映射 semantic model、事实模型，贯通 dbt parse/build/docs → semantic_manifest → 原生 query/explain → 服务。
-- [ ] **Step 2: 验证结果。** 状态、渠道、target_status 三维度，其中两个复用字典；覆盖 502/404 同为“失败”但保留两行、原始过滤、混合排序、未匹配、NULL、空字符串、比率和共享用户的 count_distinct。
+- [ ] **Step 2: 验证结果。** 状态、渠道、target_status 三维度，其中两个复用字典；explain 包含一个节点及三个绑定，SQL 恰有三个展示 JOIN。覆盖 502/404 同为“失败”但保留两行、原始过滤、混合排序、未匹配、NULL、空字符串、比率和共享用户的 count_distinct。
 - [ ] **Step 3: 验证生命周期。** partial parse 修改/删除不残留，两个 buildId 使用各自配置，更新字典文本后读取新数据，旧无映射工程不变。原生测试不得导入服务包，证明能力位于引擎内部。
 - [ ] **Step 4: 运行真实链路。** `uv run --frozen pytest -q tests/integration/test_dimension_value_mapping.py`；先记录缺失路径的失败，补最小实现后达到真实 DuckDB 全部通过。PostgreSQL 用独立测试库，StarRocks 区分生成和真实执行证据。
 - [ ] **Step 5: 更新文档与 changelog。** 使用正式字段及 v1/v2 示例，说明 fork、模式差异、唯一性、多 JOIN、配套版本。移除根 README 中与本次修改 vendor 授权冲突的旧描述。dbt 用 changie 记录功能，不手改生成的 CHANGELOG.md。
@@ -305,6 +306,7 @@ assert "valueMappings" not in public_request_schema["properties"]
 | vendor/dbt/core | `hatch run python3 -m pytest ../tests/functional/semantic_models/test_dimension_value_mapping.py` | 独立 PostgreSQL 上 full/partial parse |
 | vendor/dbt/core | `hatch run code-quality` | dbt 风格、类型检查 |
 | vendor/metricflow | `hatch run dev-env:pytest tests_metricflow_semantic_interfaces/validations/test_dimension_value_mapping.py tests_metricflow_semantic_interfaces/implementations/test_dimension_value_mapping.py tests_metricflow_semantics/model/test_value_mapping_lookup.py tests_metricflow/engine/test_value_mapping_dimensions.py tests_metricflow/plan_conversion/test_dimension_value_mapping.py tests_metricflow/engine/test_dimension_value_mapping.py` | 原生协议、图隔离及查询语义 |
+| vendor/metricflow | `hatch run dev-env:pytest tests_metricflow_semantics/specs/test_value_mapping_query_spec.py tests_metricflow/dataflow/builder/test_value_mapping_plan.py tests_metricflow/dataflow/optimizer/source_scan/test_source_scan_optimizer.py tests_metricflow/dataflow/optimizer/source_scan/test_cm_branch_combiner.py tests_metricflow/plan_conversion/dataflow_to_sql/test_cte_sql.py tests_metricflow/plan_conversion/dataflow_to_sql/test_exception_retry.py` | 展示规格、显式节点、优化边界及 CTE/回退路径 |
 | vendor/metricflow/dbt-metricflow | `hatch run dev-env:pytest tests_dbt_metricflow/test_value_mapping_validation.py` | 原生 adapter 校验 |
 | vendor/metricflow | `make lint`、`make test` | 仓库规定的最终全量验证 |
 | 根仓库 | `uv run --frozen pytest -q tests/integration/test_dimension_value_mapping.py` | DuckDB 全链路 |
@@ -317,12 +319,13 @@ assert "valueMappings" not in public_request_schema["properties"]
 
 | Spec 要求 | 任务 |
 | --- | --- |
-| 正式协议、旧产物兼容、固定构建 | 1、2、7、8 |
-| 引用错误、空键和类型 | 1、3、6、7 |
-| 原生维度发现、实际来源与图隔离 | 3、7 |
-| 多 JOIN、expr、排序及方言 | 4、5 |
-| query/explain 同一 SQL、CTAS、类型和查询模式 | 5、7、8 |
-| 字典保证唯一、无重复检测、实时内容 | 4、6、8 |
-| 不依赖服务即可使用 | 1–6 的原生测试、8 |
+| 正式协议、旧产物兼容、固定构建 | 1、2、8、9 |
+| 引用错误、空键和类型 | 1、3、7、8 |
+| 原生维度发现、实际来源与图隔离 | 3、4、8 |
+| QuerySpec、节点、复制/比较及优化边界 | 4、5、6 |
+| 多 JOIN、expr、排序及方言 | 5、6 |
+| query/explain 同一计划、CTAS、类型和查询模式 | 5、6、8、9 |
+| 字典保证唯一、无重复检测、实时内容 | 5、7、9 |
+| 不依赖服务即可使用 | 1–7 的原生测试、9 |
 
-按 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 顺序执行；跨仓库协议先稳定再接入，不并行修改同一接口。修订版评审后再实施，本次仅修订 spec 和计划。
+按 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 顺序执行；跨仓库协议先稳定再接入，不并行修改同一接口。任务 4 新增抽象 visitor 方法时必须同步使具体 visitor 可实例化；任务 5 实现 SQL 降低后，再由任务 6 启用引擎入口。修订版评审后再实施，本次仅修订 spec 和计划。
