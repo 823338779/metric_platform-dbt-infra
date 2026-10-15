@@ -1,286 +1,289 @@
-# Dimension Value Mapping Implementation Plan
+# Native dbt / MetricFlow Dimension Value Mapping Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 按固定构建中的维度配置，在指标 SQL 最外层生成多个独立 LEFT JOIN，用映射 semantic model 的显示值替换输出维度值，同时保持原始计算语义。
+**Goal:** 修改 dbt、共享语义接口和 MetricFlow 源码，使维值映射成为正式维度协议，并由原生执行计划生成多个最外层 LEFT JOIN。
 
-**Architecture:** dbt 维度的 config.meta.value_mapping 经校验后封存为类型化引用和物理投影。计算用的 MetricFlow 语义视图排除展示专用模型，维度绑定保留真实来源；SQL 转换使用 explain 的输出语义与结构化计划，对每个映射输出维度追加独立 JOIN。数据库执行最终 SQL，应用层只序列化结果。
+**Architecture:** dbt 将 Dimension.value_mapping 从 YAML 解析到两个原生 manifest，共享语义接口负责类型和引用校验。MetricFlow 在自己的 lookup、计算图和最终 SQL 转换中解析映射、隔离展示模型，并在指标 SQL 优化后追加 N 个 JOIN。服务继续调用 engine.query / engine.explain，只承担固定构建、原生配置封存和接口适配。
 
-**Tech Stack:** Python 3.11–3.14、Pydantic、dbt-core 1.12.5、dbt-metricflow 0.15.0、MetricFlow 0.213.0、现有 dbt adapters、pytest、Ruff；依赖以 uv.lock 为准。
+**Tech Stack:** 当前锁定的 dbt-core 1.12.5、dbt-metricflow 0.15.0、MetricFlow 0.213.0 及仓库内 metricflow_semantic_interfaces / metricflow_semantics；dbt dataclass、MSI Pydantic shim、MetricFlow SQL AST；Hatch、pytest、现有 adapters。
 
-**Spec:** [已确认的设计](../specs/2026-10-15-dimension-value-mapping-design.md)。实施前必须读完 spec；本计划不更改已确认的行为。
+**Spec:** [修订后的设计](../specs/2026-10-15-dimension-value-mapping-design.md)。业务行为保持已确认版本；实现边界按用户最新要求改为修改 dbt / MetricFlow。
 
-状态：待评审；只完成计划，不开始产品实现。推荐在当前会话按顺序执行，任务间共享的数据类型较多，不适合并行修改。
+状态：修订版待评审；尚未修改产品代码。原先由服务包装 explain SQL 的计划已被本版本替代，不按旧计划创建服务 SQL 转换模块。
 
 ## Global Constraints
 
+- 修改 vendor/dbt 和 vendor/metricflow 源码实现功能，不仅在服务层实现；这是本仓库 fork 的协议扩展，不声称上游已支持。
+- value_mapping 是维度正式字段，与 type、expr 同级；不再使用 config.meta.value_mapping。三个键仍是 semantic_model、value_dimension、display_dimension。
 - 映射表负责保证原始值唯一，每个原始值最多对应一条映射记录。服务直接依赖这一数据约束，不在构建或查询阶段额外检查重复键。
-- 配置只来自选定 buildId；不增加请求覆盖配置、配置 CRUD、数据库连接或持久化表。
-- 每个业务维度最多配置一个映射，每个原始值最多对应一条映射记录，多个原始值可以对应同一个显示值。
+- N 个映射输出维度产生 N 个独立 LEFT JOIN；同一个映射模型被两个业务维度使用时也分别关联。
+- 筛选、分组、排序和指标计算使用原始值。映射仅替换最终 SELECT 输出，不合并相同标签的结果行。
 - 使用 LEFT JOIN。没有匹配记录或匹配记录的显示值为 NULL 时，回退为原始值的文本表示；原始 NULL 保持 NULL，空字符串是有效显示值。
 - 映射后的结果列名和列顺序不变，列类型变为文本，不额外对外返回原始值列。
-- 筛选和排序继续使用原始值。不按显示值分组、去重或再次计算指标。
-- N 个映射输出维度生成 N 个独立 JOIN；同一个映射模型可以重复关联，使用不同别名。
-- DIMENSION_VALUES 返回原始值，PREVIEW 保持现有行为；QUERY 和 EXPLAIN 使用同一 SQL 转换。
-- 不为映射追加 GROUP BY、DISTINCT、匹配条数、显示值聚合或内部诊断列。
-- 不修改 vendor，不做全局 SQL 字符串替换，不增加第三方依赖或通用 SQL 改写框架。
-- 自有 Python 函数完整标注参数和返回值；固定载荷用具体类型；新常量遵循 constants.py 和 test_string_constants.py 的现有规则。
-- 测试使用临时 DuckDB 或独立测试 PostgreSQL。渲染测试与真实数据库执行证据必须分别报告。
+- DIMENSION_VALUES 返回原始值；PREVIEW 保持原行为；原生 query 和 explain 共用最终执行计划转换。
+- 不新增重复键扫描、映射 GROUP BY/DISTINCT、计数或诊断列；不在内存中替换显示值。
+- 服务不新增 valueMappings 请求参数，不另建计算 manifest 副本、映射黑名单或 SQL 执行旁路。
+- 不增加第三方依赖、配置 CRUD 或持久化表，不重构无关代码。新增 vendor 代码兼容其最低 Python 3.10，服务遵循现有 Python 版本及完整类型标注要求。
 
 ## Review Focus
 
-1. 多模型的同名维度及同 token 的来源歧义：按实际 semantic model 归属绑定，不能取第一个候选。由任务 3 的 `test_dimension_source_disambiguation` 覆盖。
-2. 两个维度复用同一个映射模型：两个独立 JOIN，不能按目标模型去重。由任务 5 的 `test_same_mapping_model_has_independent_joins` 覆盖。
-3. 查询返回零行或映射列全是 NULL：列仍声明为文本，未映射列和数值精度保持原样。由任务 6 的 `test_mapped_column_type_with_empty_or_null_results` 覆盖。
-4. 维度 expr、带引用符的物理标识符、大小写或保留字：使用真实投影和 adapter 引用规则，不能按列名替换字符串。由任务 5 的 `test_mapping_projection_respects_expr_and_quoting` 覆盖。
-5. 带 CTE、参数、多个排序项及 limit + 1 的计划：内层计算不变，外层恢复原始列排序，绑定参数不丢失。由任务 5 的 `test_mapping_preserves_cte_parameters_order_and_limit` 覆盖。
+1. v1、v2 inline、derived dimension 和 partial parsing 的字段丢失：任务 2 验证新增、修改、删除及两类 manifest 往返。
+2. 同名维度、多来源和经过展示模型的中间路径：任务 3 按实际来源绑定，在原生计算图隔离展示模型。
+3. 同一字典复用多次、同标签和单个映射未命中：任务 4、5 验证独立 JOIN、独立回退和行数不变。
+4. CTE、绑定参数、原始列排序、limit + 1 和 CTAS 终点：任务 4、5 验证转换位置和实际执行 SQL 一致。
+5. 零行、全 NULL、带引号标识符及 expr：任务 4–6 验证方言、真实表达式、类型元数据和 Decimal 精度。
 
-## 当前代码证据与实现决策
+## 仓库规则与执行准备
 
-- `application/query_plan.py::compile_query` 已将 optionId 转换为 token；`QueryService.submit` 拥有固定构建的 PublishedCatalog，适合传递封存映射。
-- `platform/dimensions.py::map_available_dimensions` 当前只按维度名寻找资源，存在同名歧义。上游 `Dimension.semantic_model_reference` 已提供来源，服务尚未保留它。
-- `platform/metricflow.py::execute_programmatic` 的 QUERY 直接调用 engine.query，EXPLAIN 调用 engine.explain。映射分支必须改为 explain → 转换 → SqlClient.query，不能再调用 engine.query。
-- `MetricFlowExplainResult.convert_to_execution_plan_result.convert_to_sql_plan_result` 提供 `instance_set` 和 `sql_plan`；`SqlPlan.render_node`、`SqlSelectStatementNode`、`SqlJoinDescription` 和 `SqlPlanRenderer` 可直接复用。
-- `CLIConfiguration.sql_client` 是公开访问入口；StarRocks 使用已有 StarRocksSqlClient。不要读取或修改 engine 的私有客户端字段。
-- `platform/build.py::execute_publication` 当前在写 published_catalog 之前探测查询能力。任务 6 将探测移至目录生成之后、产物 capture 之前，以便同一次受控探测完成映射验证。
-- `BaseAdapter.get_column_schema_from_query(sql)` 能从投影查询获得列类型；使用 adapter 提供的列类型判断，不从一行样本推断类型。
-- 展示专用模型的识别来源是封存的映射目标集合，不另加用户配置标志。为保证包括中间路径在内的隔离，给计算引擎构建一个排除这些模型的语义 manifest 副本；完整封存文件和资源目录不变。
+- 实施前读取 vendor/dbt/AGENTS.md、vendor/metricflow/AGENTS.md，以及存在时的 vendor/metricflow/git_ignored/AGENTS.md；dbt 解析修改参考 docs/arch/3_Parsing.md、3.1_Partial_Parsing.md、3.3_Semantic_Models.md。
+- dbt artifact 类型从 dbt.artifacts.resources 导入，不在 artifacts 模块之外直接导入 v1 路径；dbt dataclass 与 MSI Pydantic 必须满足同一个 Protocol。
+- MetricFlow 遵循其类型注解、日志、不可变类型和 visitor 风格；不新引入 getattr/isinstance 分派，使用现有访问器和显式类型。
+- 检查根仓库与两个 submodule 状态并创建合适的隔离工作区，不覆盖已有更改；检查 detached HEAD，按需创建 codex/ 前缀功能分支。
+- submodule 分别提交，根仓库最后固定 gitlink。dbt 要求 GPG 签名提交：先核实签名能力；不可用时保留工作并报告，不能静默绕过或代替用户生成、上传密钥。
+- MSI 契约先实现，dbt 测试环境通过 Hatch 本地开发依赖使用修改后的 MetricFlow 包；检查实际导入对象含新字段，不能用已发布旧包验证新协议。
+- 根项目已有 uv 本地源码依赖。服务验收前执行 `uv sync --frozen --reinstall-package dbt-core --reinstall-package metricflow --reinstall-package dbt-metricflow`，不直接修改 site-packages。
 
-## 文件职责与任务顺序
+## 已核实的扩展点与文件职责
 
-下列均为仓库根目录相对路径；现有文件只修改所列职责，不重构相邻功能。
+| 扩展点 | 当前代码与本次职责 |
+| --- | --- |
+| dbt YAML 合约 | core/dbt/contracts/graph/unparsed.py：UnparsedDimensionBase、UnparsedDimensionV2、UnparsedDerivedDimensionV2 |
+| dbt artifact | core/dbt/artifacts/resources/v1/semantic_model.py 的 Dimension；components.py 的 ColumnDimension |
+| dbt 解析 | core/dbt/parser/schema_yaml_readers.py：_get_dimensions、_parse_v2_column_dimensions、_parse_v2_derived_dimensions |
+| dbt 产物 | core/dbt/contracts/graph/semantic_manifest.py：semantic_model.to_dict() → PydanticSemanticModel.parse_obj |
+| 共享协议 | metricflow_semantic_interfaces/protocols/dimension.py、implementations/elements/dimension.py、validations/semantic_manifest_validator.py |
+| 来源与计算图 | metricflow_semantics/model/semantic_manifest_lookup.py、semantic_graph；DimensionInstance.defined_from |
+| 物理投影 | metricflow/dataset/convert_semantic_model.py：SemanticModelToDataSetConverter.create_sql_source_data_set |
+| 最终 SQL 边界 | metricflow/execution/dataflow_to_execution.py：_convert_to_sql_plan → _render_sql → 查询任务 |
+| 优化边界 | metricflow/plan_conversion/to_sql_plan/dataflow_to_sql.py：优化完成后返回 ConvertToSqlPlanResult |
+| query/explain 共用路径 | metricflow/engine/metricflow_engine.py：_create_execution_plan |
 
-| 文件 | 职责 | 任务 |
-| --- | --- | --- |
-| src/dbt_metricflow_service/models/native.py | 严格的映射配置及开放 meta 投影 | 1 |
-| src/dbt_metricflow_service/models/artifacts.py | 可选封存映射类型 | 1 |
-| src/dbt_metricflow_service/platform/models.py | 来源身份、引擎映射载荷 | 1、3、4 |
-| src/dbt_metricflow_service/platform/value_mapping_catalog.py（新建） | 配置引用解析、展示目标集合、映射领域错误 | 2 |
-| src/dbt_metricflow_service/platform/sealed_catalog.py | 封存配置和展示依赖 | 2 |
-| src/dbt_metricflow_service/platform/metricflow.py | 计算语义视图、客户端选择、执行和探测接入 | 3、6 |
-| src/dbt_metricflow_service/platform/queries.py、platform/dimensions.py | 维度来源传递与绑定；结果列类型 | 3、6 |
-| src/dbt_metricflow_service/application/queries.py | 将目录维度绑定错误转为现有用例错误 | 3 |
-| src/dbt_metricflow_service/application/query_plan.py | 只为 QUERY/EXPLAIN 的输出维度传递映射 | 4 |
-| src/dbt_metricflow_service/platform/value_mapping_sql.py（新建） | 结构化外层 JOIN 和方言渲染 | 5 |
-| src/dbt_metricflow_service/platform/value_mapping_validation.py（新建） | 构建时投影、空键及类型校验 | 6 |
-| src/dbt_metricflow_service/platform/build.py、runtime/executor.py、runtime/service.py、execution/metricflow.py | 构建顺序和映射错误转换 | 6 |
-| src/dbt_metricflow_service/constants.py | 新增错误码与共享字段常量 | 1–6 按需 |
-| tests/dimension_mapping_helpers.py（新建） | 本功能的临时工程及目录 fixture | 1、2、7 |
-| tests/test_dimension_value_mapping_*.py（下文指定） | 各职责的回归测试 | 1–6 |
-| tests/integration/test_dimension_value_mapping.py（新建）、README.md | 真实工具链验收与配置文档 | 7 |
-
-依赖顺序：1 → 2 → 3 → 4 → 5 → 6 → 7。开始实现前按 using-git-worktrees 技能检查当前工作区，选择合适隔离目录；不要因本计划修改或重置已有用户改动。
+下文 Files 路径相对各任务标明的仓库目录。新增类型和函数是计划实施的接口，不表示当前源码已有。
 
 ---
 
-### Task 1: 配置契约与真实 dbt 解析样例
+### Task 1: 共享维度协议与引用校验
 
-**Files:** 修改 models/native.py、models/artifacts.py、platform/models.py；新建 tests/dimension_mapping_helpers.py、tests/test_dimension_value_mapping_contracts.py。
+**Repository:** vendor/metricflow。
 
-**Interfaces:**
-
-- native.py 新增 `ValueMappingConfig(BaseModel)`：必填且非空的 `semantic_model: str`、`value_dimension: str`、`display_dimension: str`，保持 YAML snake_case，extra=forbid。
-- 新增 `NativeDimensionMeta(NativeProjection)`，字段 `value_mapping: ValueMappingConfig | None = None`；`NativeConfig.meta` 采用此开放投影并默认空。其他 meta 键继续无损保留。
-- artifacts.py 新增 `DimensionValueMapping(Contract)`：`semantic_model_id: str`、`value_dimension_id: str`、`display_dimension_id: str`、`relation: RelationName`、`value_expression: str`、`display_expression: str`。`DimensionAttributes.value_mapping: DimensionValueMapping | None = None`。
-- platform/models.py 新增 `QueryValueMapping(Contract)`：`dimension: str`（原生 token）、`source_dimension_id: str`、`mapping: DimensionValueMapping`；`PlatformQueryRequest.value_mappings: list[QueryValueMapping]` 默认空。
-- helper：`make_mapping_project(tmp_path: Path) -> tuple[Path, Path]` 返回 project、profiles。复制现有 DuckDB 工程并在临时目录追加 spec 的映射模型和配置；不修改共享 fixture，不调用已过时的 call_worker。
-
-- [ ] **Step 1: 添加失败测试。** `test_mapping_config_is_strict_and_other_meta_survives` 验证三个必填键、未知映射键、错误类型与 unrelated meta；`test_old_catalog_defaults_to_no_mapping` 验证旧目录读取；`test_dbt_parse_preserves_value_mapping` 使用 dbtRunner 解析 helper 工程。
-
-```python
-assert node.config.meta.value_mapping.semantic_model == "status_code_mapping"
-assert node.native_details()["config"]["meta"]["owner"] == "analytics"
-assert legacy_dimension.attributes.value_mapping is None
-assert parsed_mapping == {
-    "semantic_model": "status_code_mapping",
-    "value_dimension": "raw_value",
-    "display_dimension": "display_value",
-}
-```
-
-- [ ] **Step 2: 运行失败测试。** `uv run --frozen pytest -q tests/test_dimension_value_mapping_contracts.py`；预期新类型或字段缺失导致失败。真实解析通过 `dbtRunner.invoke`，不启动引擎 CLI 子进程。
-- [ ] **Step 3: 实现上述类型与 helper。** 用当前工具链确认传统 semantic_models YAML 和 config.meta 被保留；只有成功解析的样例才能进入后续任务。旧 published_catalog 的 schemaVersion 保持 1，可选字段缺省读取。
-- [ ] **Step 4: 验证契约。** 重跑 Step 2，并运行 `uv run --frozen pytest -q tests/test_native_contracts.py tests/test_build_contract.py tests/test_json_value_boundaries.py`；预期全部通过。只调整因新增内部默认字段受到影响的精确断言。
-- [ ] **Step 5: 提交。** 只暂存本任务文件，提交 `feat: define dimension value mapping contracts`。
-
-### Task 2: 解析映射引用并随构建封存
-
-**Files:** 新建 platform/value_mapping_catalog.py、tests/test_dimension_value_mapping_catalog.py；修改 platform/sealed_catalog.py、constants.py、tests/dimension_mapping_helpers.py、tests/test_publication_catalog.py。
+**Files:** 修改 metricflow_semantic_interfaces/protocols/dimension.py、implementations/elements/dimension.py、validations/semantic_manifest_validator.py；新建 validations/dimension_value_mapping.py、tests_metricflow_semantic_interfaces/validations/test_dimension_value_mapping.py、tests_metricflow_semantic_interfaces/implementations/test_dimension_value_mapping.py。
 
 **Interfaces:**
 
-- `ValueMappingError(ValueError)`：`__init__(self, code: str, reason: str, *, dimension_resource_id: str | None = None) -> None`。保存这三个安全字段，str(error) 仅由这些字段生成；不保存驱动异常文本或 SQL。
-- `resolve_value_mappings(native_catalog: NativeCatalog, relation_bindings: list[RelationBinding]) -> dict[str, DimensionValueMapping]`，键为业务维度资源 ID；纯函数，不连接数据库。
-- `mapping_model_names(catalog: PublishedCatalog) -> frozenset[str]`，由封存目标 ID 查模型名。
-- `read_published_catalog(target: Path) -> PublishedCatalog` 读取目标目录中的封存文件；已有文件缺少可选映射字段是兼容情况，文件缺失或损坏仍是错误。
-- 新增错误码 `INVALID_VALUE_MAPPING`；展示依赖关系 kind 使用 `DIMENSION_VALUE_MAPPING`。
+- DimensionValueMapping Protocol：semantic_model、value_dimension、display_dimension 三个 str 属性。
+- PydanticDimensionValueMapping(HashableBaseModel)：三个必填非空字符串，extra=forbid，使用现有 msi_pydantic_shim。
+- Dimension.value_mapping 为 Optional[DimensionValueMapping]；PydanticDimension 对应实现字段默认 None。
+- DimensionValueMappingRule 实现现有 SemanticManifestValidationRule，注册到 DEFAULT_RULES。
 
-- [ ] **Step 1: 添加失败测试。** 用现有 catalog fixture 模式构造两个业务模型和一个展示模型，覆盖成功封存、物理 alias、expr 缺省、同名维度、每种无效配置及旧产物往返。
+- [ ] **Step 1: 写失败测试。** 覆盖缺键、未知键、旧 manifest 缺字段、JSON 往返；模型不存在、目标维度归属错误、非 categorical、递归映射、目标作为指标计算来源均报错。映射模型不含 metrics/measures 且没有业务 entity JOIN 路径时仍合法。
 
 ```python
-assert resolved[source_id].semantic_model_id == "semantic_model.sample.status_code_mapping"
-assert resolved[source_id].relation.identifier == "actual_status_dictionary"
-assert resolved[source_id].value_expression == "code"
-assert resolved[source_id].display_expression == "name"
-assert restored.resources == published.resources
-assert error.code == "INVALID_VALUE_MAPPING"
+assert dimension.value_mapping.semantic_model == "status_code_mapping"
+assert dimension.value_mapping.value_dimension == "raw_value"
+assert restored.value_mapping == dimension.value_mapping
+assert legacy_dimension.value_mapping is None
+assert validation_result.has_blocking_issues is True
 ```
 
-- [ ] **Step 2: 运行失败测试。** `uv run --frozen pytest -q tests/test_dimension_value_mapping_catalog.py`；预期新解析入口缺失或封存字段为空。
-- [ ] **Step 3: 实现解析和封存。** 在 `build_published_catalog` 取得已验证关系后解析配置，将结果写入对应 DimensionAttributes。校验三个维度均为 categorical、目标及字段归属唯一、物理关系已绑定、目标不继续声明映射、目标不出现在直接或派生指标的 dataset_ids 中。引用链和目标模型均留在目录；增加目标模型到业务维度的展示依赖，不添加计算 entity。
-- [ ] **Step 4: 完成兼容与语义校验。** 检查原生 manifest 和 semantic_manifest 的维度配置一致性，保留其他 meta。实体声明或存在同名维度不能替代实际资源身份。不要扫描重复键，也不产生 unique 测试。
-- [ ] **Step 5: 验证并提交。** `uv run --frozen pytest -q tests/test_dimension_value_mapping_catalog.py tests/test_publication_catalog.py tests/test_catalog_queries.py` 全部通过；提交 `feat: seal semantic dimension mapping references`。
+- [ ] **Step 2: 运行红测试。** `hatch run dev-env:pytest tests_metricflow_semantic_interfaces/validations/test_dimension_value_mapping.py tests_metricflow_semantic_interfaces/implementations/test_dimension_value_mapping.py`，确认失败来自新能力缺失。
+- [ ] **Step 3: 实现类型和规则。** 按模型与维度身份解析引用，错误包含源模型、维度和配置字段；沿用 ValidationIssue，不连接数据库或检查重复键。
+- [ ] **Step 4: 验证并提交。** 重跑新测试及 `hatch run dev-env:pytest tests_metricflow_semantic_interfaces/validations/test_dimension_const.py`；提交 `feat: define native dimension value mapping protocol`。
 
-### Task 3: 隔离展示模型并保留维度真实来源
+### Task 2: dbt 正式字段、解析、产物和增量解析
 
-**Files:** 修改 platform/metricflow.py、platform/queries.py、platform/dimensions.py、platform/models.py、application/queries.py；新建 tests/test_dimension_value_mapping_dimensions.py；更新 tests/test_metricflow_operations.py 中对应替身。
+**Repository:** vendor/dbt，环境使用任务 1 的本地语义接口。
+
+**Files:** 修改 core/dbt/contracts/graph/unparsed.py、core/dbt/artifacts/resources/v1/components.py、semantic_model.py、core/dbt/artifacts/resources/__init__.py、core/dbt/parser/schema_yaml_readers.py、core/dbt/contracts/graph/semantic_manifest.py；按回归证据修改 nodes.py、parser/partial.py。扩展 tests/unit/test_semantic_layer_nodes_satisfy_protocols.py、tests/unit/parser/test_v2_column_semantic_parsing.py、tests/unit/contracts/graph/test_semantic_manifest.py；新建 tests/functional/semantic_models/test_dimension_value_mapping.py。
 
 **Interfaces:**
 
-- `NativeDimension.semantic_model_name: str | None = None`，来自 `Dimension.semantic_model_reference.semantic_model_name`，不从 token 猜测。
-- `DimensionBinding` 保持现有 token、grain_tokens，并增加默认空的 `resource_id: str | None = None`，保持现有两参数构造兼容。
-- `_sql_client(configuration: CLIConfiguration) -> SqlClient`：StarRocks 返回已有 StarRocksSqlClient，其余返回 configuration.sql_client；engine 和最终 SQL 执行共用选择规则。
-- `_engine(configuration: CLIConfiguration, *, excluded_semantic_models: frozenset[str] = frozenset()) -> MetricFlowEngine`：无排除项时保持现有路径，有排除项时用新的 PydanticSemanticManifest 实例及 SemanticManifestLookup 创建计算引擎，不修改原对象。
-- 保持 `available_dimensions(engine, metrics)`、`map_available_dimensions(build_id, metric_ids, catalog, native)` 的公开签名；新增来源歧义错误码 `AMBIGUOUS_DIMENSION_SOURCE`。
+- dbt dataclass DimensionValueMapping 定义在 artifacts/resources/v1/components.py，继承 dbtClassMixin，从 artifacts.resources 导出，满足任务 1 的协议；同名 MSI 类型通过 import alias 区分。
+- UnparsedDimensionBase、ColumnDimension、artifact Dimension 增加 value_mapping: Optional[DimensionValueMapping] = None。
+- 解析函数签名保持不变，显式传递该字段；v2 列别名和 derived expr 规则不变。
 
-- [ ] **Step 1: 添加失败测试。** `test_dimension_source_disambiguation` 覆盖两模型同名、同 token 不同来源、多跳路径及 metric_time 无来源；`test_mapping_models_are_absent_from_compute_graph` 覆盖映射目标直接维度和通过它的中间路径。
+- [ ] **Step 1: 写失败测试。** 三种 YAML 格式都用正式字段；两个 manifest 配置相同，dataclass schema 与 Protocol 匹配，旧产物和缓存缺字段可读。
 
 ```python
-assert by_token["order__status_code"].resource_id == orders_dimension_id
-assert by_token["return__status_code"].resource_id == returns_dimension_id
-assert error.code == "AMBIGUOUS_DIMENSION_SOURCE"
-assert "status_code_mapping" not in compute_model_names
-assert "status_code_mapping" in original_model_names
-assert business_raw_value_dimension_id in available_resource_ids
+assert manifest_dimension["value_mapping"] == semantic_dimension["value_mapping"]
+assert semantic_dimension["value_mapping"]["display_dimension"] == "display_value"
+assert changed_node.same_contents(old_node) is False
+assert reparsed_dimension.value_mapping is None  # partial parse 删除后
 ```
 
-- [ ] **Step 2: 运行失败测试。** `uv run --frozen pytest -q tests/test_dimension_value_mapping_dimensions.py`；预期来源丢失或展示模型仍可达。
-- [ ] **Step 3: 接入计算视图。** `execute_available_dimensions` 读取当前工程恢复的 published_catalog，取目标集合并建立计算引擎；QUERY/EXPLAIN/DIMENSION_VALUES 必须使用同一视图（执行接入由任务 6 完成）。副本保留 metrics、project_configuration、saved_queries 等字段，只移除展示专用 semantic_models。
-- [ ] **Step 4: 精确绑定原生维度。** `available_dimensions` 保留来源；`map_available_dimensions` 按来源和维度名定位资源，并在 token 去重前检查来源冲突。无来源的 metric_time 保持原逻辑；与映射有关而不能唯一判定的业务来源报错。`QueryService._available_dimensions` 将目录绑定阶段的 ValueMappingError 转为 ServiceError，测试错误码与 HTTP 422，避免发生在运行时边界之外的错误变成 500。无映射的旧测试替身允许原有唯一候选路径，不能破坏已有普通查询。
-- [ ] **Step 5: 验证并提交。** `uv run --frozen pytest -q tests/test_dimension_value_mapping_dimensions.py tests/test_query_plan.py tests/test_platform_queries.py tests/test_metricflow_operations.py` 全部通过；提交 `feat: isolate display mapping models from query dimensions`。
+- [ ] **Step 2: 运行红测试。** 在 vendor/dbt/core 执行 `hatch run python3 -m pytest ../tests/unit/test_semantic_layer_nodes_satisfy_protocols.py ../tests/unit/parser/test_v2_column_semantic_parsing.py ../tests/unit/contracts/graph/test_semantic_manifest.py`。
+- [ ] **Step 3: 贯通字段。** Unparsed → ColumnDimension/Dimension → manifest → MSI Pydantic；三个键严格校验，不藏回 meta。保留派生 expr 和列重命名表达式，缺字段默认 None。
+- [ ] **Step 4: 验证增量变化。** 独立 functional test class 分别测试新增、修改、删除映射以及目标改名/删除；第二次 parse 使用真实 partial_parse.msgpack。same_dimensions 的 dataclass 比较若已覆盖字段，不做无关重写。引用校验使用当前完整 manifest，不依赖解析顺序。
+- [ ] **Step 5: 验证并提交。** 重跑单测，在独立 PostgreSQL 上运行 `hatch run python3 -m pytest ../tests/functional/semantic_models/test_dimension_value_mapping.py`；验证新增字段的本地生成 schema，不擅改上游 schema URL 宣称官方兼容。按 GPG 签名规则提交 `feat: parse dimension value mappings into semantic manifests`。
 
-### Task 4: 将多个映射输出维度传递到引擎请求
+### Task 3: MetricFlow 原生 lookup 与展示模型隔离
 
-**Files:** 修改 application/query_plan.py；扩展 tests/test_query_plan.py、tests/test_native_contracts.py、tests/test_synchronous_queries.py。
+**Repository:** vendor/metricflow。
 
-**Interfaces:** 消费任务 1 的 QueryValueMapping 和任务 3 的 DimensionBinding.resource_id；`compile_query` 签名保持不变，返回 PlatformQueryRequest.value_mappings。
-
-- [ ] **Step 1: 添加失败测试。** 参数化 QUERY/EXPLAIN；选中状态码、渠道和另一个复用状态字典的维度。另设仅用于筛选的映射维度、无映射分组和 DIMENSION_VALUES/PREVIEW。
-
-```python
-assert [item.dimension for item in plan.value_mappings] == [
-    "request__status_code", "request__channel_code", "request__target_status",
-]
-assert plan.value_mappings[0].mapping == plan.value_mappings[2].mapping
-assert plan.filters[0].value == 502
-assert plan.order_by == ["request__status_code", "-request_count"]
-assert dimension_values_plan.value_mappings == []
-assert preview_plan.value_mappings == []
-```
-
-- [ ] **Step 2: 运行失败测试。** `uv run --frozen pytest -q tests/test_query_plan.py -k mapping`；预期映射列表为空。
-- [ ] **Step 3: 实现最小转换。** 仅在 QUERY/EXPLAIN 处理 group_by 中具有封存配置的已解析资源，按选择顺序生成 QueryValueMapping。filters、order_by、metric 名称、时间和 limit 保持原有转换。来源缺失或资源不一致时沿现有方式抛出 ServiceError，不默默丢掉配置；不按映射模型去重。
-- [ ] **Step 4: 验证接口边界。** `uv run --frozen pytest -q tests/test_query_plan.py tests/test_native_contracts.py tests/test_build_contract.py tests/test_synchronous_queries.py`；全部通过。公开 QueryRequest 继续拒绝调用方传入 valueMappings 或任意 JOIN SQL。
-- [ ] **Step 5: 提交。** 提交 `feat: carry selected dimension mappings into engine requests`。
-
-### Task 5: 基于结构化计划生成多个最外层 JOIN
-
-**Files:** 新建 platform/value_mapping_sql.py、tests/test_dimension_value_mapping_sql.py；需要的新错误码放 constants.py。
+**Files:** 新建 metricflow_semantics/model/semantics/value_mapping_lookup.py、tests_metricflow_semantics/model/test_value_mapping_lookup.py、tests_metricflow/engine/test_value_mapping_dimensions.py；修改 metricflow_semantics/model/semantic_manifest_lookup.py、semantic_graph/builder/graph_builder.py、metricflow_semantics/errors/error_classes.py、metricflow/engine/metricflow_engine.py、metricflow/engine/models.py。
 
 **Interfaces:**
 
-- `MappedSql` 为 frozen dataclass：`sql: str`、`bind_parameters: SqlBindParameterSet`、`display_columns: tuple[str, ...]`。
-- `compile_mapped_sql(explained: MetricFlowExplainResult, mappings: list[QueryValueMapping], *, sql_client: SqlClient, adapter: BaseAdapter) -> MappedSql`；无数据库 I/O，不修改 explained。
-- `mapping_projection(mapping: DimensionValueMapping, *, adapter: BaseAdapter) -> SqlSelectStatementNode`：投影 sealed expr 为 raw_value/display_value，供本任务和任务 6 复用。
-- 使用任务 2 的 ValueMappingError，不能处理的结构报告 `VALUE_MAPPING_SQL_UNSUPPORTED`，不能退回全局字符串替换。
+- ResolvedValueMapping frozen dataclass：source_dimension: SemanticModelElementReference、target_model: SemanticModelReference、value_dimension/display_dimension: DimensionReference。
+- `ValueMappingLookup(semantic_manifest: SemanticManifest)`；`get(source: SemanticModelElementReference) -> Optional[ResolvedValueMapping]`；mapping_model_references: frozenset[SemanticModelReference]。
+- SemanticManifestLookup.value_mapping_lookup 暴露新 lookup；完整 manifest/model lookup 保留展示模型供投影使用。
+- engine 的 Dimension 表示保留 semantic_model_reference，并传递正式 value_mapping 属性。
+- DimensionValueMappingError 继承现有 UnableToSatisfyQueryError，沿用 `(error_name: str, context: Optional[Dict[str, str]] = None)`；error_name 区分来源不明确、键类型不兼容、显示类型无效和空键。context 只包含安全的模型、维度和字段身份；任务 6、7 复用此类型，连接和权限异常不转换为此类型。
 
-- [ ] **Step 1: 添加失败测试。** 在临时 DuckDB 创建原始聚合结果与两个映射关系，构造带 InstanceSet 的真实 SqlPlan；SQL 生成后直接执行。首个断言为按原始状态码升序返回 `[("成功", 100), ("失败", 20), ("失败", 10)]`，证明相同标签没有合并。
-- [ ] **Step 2: 增加 Review Focus 中的四组测试。** 用参数化测试覆盖 0、1、2、3 个映射；同目标复用；expr 与物理引用；CTE、绑定参数、混合排序和 limit。
+- [ ] **Step 1: 写失败测试。** 两业务模型含同名 status_code 且使用不同字典；同一字典复用；展示模型 entity 碰巧可关联；普通业务模型也含 raw_value。
+
+```python
+assert lookup.get(orders_status).target_model != lookup.get(returns_status).target_model
+assert mapping_model in full_manifest_model_names
+assert mapping_model not in metric_compute_source_names
+assert business_raw_value in available_dimensions
+assert mapping_raw_value not in available_dimensions
+```
+
+- [ ] **Step 2: 运行红测试。** `hatch run dev-env:pytest tests_metricflow_semantics/model/test_value_mapping_lookup.py tests_metricflow/engine/test_value_mapping_dimensions.py`。
+- [ ] **Step 3: 实现隔离和来源绑定。** 目标集合限制计算语义图及 engine 计算 source datasets；完整 lookup 仍能解析映射物理模型。原生可用维度不暴露展示字段，计算图不能通过展示模型绕行。依据 defined_from 和真实 source reference 定位配置，多来源无法唯一判断时报错，不取首个同名候选。
+- [ ] **Step 4: 验证并提交。** 重跑新测试及 `hatch run dev-env:pytest tests_metricflow/engine/test_errors.py tests_metricflow/engine/test_explain.py`；无映射图和发现行为不变；提交 `feat: resolve display mappings in MetricFlow semantics`。
+
+### Task 4: 原生最终 SQL 转换及方言表达式
+
+**Repository:** vendor/metricflow。
+
+**Files:** 新建 metricflow/plan_conversion/to_sql_plan/dimension_value_mapping.py、tests_metricflow/plan_conversion/test_dimension_value_mapping.py；修改 metricflow/plan_conversion/convert_to_sql_plan.py、metricflow_semantics/sql/sql_exprs.py、metricflow/sql/render/expr_renderer.py 及需要实现新 visitor 的原生表达式访问器/方言 renderer；扩展 tests_metricflow/sql/test_sql_plan_render.py、test_engine_specific_rendering.py。
+
+**Interfaces:**
+
+- OutputValueMapping frozen dataclass：source_column_name: str、mapping_select: SqlSelectStatementNode、value_column_name: str、display_column_name: str。
+- `apply_dimension_value_mappings(result: ConvertToSqlPlanResult, mappings: tuple[OutputValueMapping, ...], *, order_bys: tuple[SqlOrderByDescription, ...]) -> ConvertToSqlPlanResult`，纯转换且不修改输入。
+- ConvertToSqlPlanResult.display_columns: tuple[str, ...] = ()，标识最终文本列；instance_set 用于原始输出语义，转换后不再参与下游指标计算。
+- 原生 `SqlCastToStringExpression.create(arg: SqlExpressionNode) -> SqlCastToStringExpression` 及 visitor/render 支持，不用服务 SQL 包装替代。
+
+- [ ] **Step 1: 写失败测试。** 原生计划覆盖 0/1/2/3 个映射、同目标复用、expr、physical alias、带引号标识符；DuckDB 执行映射 SQL，包含 Review Focus 的 CTE、参数和排序。
 
 ```python
 assert len(outer.join_descs) == 3
 assert len({join.right_source_alias for join in outer.join_descs}) == 3
-assert mapped.bind_parameters == original_bind_parameters
-assert mapped.display_columns == ("request__status_code", "request__channel_code")
-assert explained.convert_to_execution_plan_result.convert_to_sql_plan_result.sql_plan is original_plan
-assert explained.sql_statement.sql == original_sql
-assert mapped_rows == [("成功", 100), ("失败", 20), ("失败", 10)]
+assert actual_rows == [("成功", 100), ("失败", 20), ("失败", 10)]
+assert converted.display_columns == ("request__status_code",)
+assert original_result.sql_plan is original_plan
 ```
 
-这些断言分属三映射、双映射和单状态码用例。测试通过记录 renderer 收到的 SqlPlan 取得 outer，调用前保存 original_plan 和 original_sql；执行断言使用数据库结果。不要以全文 COUNT/GROUP BY 搜索禁止重复键检测，因为内层指标本身可以合法聚合。
+三 JOIN 与单状态码断言分属不同测试；outer 从转换后的原生计划取得，不新增仅供测试的生产接口。
 
-- [ ] **Step 3: 运行失败测试。** `uv run --frozen pytest -q tests/test_dimension_value_mapping_sql.py`；预期转换入口缺失。
-- [ ] **Step 4: 实现语义列定位与 JOIN。** 从 convert_to_sql_plan_result 的 instance_set 将维度 spec 和实际 associated_column 对齐，并核对 defined_from 与 source_dimension_id。按最终 SELECT 列顺序生成外层投影，不假设 token 等于 SQL 输出别名。保留原始 render_node 为左侧子查询；每个映射创建独立映射投影和 LEFT JOIN，ON 只引用左侧原始列。
-- [ ] **Step 5: 实现表达式、方言与排序。** 用 adapter.Relation 和 adapter.quote 引用物理关系和列；映射 expr 作为已封存的 SQL 表达式在单一映射来源内求值。原生表达式节点缺少通用文本 CAST 时，使用仓库已采用的 sqlglot 构造该标量表达式，再交给 SqlStringExpression；不解析或替换整个内层 SQL。使用当前 SqlPlanRenderer 渲染新 SqlPlan，保留返回的绑定参数。根据 query_spec 的排序 spec 和 instance_set 解析实际输出列，在外层按 q 的原始列恢复原有顺序及方向；保留内层 limit + 1 和 CTE 作用域，不运行可能把展示 JOIN 下推的后续优化。
-- [ ] **Step 6: 验证并提交。** `uv run --frozen pytest -q tests/test_dimension_value_mapping_sql.py` 全部通过。DuckDB 做真实执行；PostgreSQL renderer、StarRocksSqlClient 的现有 renderer 配合各自 adapter 引用规则做生成验证，包含文本 CAST 和保留字。提交 `feat: render outer joins for dimension display mappings`。
+- [ ] **Step 2: 运行红测试。** `hatch run dev-env:pytest tests_metricflow/plan_conversion/test_dimension_value_mapping.py`。
+- [ ] **Step 3: 复用源模型投影。** 用 SemanticModelToDataSetConverter.create_sql_source_data_set 解析目标，按 dimension instance 取列并投影为匹配值/显示值。保留 expr、node_relation 和引用规则，不能假设维度名等于物理列。
+- [ ] **Step 4: 构建外层 SELECT。** 以原始 SELECT 为 q，按最终输出列顺序生成不同别名。每个 ON 只用 q 的对应原始值；SELECT 使用原生 COALESCE/文本 CAST，其他列顺序和别名不变。同目标不去重，无映射直接返回原结果。
+- [ ] **Step 5: 保持优化边界。** 内层 CTE、筛选、排序和 limit 不变；外层显式按原始列恢复顺序；绑定参数由 renderer 传递。根为 SqlCreateTableAsNode 时转换 parent_node 的 SELECT 并保留原 sql_table，不能把 CTAS 放进 FROM。转换后不运行会下推展示 JOIN 的优化。
+- [ ] **Step 6: 方言、快照和提交。** 测试 DuckDB/PostgreSQL 及已有方言的文本 CAST 和引用规则；运行新测试及 `hatch run dev-env:pytest tests_metricflow/sql/test_sql_plan_render.py tests_metricflow/sql/test_engine_specific_rendering.py`。快照使用 --overwrite-snapshots 生成并审阅，不手改；提交 `feat: add final SQL projection for dimension value mappings`。
 
-### Task 6: 执行最终 SQL、构建验证和错误边界
+### Task 5: 接入原生 query / explain / 执行任务
 
-**Files:** 新建 platform/value_mapping_validation.py、tests/test_dimension_value_mapping_execution.py、tests/test_dimension_value_mapping_validation.py；修改 platform/metricflow.py、platform/queries.py、platform/build.py、runtime/executor.py、runtime/service.py、execution/metricflow.py；扩展 tests/test_metricflow_operations.py、tests/test_publication_build.py、tests/test_realtime_execution.py。
+**Repository:** vendor/metricflow。
+
+**Files:** 修改 metricflow/engine/metricflow_engine.py、metricflow/execution/dataflow_to_execution.py、execution_plan.py；新建 tests_metricflow/engine/test_dimension_value_mapping.py；扩展 tests_metricflow/plan_conversion/test_dataflow_to_execution.py。
 
 **Interfaces:**
 
-- `validate_mapping_data(catalog: PublishedCatalog, *, adapter: BaseAdapter, sql_client: SqlClient) -> None`，在构建受控引擎线程中运行；消费任务 5 的 mapping_projection。
-- `serialize_rows(table: MetricFlowDataTable, *, limit: int, text_columns: frozenset[str] = frozenset()) -> DataQueryResult`；text_columns 只固定结果类型元数据，绝不修改单元格内容。
-- `probe_query_capability(project: Path, profiles: Path) -> ProbeResult` 和 `execute_programmatic(project, profiles, request)` 保持签名；读取封存目录并消费前序任务。
-- 新增 `INVALID_VALUE_MAPPING_DATA` 错误码。ValueMappingError 在运行时转为现有 ServiceError；构建时转为 ExecutionError 和安全 JobErrorDetail，保留模型/维度信息。
-- `MetricFlowResult.error_message: str | None = None` 只传递上述安全错误说明；不把驱动异常加入这个字段，成功结果仍为 None。
+- DataflowToExecutionPlanConverter 增加内部 lookup 依赖与 apply_value_mappings: bool = False，engine 根据现有 MetricFlowQueryType 设置，不增加公开 HTTP 覆盖参数。
+- _convert_to_sql_plan 在原转换及优化完成后，按任务 3 的 lookup、输出 instance_set 和关联列建立任务 4 的 OutputValueMapping；_render_sql 及查询任务消费转换结果。
+- SelectSqlQueryToDataTableTask.create 增加 display_columns: tuple[str, ...] = ()，只保持文本类型元数据，不修改单元格。
 
-- [ ] **Step 1: 添加失败测试。** 映射 QUERY 的替身 engine.query 必须设置为立即失败；断言只有 sql_client.query 执行最终 SQL。EXPLAIN 使用同一编译器但不得执行最终数据 SQL，DIMENSION_VALUES 和 PREVIEW 不应用映射。
+- [ ] **Step 1: 写失败测试。** 直接构造 MetricFlowEngine 调用 query/explain，禁止导入服务。普通指标查询多 JOIN，DIMENSION_VALUES 跳过，只有 filter 使用映射维度时不加 JOIN。
 
 ```python
-assert executed_sql == explained_result.sql
-assert result.rows == [["成功", "100"], ["失败", "20"], ["失败", "10"]]
-assert engine_query_calls == []
-assert result.columns[0].type == "str"
-assert truncated_result.truncated is True
+assert query_result.sql == explain_result.sql_statement.sql
+assert query_result.result_df.rows == (("成功", 100), ("失败", 20), ("失败", 10))
+assert raw_dimension_values == (200, 404, 502)
+assert empty_mapped_table.column_descriptions[0].column_type is str
 ```
 
-结果替身中的指标使用 Decimal，故序列化为字符串。最后一个截断断言使用请求 limit=2 的独立测试；无截断用例断言 `result.truncated is False`。平台层始终使用 DataQueryResult.truncated，HTTP 层才是 resultTruncated。
+- [ ] **Step 2: 运行红测试。** `hatch run dev-env:pytest tests_metricflow/engine/test_dimension_value_mapping.py tests_metricflow/plan_conversion/test_dataflow_to_execution.py`。
+- [ ] **Step 3: 接入共用执行计划。** 保持 query/explain 共用 _create_execution_plan，在创建任务前完成映射；数据表和写结果表两个终点都覆盖。不能先执行原 SQL 再补映射，不能两条路径各自改写。
+- [ ] **Step 4: 保持类型与取数语义。** 零行/全 NULL 使用 display_columns 修正 ColumnDescription 为 str，不改写值；Decimal 和未映射列保持原状。测试混合排序、无排序、limit=2 的额外一行、参数过滤；客户端的原有参数支持边界不变。
+- [ ] **Step 5: 验证并提交。** 新测试及既有 engine 测试通过，无映射 SQL 快照不应无故变化；提交 `feat: execute native dimension mapping plans`。
 
-- [ ] **Step 2: 添加类型和构建验证测试。** `test_mapped_column_type_with_empty_or_null_results` 覆盖零行、全 NULL、Decimal 指标；`test_mapping_validation_checks_null_keys_and_types_only` 覆盖空键、非文本显示值、不兼容的源/映射键类型、无效 expr、空字典和 nullable 显示列。重复键不在失败测试范围内，不要求任何去重、计数或诊断列。
-- [ ] **Step 3: 运行失败测试。** `uv run --frozen pytest -q tests/test_dimension_value_mapping_execution.py tests/test_dimension_value_mapping_validation.py`；预期仍调用 engine.query 或构建验证入口缺失。
-- [ ] **Step 4: 接入 QUERY/EXPLAIN。** 计算引擎使用任务 3 的语义视图；非空映射列表执行 explain → compile_mapped_sql。EXPLAIN 返回生成的 SQL；QUERY 调用同一 SqlClient.query(sql, bind_parameters)，再 serialize_rows。未映射请求保留原路径。文本列空结果也显式标为 str，其余列和 _json_cell 的 Decimal 行为不变。
-- [ ] **Step 5: 实现构建数据验证。** 使用 adapter.get_column_schema_from_query 读取加上 LIMIT 0 的原始业务维度投影和映射投影，检查真实类型，包括 expr、空表及全部显示 NULL。允许数值家族之间、文本家族之间及相同其他标量类型的等值比较，拒绝数值与文本、日期与数值等跨家族匹配；不把 JOIN 键统一 CAST 为文本。显示列必须是 adapter 判定的文本类型。用有界 `WHERE raw_value IS NULL LIMIT 1` 检查空键。数据库权限、连接失败沿用既有运行时处理，不伪装成配置错误。
-- [ ] **Step 6: 调整构建顺序。** 在 execute_publication 完成物理验证并写入目录后调用 probe_query_capability，再设置验证标志和 capture。probe 先调用 validate_mapping_data，再执行既有代表性指标探测；无映射立即跳过新增验证。任何失败都不封存成功产物。复用 RuntimeExecutor._metricflow 的串行、租约和超时边界，不另开无保护的后台连接。
-- [ ] **Step 7: 接通错误与验证。** 只捕获已识别的 ValueMappingError；runtime/service.py 返回区分错误码的结构化响应，execution/metricflow.py 和 RuntimeExecutor 通过 error_code/error_message 保留构建错误码及安全模型/维度说明。execute_publication 对目录生成阶段的 ValueMappingError 同样转换为 ExecutionError，不依赖引擎探测捕获。运行新测试及 `uv run --frozen pytest -q tests/test_metricflow_operations.py tests/test_publication_build.py tests/test_realtime_execution.py tests/test_synchronous_queries.py tests/test_execution_configuration_errors.py`；全部通过后提交 `feat: execute and validate sealed dimension mappings`。
+### Task 6: dbt-metricflow 原生构建期数据校验
 
-### Task 7: 真实工具链回归与使用文档
+**Repository:** vendor/metricflow/dbt-metricflow；提交属于 vendor/metricflow。
 
-**Files:** 新建 tests/integration/test_dimension_value_mapping.py；扩展 tests/dimension_mapping_helpers.py、README.md、tests/test_publication_available_dimensions.py、tests/test_publication_queries.py。
+**Files:** 新建 dbt_metricflow/cli/dbt_connectors/value_mapping_validation.py、tests_dbt_metricflow/test_value_mapping_validation.py；复用 cli_configuration.py、adapter_backed_client.py，仅为公开验证入口做必要接入。
 
-**Interfaces:** 仅消费前六任务及现有 dbtRunner、QueryService、Runtime。DuckDB 验收调用真实 dbt parse/build/docs 和 MetricFlow，不依赖服务 PostgreSQL；固定 buildId 的应用测试继续复用独立 PostgreSQL fixture 或已有 mock store。
+**Interfaces:** `validate_value_mapping_data(semantic_manifest_lookup: SemanticManifestLookup, adapter: BaseAdapter) -> None`；复用任务 3 的引用及原生投影，不重新解释 JSON。使用任务 3 的 DimensionValueMappingError，含安全模型/维度身份，不包裹连接故障为配置错误。
 
-- [ ] **Step 1: 添加真实工程测试。** 在 helper 的临时数据库建 source 字典表，通过包装 view 和 semantic model 读取；事实模型产生 502、404、200，另有渠道和复用状态字典的 target_status。用真实 dbtRunner 构建并写 published_catalog，再经 execute_available_dimensions/execute_programmatic 执行全部查询模式。
-- [ ] **Step 2: 添加业务结果断言。** 验证多 JOIN、原始值筛选、原始值排序、指标排序、未命中、空值、相同标签、比率和 count_distinct。特意让 502、404 共享同一个用户，确认映射后不会把两个分组的去重计数重新合并。检查先筛选 502 再输出“失败”只得到该组；DIMENSION_VALUES 仍是数值类型的三个原始值。
-- [ ] **Step 3: 添加构建与来源回归。** 配置变更后生成两个封存目录，证明固定 buildId 的映射引用保持独立；只更新 source 字典名称时后续查询读到新显示文本。测试展示模型内部维度不可用、同名业务字段仍可用、旧无映射目录正常查询，以及无效映射阻止成功 capture。
-- [ ] **Step 4: 运行红绿循环。** `uv run --frozen pytest -q tests/integration/test_dimension_value_mapping.py`；先记录失败的具体未覆盖路径，仅补实现该路径所需最小改动，最终真实 DuckDB 验收全部通过。不能以增加 mock 代替真实 SQL 执行。
-- [ ] **Step 5: 更新 README。** 加入 spec 的 YAML、已有 source 包装方式、N 维度对应 N 次 JOIN、原始值唯一由数据方保证、未命中回退、四种模式差异、显示文本列不能作为原始筛选值、配置固定但字典内容实时读取。记录准确验证命令及实际支持证据。
-- [ ] **Step 6: 完成最终验证。** 执行下表，不重复运行已通过的检查，除非后续修改、失败或未解决问题要求重跑。提交 `test: verify dimension mappings through dbt and MetricFlow`，提交前使用 verification-before-completion 技能并检查最终 diff。
+- [ ] **Step 1: 写失败测试。** 临时 DuckDB 覆盖空字典、NULL 原始键、兼容与不兼容键类型、非文本显示列、全 NULL 文本显示列、expr 和不存在的列。
+- [ ] **Step 2: 运行红测试。** `hatch run dev-env:pytest tests_dbt_metricflow/test_value_mapping_validation.py`。
+- [ ] **Step 3: 实现 adapter 验证。** 原生投影加 LIMIT 0，用 get_column_schema_from_query 读取真实类型；数值家族、文本家族和相同其他标量类型可匹配，禁止统一字符串 CAST 掩盖类型差异。显示列必须为文本；用 WHERE raw_value IS NULL LIMIT 1 检查空键。空字典、显示 NULL 合法，不新增 COUNT/DISTINCT/GROUP BY/unique 检查。
+- [ ] **Step 4: 验证并提交。** 分别验证 PostgreSQL、DuckDB、服务使用的 StarRocks adapter 类型接口，区分替身与实测；保留连接/权限故障分类。测试通过后提交 `feat: validate dimension mapping data through dbt adapters`。
 
-## 验证命令与通过条件
+### Task 7: 服务适配原生协议和固定构建
 
-| 检查 | 命令 | 通过条件 |
+**Repository:** 根仓库。
+
+**Files:** 修改 src/dbt_metricflow_service/models/native.py、models/artifacts.py、platform/models.py、platform/catalog.py、platform/sealed_catalog.py、platform/dimensions.py、platform/queries.py、platform/metricflow.py、platform/build.py；按错误接入需要修改 application/queries.py、runtime/service.py、runtime/executor.py、execution/metricflow.py、constants.py。新建 tests/test_dimension_value_mapping_contracts.py、tests/test_dimension_value_mapping_catalog.py，扩展 tests/test_query_plan.py、test_metricflow_operations.py、test_publication_build.py、test_publication_catalog.py。
+
+**Interfaces:**
+
+- NativeNode 从正式 value_mapping 读取 MSI 原生类型，Published DimensionAttributes 增加可选配置投影，旧目录缺字段按无映射读取。
+- NativeDimension 保留原生 semantic_model_name，map_available_dimensions 按实际归属匹配 resourceId。
+- QueryRequest/PlatformQueryRequest 不增加映射列表；engine.query/explain 继续作为指标入口。
+- probe_query_capability 调用任务 6 的原生验证入口；不增加服务 value_mapping_sql.py、配置解析器或副本 manifest。
+
+- [ ] **Step 1: 写失败测试。** 正式字段封存不丢失、旧目录可读、同名维度不串用、原生显示结果原样序列化；请求不含 valueMappings，服务不直接执行改写 SQL。
+
+```python
+assert published_dimension.attributes.value_mapping.semantic_model == "status_code_mapping"
+assert legacy_dimension.attributes.value_mapping is None
+assert engine_query_calls == [expected_native_request]
+assert service_result.rows == native_serialized_rows
+assert "valueMappings" not in public_request_schema["properties"]
+```
+
+- [ ] **Step 2: 运行红测试。** `uv run --frozen pytest -q tests/test_dimension_value_mapping_contracts.py tests/test_dimension_value_mapping_catalog.py tests/test_metricflow_operations.py`。
+- [ ] **Step 3: 实现封存与接入。** 两个原生 manifest 配置一致，使用既有固定构建和物理关系绑定；只在目录记录展示依赖，不污染物理 depends_on 造成多来源。构建探测调用原生验证，失败不 capture 成功产物；引擎不依赖 published_catalog 识别映射。
+- [ ] **Step 4: 保持错误和类型边界。** 将已识别原生映射错误转为现有 error 协议，保留安全字段；数据库故障沿用原分类。直接复用原生文本列类型，零行正确、Decimal 序列化不变，不在服务修复显示值。
+- [ ] **Step 5: 验证并提交。** 重跑新测试及 `uv run --frozen pytest -q tests/test_query_plan.py tests/test_publication_build.py tests/test_publication_catalog.py tests/test_synchronous_queries.py`。提交时固定依赖的已提交 vendor gitlink，确保 checkout 后可重现。
+
+### Task 8: 跨仓库端到端、文档与发布引用
+
+**Repositories:** 根仓库及两个 vendor 仓库。
+
+**Files:** 新建根 tests/integration/test_dimension_value_mapping.py、tests/dimension_mapping_helpers.py；修改根 README.md、vendor/dbt/docs/arch/3.3_Semantic_Models.md、vendor/metricflow/README.md；按 vendor 各自规则新增功能 changelog；根仓库固定 gitlink。
+
+**Interfaces:** 不增加生产接口；组合任务 1–7 的正式 YAML 字段、原生 query/explain 和现有服务入口验证完整链路。
+
+- [ ] **Step 1: 建立真实工程。** 临时 source 字典表、包装 view、映射 semantic model、事实模型，贯通 dbt parse/build/docs → semantic_manifest → 原生 query/explain → 服务。
+- [ ] **Step 2: 验证结果。** 状态、渠道、target_status 三维度，其中两个复用字典；覆盖 502/404 同为“失败”但保留两行、原始过滤、混合排序、未匹配、NULL、空字符串、比率和共享用户的 count_distinct。
+- [ ] **Step 3: 验证生命周期。** partial parse 修改/删除不残留，两个 buildId 使用各自配置，更新字典文本后读取新数据，旧无映射工程不变。原生测试不得导入服务包，证明能力位于引擎内部。
+- [ ] **Step 4: 运行真实链路。** `uv run --frozen pytest -q tests/integration/test_dimension_value_mapping.py`；先记录缺失路径的失败，补最小实现后达到真实 DuckDB 全部通过。PostgreSQL 用独立测试库，StarRocks 区分生成和真实执行证据。
+- [ ] **Step 5: 更新文档与 changelog。** 使用正式字段及 v1/v2 示例，说明 fork、模式差异、唯一性、多 JOIN、配套版本。移除根 README 中与本次修改 vendor 授权冲突的旧描述。dbt 用 changie 记录功能，不手改生成的 CHANGELOG.md。
+- [ ] **Step 6: 完成下表检查。** make lint 可能格式化代码，审阅并撤回本次产生的无关格式变更；快照用工具生成，只报告实际通过项。
+- [ ] **Step 7: 固定交付。** 先提交 vendor（dbt 遵守签名），再提交根服务、文档和 gitlink；未请求发布不推送。使用 verification-before-completion 技能检查最终差异及提交。
+
+## 验证命令
+
+| 目录 | 命令 | 通过证据 |
 | --- | --- | --- |
-| 本功能单测 | `uv run --frozen pytest -q tests/test_dimension_value_mapping_contracts.py tests/test_dimension_value_mapping_catalog.py tests/test_dimension_value_mapping_dimensions.py tests/test_dimension_value_mapping_sql.py tests/test_dimension_value_mapping_execution.py tests/test_dimension_value_mapping_validation.py` | 全部通过，无数据库测试被替换为渲染断言 |
-| DuckDB 真实链路 | `uv run --frozen pytest -q tests/integration/test_dimension_value_mapping.py` | dbt 和 MetricFlow 真实执行通过 |
-| 全量回归 | `uv run --frozen pytest -q` | 使用 SERVICE_TEST_DATABASE_URL 指向独立测试库；全部可运行测试通过，列明环境缺失造成的 skip |
-| 静态检查 | `uv run --frozen ruff check src tests` | 无错误 |
-| 差异检查 | `git diff --check` | 无空白错误，改动仅覆盖本功能 |
-| 既有 PostgreSQL 集成 | `uv run --frozen pytest -q tests/integration/test_publication_proxy_flow.py` | 已设置 PLATFORM_TEST_POSTGRES=1、PLATFORM_TEST_PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE 和独立服务测试库；无环境时明确说明未验证 |
+| vendor/dbt/core | `hatch run unit-tests` | dbt 单测含协议和序列化 |
+| vendor/dbt/core | `hatch run python3 -m pytest ../tests/functional/semantic_models/test_dimension_value_mapping.py` | 独立 PostgreSQL 上 full/partial parse |
+| vendor/dbt/core | `hatch run code-quality` | dbt 风格、类型检查 |
+| vendor/metricflow | `hatch run dev-env:pytest tests_metricflow_semantic_interfaces/validations/test_dimension_value_mapping.py tests_metricflow_semantic_interfaces/implementations/test_dimension_value_mapping.py tests_metricflow_semantics/model/test_value_mapping_lookup.py tests_metricflow/engine/test_value_mapping_dimensions.py tests_metricflow/plan_conversion/test_dimension_value_mapping.py tests_metricflow/engine/test_dimension_value_mapping.py` | 原生协议、图隔离及查询语义 |
+| vendor/metricflow/dbt-metricflow | `hatch run dev-env:pytest tests_dbt_metricflow/test_value_mapping_validation.py` | 原生 adapter 校验 |
+| vendor/metricflow | `make lint`、`make test` | 仓库规定的最终全量验证 |
+| 根仓库 | `uv run --frozen pytest -q tests/integration/test_dimension_value_mapping.py` | DuckDB 全链路 |
+| 根仓库 | `uv run --frozen pytest -q`、`uv run --frozen ruff check src tests` | 服务回归；数据库用独立 SERVICE_TEST_DATABASE_URL |
+| 三个仓库 | `git diff --check` | 无空白错误和无关改动 |
 
-StarRocks 本期至少完成生成 SQL、adapter 引用和类型元数据接口的测试；只有实际连接 StarRocks 执行本功能后才能报告真实集成通过。不得把已有 DuckDB renderer 的使用当作 StarRocks 执行证明。
+缺少 Hatch/make、依赖、数据库或签名能力时准确列明未执行项及原因；不能用服务单测代替原生测试，也不能降低要求后宣称完成。
 
-## Spec 覆盖与计划自检
+## 覆盖检查与顺序
 
-| Spec 章节 | 实施任务 |
+| Spec 要求 | 任务 |
 | --- | --- |
-| 1–3：目标、范围、配置 | 1、4、5、7 |
-| 4：校验与封存 | 1、2、6 |
-| 5：可用维度与原始取值 | 3、4、6、7 |
-| 6：多 JOIN、投影、排序、模式 | 4、5、6、7 |
-| 7：唯一性前提与实时数据 | 2、5、7；明确不增加重复键检测 |
-| 8：返回类型和失败行为 | 1、2、6 |
-| 9–10：代码边界和验收 | 文件职责表及各任务验证 |
+| 正式协议、旧产物兼容、固定构建 | 1、2、7、8 |
+| 引用错误、空键和类型 | 1、3、6、7 |
+| 原生维度发现、实际来源与图隔离 | 3、7 |
+| 多 JOIN、expr、排序及方言 | 4、5 |
+| query/explain 同一 SQL、CTAS、类型和查询模式 | 5、7、8 |
+| 字典保证唯一、无重复检测、实时内容 | 4、6、8 |
+| 不依赖服务即可使用 | 1–6 的原生测试、8 |
 
-实施前评审本计划，并选择当前会话顺序实施或子代理逐项实施与评审；本次只交付计划。
+按 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 顺序执行；跨仓库协议先稳定再接入，不并行修改同一接口。修订版评审后再实施，本次仅修订 spec 和计划。

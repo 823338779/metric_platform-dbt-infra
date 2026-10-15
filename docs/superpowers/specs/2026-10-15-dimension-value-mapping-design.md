@@ -2,11 +2,13 @@
 
 日期：2026-10-15
 
-状态：已于 2026-10-15 经用户确认；进入实施计划阶段，尚未实施产品代码。
+状态：业务行为已确认；按用户要求修订为 dbt / MetricFlow 原生协议扩展，修订版待评审，尚未实施产品代码。
 
 ## 1. 目标与已确认的约束
 
 用户在 dbt 工程中配置业务维度的展示映射，映射数据来自另一个 semantic model。配置随构建发布，查询使用选定 buildId 的配置。
+
+本功能由本仓库维护的 dbt、metricflow_semantic_interfaces 和 MetricFlow 源码共同实现。dbt 负责声明及产物传递，语义接口负责类型与引用校验，MetricFlow 负责维度发现和最终 SQL 映射；服务层只接入原生能力。直接使用修改后的 MetricFlow query/explain 也必须生效，不依赖本服务的 SQL 包装。
 
 映射表负责保证原始值唯一，每个原始值最多对应一条映射记录。服务直接依赖这一数据约束，不在构建或查询阶段额外检查重复键。
 
@@ -86,15 +88,32 @@ dimensions:
   - name: status_code
     type: categorical
     expr: status_code
-    config:
-      meta:
-        value_mapping:
-          semantic_model: status_code_mapping
-          value_dimension: raw_value
-          display_dimension: display_value
+    value_mapping:
+      semantic_model: status_code_mapping
+      value_dimension: raw_value
+      display_dimension: display_value
 ```
 
-`value_mapping` 是本服务定义的扩展约定，不是 MetricFlow 原生的展示映射能力。
+`value_mapping` 是本次在 dbt 维度协议中新增的正式可选字段，与 expr、type 同级，并贯通到 MetricFlow 的语义接口。它属于本仓库 fork 的协议扩展，不表示上游未修改的 dbt / MetricFlow 已支持。
+
+dbt v2 inline 格式在列的 dimension 对象中使用同一个字段；derived dimension 同样保留该字段。三种声明最终生成相同的 Dimension.value_mapping：
+
+```yaml
+models:
+  - name: requests
+    semantic_model:
+      enabled: true
+    columns:
+      - name: status_code
+        dimension:
+          type: categorical
+          value_mapping:
+            semantic_model: status_code_mapping
+            value_dimension: raw_value
+            display_dimension: display_value
+```
+
+配置不再放入 config.meta；meta 中其他用户元数据保持原行为。旧产物没有该字段时按无映射读取。
 
 | 字段 | 含义 |
 | --- | --- |
@@ -102,19 +121,21 @@ dimensions:
 | value_dimension | 该模型中提供原始匹配值的维度名称 |
 | display_dimension | 该模型中提供显示文本的维度名称 |
 
-字段引用的是语义维度，不是物理列。服务必须尊重维度的 expr；未设置 expr 时使用维度名称。映射维度表达式在映射模型的物理关系作用域内解析，不对表达式做字符串列名替换。
+字段引用的是语义维度，不是物理列。MetricFlow 必须尊重维度的 expr；未设置 expr 时使用维度名称。映射维度表达式在映射模型的物理关系作用域内解析，不对表达式做字符串列名替换。
 
 ## 4. 构建校验与封存
 
-构建阶段读取业务维度的 config.meta，生成类型化映射配置，并与业务维度一起写入 published_catalog。封存内容至少包含：
+dbt 在 v1、v2 inline 和 derived dimension 的解析过程中读取正式字段，写入 manifest.json，并经 metricflow_semantic_interfaces 的类型化对象无损写入 semantic_manifest.json。完整解析、partial parsing、缓存往返及 state:modified 必须识别映射的新增、修改和删除。
+
+语义接口校验跨模型引用，MetricFlow 解析实际物理关系。服务从原生产物投影展示配置到 published_catalog，与两个原生 manifest 一起封存；它不是配置解释或 SQL 生成的唯一实现。封存信息至少包含：
 
 - 业务维度资源身份及所属 semantic model。
 - 映射 semantic model、原始值维度、显示值维度的资源身份。
 - 通过现有模型绑定解析的物理关系及两个维度的投影表达式。
 
-同时记录展示映射的资源依赖以供追溯；该依赖不得转换成 MetricFlow 的计算实体关系。
+同时记录展示映射的资源依赖以供追溯；该依赖不得转换成 MetricFlow 的计算实体关系，也不能破坏 dbt semantic model 对唯一物理来源的现有解析。两个原生 manifest 与 published_catalog 中的配置必须一致。
 
-构建必须拒绝以下配置：
+原生协议及构建校验必须拒绝以下配置：
 
 1. 配置字段缺失、类型错误或存在未知字段。
 2. 引用的 semantic model 不存在或解析不唯一，目标维度不存在或属于其他模型。
@@ -122,6 +143,8 @@ dimensions:
 4. 目标不能解析到本构建中已验证的唯一物理表或视图，或目标表达式无法执行。
 5. 映射目标继续声明 value_mapping，或作为指标的计算来源使用。
 6. 原始匹配键为 NULL，或显示值不符合文本类型约定。
+
+结构、引用和语义类型错误由 dbt 解析及共享语义校验在不连接数据库时识别；物理表达式、空键及数据库类型由 dbt-metricflow 的 adapter 校验入口在构建探测阶段验证。服务调用这些原生入口，不复制一份同类规则。
 
 原始值列与业务维度必须具备兼容的数据库类型，JOIN 不通过统一转成字符串来掩盖类型差异。若源表键的类型不同，应由 dbt 包装 model 显式规范类型。
 
@@ -135,12 +158,14 @@ dimensions:
 
 被引用的映射 semantic model 被视为展示专用模型。它的内部维度和经过它到达的展示专用路径不进入公开的可用业务维度，也不能作为业务 groupBy 或 filters 的独立选项。资源目录仍保留映射模型及其字段，以便查看配置和依赖。
 
-不能假设放进 meta 的配置会让 MetricFlow 自动隐藏这些字段：
+展示模型隔离必须在 MetricFlow 自身实现：
 
 - 不为展示映射建立业务模型到映射模型的计算实体边。
-- 对原生发现结果按 semantic model 的实际来源和关联路径做过滤。
+- MetricFlow 保留完整 manifest 供映射解析，但构建指标计算用的语义图时排除展示专用模型，阻止它们成为计算 JOIN 的终点或中间路径；原生可用维度入口使用同一边界。
 - 不按 raw_value、display_value 等名称全局过滤，以免误伤其他业务模型的同名维度。
-- 当前按维度名称猜测 resourceId 的逻辑不足以处理多模型同名情况；参与映射解析时必须使用实际来源身份。无法唯一确定来源时返回明确错误，不能静默套用或忽略映射。
+- MetricFlow 按输出实例的实际来源定位映射。服务当前按维度名称猜测 resourceId 的逻辑也应改为使用引擎返回的 semantic model 身份；无法唯一确定来源时返回明确错误，不能静默套用或忽略映射。
+
+服务不得自行裁剪或改写 semantic manifest 来实现隔离，也不维护独立的展示维度黑名单。
 
 `DIMENSION_VALUES` 继续对原始维度取值、去重、筛选，返回 `502`、`404`、`200` 等原始值，并保持原始类型。该模式不应用展示替换，以保证筛选请求可使用原始值。
 
@@ -149,12 +174,14 @@ dimensions:
 ### 6.1 数据流
 
 ```text
-固定 buildId 的封存配置
-    → 业务维度 optionId 解析为实际维度身份和引擎 token
-    → MetricFlow 编译原始指标查询
-    → 根据最终输出维度追加展示 JOIN 和输出投影
-    → 在本次构建的连接上执行最终 SQL
-    → 按现有协议序列化结果
+dbt 维度正式字段 value_mapping
+    → manifest.json / semantic_manifest.json
+    → MetricFlow 语义引用校验和来源解析
+    → 按原始维度完成指标 SQL 生成与优化
+    → MetricFlow 最终输出转换追加 N 个展示 JOIN
+    → 原生渲染器及执行计划
+    → engine.query() 执行 / engine.explain() 返回同一最终 SQL
+    → 服务按现有协议序列化结果
 ```
 
 只对最终输出中出现的已配置业务维度添加映射。如果某个维度仅出现在 WHERE 中而未输出，不为它追加展示 JOIN。
@@ -206,7 +233,9 @@ ORDER BY q.request__status_code, q.request__channel_code;
 
 即使内层已排序，外层也必须显式恢复请求的排序；不能依赖子查询顺序。外层排序引用 q 的原始结果列，而不是显示值别名。若请求没有排序，维持现有的无顺序保证语义，不增加默认排序规则。
 
-映射转换应以结构化 SQL 计划、输出列及语义绑定为依据，不对 SQL 文本做全局查找替换。应复用当前引擎已暴露的 explain 计划和方言渲染能力，不修改 vendor 来添加业务规则。
+映射转换以结构化 SQL 计划、输出列及语义绑定为依据，不对 SQL 文本做全局查找替换。在 MetricFlow 内部的 SQL 优化完成之后、方言渲染及执行任务创建之前增加专用最终输出转换。转换后不再运行会将展示 JOIN 下推到聚合前的优化。
+
+SQL 表达式和方言支持在 MetricFlow 原生节点与 renderer 中实现；服务不读取 explain 再自行拼接或包装 SQL。正常 query 和 explain 共用转换后的执行计划，最终 SQL、参数、输出列信息保持一致。数据表及输出关系两类原生结果终点都须经过相同的映射边界。
 
 ### 6.3 查询模式
 
@@ -217,7 +246,7 @@ ORDER BY q.request__status_code, q.request__channel_code;
 | DIMENSION_VALUES | 返回原始值，不添加映射替换 |
 | PREVIEW | 维持物理数据集预览行为，不应用业务维度映射 |
 
-无映射时保持现有执行路径。QUERY 不能先执行原始 SQL、再在应用内映射，或重新调用 engine.query 导致实际执行的 SQL 丢失外层 JOIN。
+无映射时保持现有执行路径。MetricFlow 根据原生 query_type 对普通指标查询应用映射，对 DIMENSION_VALUES 跳过映射；不新增供 HTTP 请求覆盖配置的参数。服务继续调用 engine.query / engine.explain，不另起一条绕过引擎执行计划的 SQL 执行路径。
 
 ## 7. 映射键唯一性与数据变化
 
@@ -233,7 +262,9 @@ ORDER BY q.request__status_code, q.request__channel_code;
 
 QueryRequest 不新增映射配置字段，配置只来自选定构建。QueryResult 的字段结构保持不变，columns 必须反映实际返回类型，不能仍把已替换的状态码声明为整数。
 
-封存的维度属性新增可选的类型化展示映射信息；查询中间模型传递已解析的映射身份和投影信息，不接受调用方传入的任意 JOIN SQL。
+dbt Dimension、共享语义 Dimension 协议及 Pydantic 实现均新增可选映射字段；MetricFlow 内部维护已解析的映射身份和投影信息。封存目录只投影该原生配置，服务的查询请求不新增 valueMappings 或任意 JOIN SQL。
+
+旧 manifest、semantic_manifest 和缓存缺少该字段时默认无映射。对 fork 的协议增量进行 schema、序列化和版本兼容测试，不声称未修改的上游消费者支持该扩展；发布时固定 dbt 与 MetricFlow 的配套源码提交。
 
 配置错误在构建阶段报告具体的模型、维度和配置字段。查询时来源解析失败或匹配类型错误导致明确失败，不静默回退成未映射查询。错误沿用统一 error 协议，并使用可区分的映射错误码；不得暴露连接凭据。
 
@@ -245,13 +276,16 @@ QueryRequest 不新增映射配置字段，配置只来自选定构建。QueryRe
 
 | 位置 | 预期职责变化 |
 | --- | --- |
-| models/native.py | 显式读取并校验本服务使用的 meta 配置 |
-| models/artifacts.py | 类型化封存映射引用及解析结果 |
-| platform/catalog.py、platform/sealed_catalog.py 及构建校验链路 | 解析来源、检查引用、数据质量与物理关系，封存展示依赖 |
-| platform/dimensions.py 及原生维度发现适配 | 按真实来源解析维度，隐藏展示专用模型的内部字段 |
-| application/query_plan.py、platform/models.py | 为最终输出维度传递已解析映射信息 |
-| platform/metricflow.py 及独立 SQL 转换模块 | 编译后追加 JOIN、替换投影、保持排序、执行最终 SQL |
-| 结果序列化边界 | 保持实际输出类型和既有截断语义 |
+| vendor/dbt/core/dbt/contracts/graph/unparsed.py、artifacts/resources、parser/schema_yaml_readers.py | 正式字段、v1/v2/derived 解析及原生 manifest 输出 |
+| vendor/dbt/core/dbt/contracts/graph/semantic_manifest.py、nodes.py、parser/partial.py | semantic manifest 往返、变更识别与缓存正确性 |
+| vendor/metricflow/metricflow_semantic_interfaces | 映射协议、Pydantic 类型及共享引用校验 |
+| vendor/metricflow/metricflow_semantics | 完整映射 lookup、真实来源解析及计算语义图隔离 |
+| vendor/metricflow/metricflow/engine、execution、plan_conversion | 查询模式、最终输出映射及原生执行计划接入 |
+| vendor/metricflow/metricflow/sql、metricflow_semantics/sql | 显示投影表达式、JOIN、排序、引用和方言渲染 |
+| vendor/metricflow/dbt-metricflow | 复用 dbt adapter 的构建期映射数据校验 |
+| src/dbt_metricflow_service/models、platform/catalog.py、platform/sealed_catalog.py | 读取正式字段并封存原生配置、来源和展示依赖 |
+| src/dbt_metricflow_service/platform/dimensions.py、platform/metricflow.py 及构建入口 | 接入原生维度发现、query/explain 和数据验证，不实现第二套映射 |
+| 原生结果与服务序列化边界 | 保持实际输出类型和既有截断语义 |
 | README.md 与相关测试 | 说明配置、模式差异及验证行为 |
 
 不重构无关查询流程，不增加通用 SQL 改写框架，不新增第三方依赖作为默认方案。
@@ -260,7 +294,8 @@ QueryRequest 不新增映射配置字段，配置只来自选定构建。QueryRe
 
 ### 配置与发布
 
-- 真实 dbt parse/build 能接受示例中的 semantic model 和 config.meta 配置，并保留服务所需信息。
+- 真实 dbt parse/build 能接受 v1、v2 inline 和 derived dimension 的正式 value_mapping 字段，两个原生 manifest 无损保留，协议及 schema 测试通过。
+- partial parsing、缓存往返及 state:modified 能识别映射配置的新增、修改和删除，无旧映射残留。
 - 支持已有 source 经包装 model/view 接入；物理关系遵循构建环境和 alias。
 - 缺失引用、错误维度归属、空键和不支持的类型在构建时失败。
 - 相同维度名出现在不同模型、不同关联路径时，不发生映射串用。
@@ -278,7 +313,7 @@ QueryRequest 不新增映射配置字段，配置只来自选定构建。QueryRe
 - 混合已映射维度、未配置映射维度及仅用于筛选的维度时，仅为需要映射的输出维度生成 JOIN；其中一个映射未命中不影响其他映射。
 - 原始值排序和指标排序均正确；行数上限、额外探测行及 resultTruncated 保持既有语义。
 - 仅用于筛选的维度不追加映射 JOIN；未配置映射的查询行为不变。
-- EXPLAIN 生成的映射 SQL 与 QUERY 实际执行 SQL 采用同一转换函数。
+- 原生 engine.explain 生成的映射 SQL 与 engine.query 实际执行 SQL 采用同一执行计划转换，不依赖服务。
 - 直接关联原始值唯一的映射数据，不生成重复键检查、映射聚合、去重或内部诊断列；不同原始值使用相同显示值时仍保留独立结果行。
 
 ### 维度发现与执行证据
@@ -288,3 +323,4 @@ QueryRequest 不新增映射配置字段，配置只来自选定构建。QueryRe
 - 至少以真实 DuckDB 执行测试证明外层 JOIN、行数保持及类型行为；PostgreSQL、StarRocks 分别验证方言生成。
 - PostgreSQL、StarRocks 的真实数据库执行结果与仅 SQL 渲染的验证必须在交付说明中区分，未运行的集成测试不得宣称通过。
 - 所有展示映射发生在数据库 SQL 中；应用层按既有流程序列化结果。
+- 在不导入 dbt_metricflow_service 的测试中，原生 dbt 协议往返、MetricFlow 维度发现和多 JOIN 查询完整通过。
