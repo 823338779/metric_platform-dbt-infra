@@ -55,6 +55,7 @@ class NativeMetric(Contract):
 class NativeDimension(Contract):
     token: str
     name: str | None = None
+    semantic_model_name: str | None = None
     type: str = strings.UNKNOWN_VALUE_TYPE
     value_type: str = strings.UNKNOWN_VALUE_TYPE
     operators: list[str] | None = None

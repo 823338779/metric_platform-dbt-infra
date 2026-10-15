@@ -127,6 +127,8 @@ class Runtime:
     @contextmanager
     def _query_context(self, build: StoredBuild) -> Iterator[tuple[Path, Path]]:
         """在持有引擎串行锁的执行线程内获取资源，底层调用退出后才清理。"""
+        from metricflow_semantics.errors.error_classes import DimensionValueMappingError
+
         from ..platform.execution_profile import materialized_profile
         from ..platform.metricflow import InvalidDimensionsRequest
 
@@ -145,7 +147,7 @@ class Runtime:
                         try:
                             with engine_environment(environment, output):
                                 yield project, profiles
-                        except InvalidDimensionsRequest:
+                        except (InvalidDimensionsRequest, DimensionValueMappingError):
                             raise ServiceError(strings.INVALID_QUERY, QUERY_EXECUTION_FAILED, 422,
                                                build_id=build.build_id) from None
                         except Exception:

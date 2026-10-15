@@ -213,7 +213,10 @@ def build_published_catalog(
             capabilities = [strings.DIMENSION_VALUES] if item.queryable else []
             attributes = DimensionAttributes(dataset_id=dataset, dimension_type=definition.type,
                     expression=definition.expr,
+                    value_mapping=definition.value_mapping,
                     time_granularity=definition.type_params.time_granularity if definition.type_params else None)
+            if definition.value_mapping is not None:
+                edge(dataset_ids[definition.value_mapping.semantic_model], key, strings.DIMENSION_VALUE_MAPPING)
         elif kind == ResourceKind.SEMANTIC_MODEL:
             models = [node for node in definition.depends_on.nodes if node in binding_by_id]
             if len(models) != 1:

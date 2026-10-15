@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Generic, TypeVar
 from uuid import uuid4
 
+from metricflow_semantics.errors.error_classes import DimensionValueMappingError
+
 from dbt_metricflow_service.models.artifacts import Contract
 
 from .embedded import PROFILES_ENV, PROJECT_ENV, create_output, engine_environment, run_serialized
@@ -72,7 +74,7 @@ def invoke_metricflow(
                 payload = request.operation(
                     Path(request.environment[PROJECT_ENV]), Path(request.environment[PROFILES_ENV]),
                 )
-            except InvalidDimensionsRequest:
+            except (InvalidDimensionsRequest, DimensionValueMappingError):
                 error_code = INVALID_DIMENSIONS_CODE
             else:
                 status = JobStatus.SUCCEEDED

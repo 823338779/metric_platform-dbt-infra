@@ -330,7 +330,8 @@
               "datasetId": "semantic_model.orders",
               "dimensionType": "categorical",
               "expression": null,
-              "timeGranularity": null
+              "timeGranularity": null,
+              "valueMapping": null
             }
           },
           {

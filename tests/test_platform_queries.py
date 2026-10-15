@@ -16,7 +16,9 @@ class FakeEngine:
 
     def list_dimensions(self, metric_names: list[str]) -> list[object]:
         assert metric_names == ["revenue", "orders"]
-        return [SimpleNamespace(dunder_name="customer__region", name="region", type="categorical")]
+        return [SimpleNamespace(
+            dunder_name="customer__region", name="region", type="categorical", semantic_model_reference=None,
+        )]
 
     def explain(self, request: object) -> object:
         token = request.group_by_names[0]
@@ -70,9 +72,11 @@ def test_time_dimensions_advertise_only_verified_grains_on_their_own_join_path()
     class TimeEngine(FakeEngine):
         def list_dimensions(self, metric_names):
             return [
-                SimpleNamespace(dunder_name="metric_time__day", name="metric_time", type="time"),
-                SimpleNamespace(dunder_name="order__day", name="day", type="time"),
-                SimpleNamespace(dunder_name="return__day", name="day", type="time"),
+                SimpleNamespace(
+                    dunder_name="metric_time__day", name="metric_time", type="time", semantic_model_reference=None,
+                ),
+                SimpleNamespace(dunder_name="order__day", name="day", type="time", semantic_model_reference=None),
+                SimpleNamespace(dunder_name="return__day", name="day", type="time", semantic_model_reference=None),
             ]
 
         def explain(self, request):

@@ -31,14 +31,19 @@ def engine_context(monkeypatch):
     engine = SimpleNamespace(
         list_metrics=lambda **_: [SimpleNamespace(name="orders")],
         list_dimensions=lambda **_: [
-            SimpleNamespace(dunder_name="order__region", name="region", type="categorical"),
+            SimpleNamespace(
+                dunder_name="order__region", name="region", type="categorical", semantic_model_reference=None,
+            ),
         ],
         explain=explain, query=query,
     )
     adapter = SimpleNamespace(type=lambda: "postgres")
     configuration = SimpleNamespace(
         setup=lambda **kwargs: calls.append(("setup", kwargs)), mf=engine,
-        dbt_artifacts=SimpleNamespace(adapter=adapter), semantic_manifest_lookup=object(),
+        dbt_artifacts=SimpleNamespace(adapter=adapter),
+        semantic_manifest_lookup=SimpleNamespace(
+            value_mapping_lookup=SimpleNamespace(mapping_model_references=frozenset()),
+        ),
     )
     monkeypatch.setattr(metricflow, "CLIConfiguration", lambda: configuration)
     return engine, configuration, calls

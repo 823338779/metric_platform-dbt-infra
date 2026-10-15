@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Final
 
 from dbt_metricflow.cli.cli_configuration import CLIConfiguration
+from dbt_metricflow.cli.dbt_connectors.value_mapping_validation import validate_value_mapping_data
 from metricflow.engine.metricflow_engine import MetricFlowEngine, MetricFlowQueryRequest, MetricFlowQueryType
 
 from dbt_metricflow_service import constants as strings
@@ -88,7 +89,9 @@ def execute_available_dimensions(project: Path, profiles: Path, metrics: tuple[s
 
 def probe_query_capability(project: Path, profiles: Path) -> ProbeResult:
     """独立的构建验收探针，不接收维度发现或数据查询请求。"""
-    engine = _engine(_configuration(project, profiles))
+    configuration = _configuration(project, profiles)
+    validate_value_mapping_data(configuration.semantic_manifest_lookup, configuration.dbt_artifacts.adapter)
+    engine = _engine(configuration)
     metrics = engine.list_metrics(include_dimensions=False)
     if not metrics:
         raise ValueError(QUERYABLE_METRICS_MISSING_MESSAGE)

@@ -25,8 +25,8 @@ EXPECTED_LOCAL_SOURCES = {
     "metricflow": "vendor/metricflow",
 }
 EXPECTED_SUBMODULE_COMMITS = {
-    "vendor/dbt": "7f78d7b6aa3a88e5efa6dd92753e4983d92aeba4",
-    "vendor/metricflow": "05551f73c22786b933969bbccafc47c2a1b51625",
+    "vendor/dbt": "f7769d85e4bd5794a9bb50409347b2d52a3a9119",
+    "vendor/metricflow": "12ee501461329a0544e3c7cb3c7b0529c90bc5cc",
 }
 
 

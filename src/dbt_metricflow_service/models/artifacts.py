@@ -10,7 +10,7 @@ from pydantic.alias_generators import to_camel
 
 from dbt_metricflow_service import constants as strings
 
-from .native import NativeColumn, NativeConversion, NativeCumulative, NativeReference
+from .native import NativeColumn, NativeConversion, NativeCumulative, NativeReference, NativeValueMapping
 
 CATALOG_SCHEMA_VERSION = 1
 PUBLISHED_CATALOG_FILE = strings.PUBLISHED_CATALOG_FILE
@@ -83,6 +83,7 @@ class DimensionAttributes(Contract):
     dimension_type: str
     expression: str | None = None
     time_granularity: str | None = None
+    value_mapping: NativeValueMapping | None = None
 
 
 class DatasetAttributes(Contract):

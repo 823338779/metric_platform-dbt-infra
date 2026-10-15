@@ -48,6 +48,12 @@ def map_available_dimensions(
             continue
         candidates = [item for item in catalog.resources
                       if item.kind == ResourceKind.DIMENSION and item.name == entry.name]
+        if entry.semantic_model_name is not None:
+            dataset_ids = {
+                item.resource_id for item in catalog.resources
+                if item.kind == ResourceKind.SEMANTIC_MODEL and item.name == entry.semantic_model_name
+            }
+            candidates = [item for item in candidates if item.attributes.dataset_id in dataset_ids]
         resource_id = candidates[0].resource_id if len(candidates) == 1 else None
         label = candidates[0].display_name if resource_id else entry.name or token
         if PATH_SEPARATOR in token and entry.name != METRIC_TIME:

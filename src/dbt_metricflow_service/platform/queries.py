@@ -60,6 +60,10 @@ def available_dimensions(engine: MetricFlowEngine, metrics: tuple[str, ...]) -> 
         raise ValueError(METRIC_SELECTION_INVALID_MESSAGE)
     dimensions = [NativeDimension(
         token=dimension.dunder_name, name=dimension.name,
+        semantic_model_name=(
+            dimension.semantic_model_reference.semantic_model_name
+            if dimension.semantic_model_reference is not None else None
+        ),
         type=getattr(dimension.type, strings.VALUE_FIELD, str(dimension.type)),
     ) for dimension in engine.list_dimensions(metric_names=list(metrics))]
     verified = {METRIC_TIME: _verified_grains(engine, metrics, METRIC_TIME)}

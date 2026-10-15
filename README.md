@@ -29,9 +29,57 @@
 构建、部署历史使用 v2 游标，按创建时间和唯一键在数据库中排序；升级前的 v1 历史游标返回
 `INVALID_CURSOR`，调用方应省略游标从首页重新读取。目录游标不变。
 
+## 维度显示值映射
+
+在 dbt 工程的分类维度上配置正式字段 `value_mapping`，随工程构建发布：
+
+```yaml
+semantic_models:
+  - name: requests
+    model: ref('requests')
+    entities:
+      - name: request
+        type: primary
+        expr: id
+    dimensions:
+      - name: status
+        type: categorical
+        value_mapping:
+          semantic_model: status_codes
+          value_dimension: raw_value
+          display_dimension: display_value
+  - name: status_codes
+    model: ref('dim_status_code')
+    entities:
+      - name: status_code
+        type: primary
+        expr: code
+    dimensions:
+      - name: raw_value
+        type: categorical
+        expr: code
+      - name: display_value
+        type: categorical
+        expr: label
+```
+
+`dim_status_code` 是工程中的物理 dbt 模型，可由已有表构建；`status_codes` 是它的 semantic model。
+映射模型只用于显示，不能同时定义指标或递归映射。原始键由工程维护者保证唯一。
+构建探针检查原始键非 NULL、源与键类型兼容、显示列为文本，不扫描重复键。
+
+MetricFlow 在完成原始值的筛选、分组、计算、排序和 LIMIT 后，通过显式
+`ApplyDimensionValueMappingsNode` 生成最外层 LEFT JOIN；每个映射维度各自 JOIN。
+404、502 都显示为“失败”时仍保留两行；列名及列顺序不变。缺失映射或显示值为 NULL
+时返回原始值的文本，原始 NULL 仍为 NULL，空显示字符串有效。
+指标查询和 explain 使用这条原生链路，服务不替换单元格，也不包装 SQL。
+
+可用维度仅展示业务维度；映射表内部字段不会作为计算维度出现。维度值查询和筛选使用
+原始代码及原始类型，PREVIEW 仍显示物理数据。旧配置无需迁移；该字段是本项目的协议扩展，
+并非对同版本上游 dbt/MetricFlow 的兼容承诺。修改映射配置后需重新构建发布。
+
 ## 启动
 
-需要 Python 3.11–3.14（推荐 3.12）、uv、Git、PostgreSQL 和目标数据仓库。依赖以 `uv.lock` 为准，vendor 不由本服务改造。
+需要 Python 3.11–3.14（推荐 3.12）、uv、Git、PostgreSQL 和目标数据仓库。依赖以 `uv.lock` 及 vendor 固定源码为准；维值映射使用本项目扩展的 dbt/MetricFlow 协议。
 
 ```powershell
 uv sync --frozen --all-groups

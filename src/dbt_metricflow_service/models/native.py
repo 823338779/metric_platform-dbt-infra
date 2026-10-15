@@ -94,6 +94,14 @@ class NativeRelation(NativeProjection):
     alias: str | None = None
 
 
+class NativeValueMapping(NativeProjection):
+    """Lossless catalog projection; configuration validation belongs to native dbt/MetricFlow."""
+
+    semantic_model: str
+    value_dimension: str
+    display_dimension: str
+
+
 class NativeNode(NativeProjection):
     name: str | None = None
     description: str | None = None
@@ -118,6 +126,7 @@ class NativeNode(NativeProjection):
     filter: dict[str, JsonValue] | None = None
     time_granularity: str | None = None
     node_relation: NativeRelation | None = None
+    value_mapping: NativeValueMapping | None = None
     freshness: NativeFreshness | None = None
     loaded_at_query: str | None = None
 
