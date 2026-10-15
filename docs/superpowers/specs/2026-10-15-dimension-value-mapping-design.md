@@ -2,7 +2,7 @@
 
 日期：2026-10-15
 
-状态：业务行为已确认；按用户要求修订为 dbt / MetricFlow 原生协议扩展，修订版待评审，尚未实施产品代码。
+状态：业务行为及显式映射节点方案已确认；已据此修订原生协议设计和实施计划，尚未实施产品代码。
 
 ## 1. 目标与已确认的约束
 
@@ -176,9 +176,10 @@ dbt 在 v1、v2 inline 和 derived dimension 的解析过程中读取正式字�
 ```text
 dbt 维度正式字段 value_mapping
     → manifest.json / semantic_manifest.json
-    → MetricFlow 语义引用校验和来源解析
-    → 按原始维度完成指标 SQL 生成与优化
-    → MetricFlow 最终输出转换追加 N 个展示 JOIN
+    → MetricFlow QuerySpec 中独立的展示映射意图
+    → DataflowPlan 的 ApplyDimensionValueMappingsNode
+    → SQL visitor 解析映射绑定，优化原始计算子计划
+    → 消费显式节点对应的输出转换，生成 N 个展示 JOIN
     → 原生渲染器及执行计划
     → engine.query() 执行 / engine.explain() 返回同一最终 SQL
     → 服务按现有协议序列化结果
@@ -190,7 +191,29 @@ dbt 维度正式字段 value_mapping
 
 内层保留原有筛选、聚合、指标依赖计算及基于原始值的排序和 `limit + 1` 取数策略。外层不新增按显示值执行的 WHERE、GROUP BY、DISTINCT、HAVING 或聚合。
 
-### 6.2 SQL 形态
+### 6.2 查询规格与显式数据流节点
+
+MetricFlowQuerySpec 增加独立的 output_value_mapping_specs，记录本次需要检查映射配置的输出 DimensionSpec。普通指标查询由引擎按最终选定维度填充，DIMENSION_VALUES 保持空元组；它不是请求中的映射配置覆盖入口。原始 dimension_specs、filter_intersection 和 order_by_specs 不变。
+
+这些展示规格只表达意图，不复制映射表配置，也不提前假定物理列名。builder 在原始输出和别名确定后，按维度实例的真实来源匹配 manifest 中的映射，形成有效绑定；未配置映射的维度不形成绑定。多来源无法唯一判断时报错，只有筛选使用的维度不进入展示规格。
+
+新增 ApplyDimensionValueMappingsNode，继承 DataflowPlanNode，不修改通用 DagNode 基类。节点只有一个计算父节点，保存有序的映射绑定及恢复原始排序所需的规格。绑定包含最终输出 DimensionSpec、源维度身份及映射模型/字段引用；物理投影和 SQL 列绑定在 SQL 转换阶段确定。
+
+```text
+原始筛选、聚合、指标计算
+    → OrderByLimitNode（如果需要）
+    → AliasSpecsNode（如果需要）
+    → ApplyDimensionValueMappingsNode（有有效映射时，最多一个）
+    → WriteToResultDataTableNode / WriteToResultTableNode
+```
+
+一个节点承载 N 个有效映射并生成 N 个独立 JOIN，不按维度建立 N 层节点；同一映射模型被复用时仍保留各自绑定。没有有效映射时不生成该节点。映射模型是节点的展示依赖，不接入指标计算实体 JOIN 图。
+
+节点复制、比较、计划展示和相关 visitor 均须支持新类型；映射节点不再承诺显示值唯一，不能沿用原始分组值的唯一性推断。数据流优化可以优化其原始计算父分支，但不得越过节点移动筛选、聚合、排序、limit，或合并不同的映射绑定。
+
+SQL visitor 消费显式节点，解析映射投影并保留待应用的输出转换；SQL converter 先优化原始计算 SQL，再应用该转换且只应用一次。待应用转换必须随结果终点、CTE 路径和数据集复制正确传递，在返回可渲染 SQL 计划前全部消费。不得将新节点实现为无动作占位，再由执行层根据全局开关重新猜测映射。
+
+### 6.3 SQL 形态
 
 下例同时映射状态码和渠道两个维度，分别关联各自原始值唯一的映射模型。表名和文本 CAST 由当前 adapter 的方言渲染。
 
@@ -233,11 +256,11 @@ ORDER BY q.request__status_code, q.request__channel_code;
 
 即使内层已排序，外层也必须显式恢复请求的排序；不能依赖子查询顺序。外层排序引用 q 的原始结果列，而不是显示值别名。若请求没有排序，维持现有的无顺序保证语义，不增加默认排序规则。
 
-映射转换以结构化 SQL 计划、输出列及语义绑定为依据，不对 SQL 文本做全局查找替换。在 MetricFlow 内部的 SQL 优化完成之后、方言渲染及执行任务创建之前增加专用最终输出转换。转换后不再运行会将展示 JOIN 下推到聚合前的优化。
+映射转换由显式数据流节点驱动，以结构化 SQL 计划、输出列及语义绑定为依据，不对 SQL 文本做全局查找替换。原始 SQL 优化完成后应用节点的待处理输出转换，再进入方言渲染及执行任务创建；转换后不再运行会将展示 JOIN 下推到聚合前的优化。
 
 SQL 表达式和方言支持在 MetricFlow 原生节点与 renderer 中实现；服务不读取 explain 再自行拼接或包装 SQL。正常 query 和 explain 共用转换后的执行计划，最终 SQL、参数、输出列信息保持一致。数据表及输出关系两类原生结果终点都须经过相同的映射边界。
 
-### 6.3 查询模式
+### 6.4 查询模式
 
 | 模式 | 行为 |
 | --- | --- |
@@ -246,7 +269,7 @@ SQL 表达式和方言支持在 MetricFlow 原生节点与 renderer 中实现；
 | DIMENSION_VALUES | 返回原始值，不添加映射替换 |
 | PREVIEW | 维持物理数据集预览行为，不应用业务维度映射 |
 
-无映射时保持现有执行路径。MetricFlow 根据原生 query_type 对普通指标查询应用映射，对 DIMENSION_VALUES 跳过映射；不新增供 HTTP 请求覆盖配置的参数。服务继续调用 engine.query / engine.explain，不另起一条绕过引擎执行计划的 SQL 执行路径。
+无映射时保持现有执行路径。MetricFlow 根据原生 query_type 设置展示规格，builder 生成显式映射节点；DIMENSION_VALUES 不生成节点，不新增供 HTTP 请求覆盖配置的参数。执行转换器只消费已经完整转换的 SQL 计划，不再独立决定是否追加映射。服务继续调用 engine.query / engine.explain，不另起一条绕过引擎执行计划的 SQL 执行路径。
 
 ## 7. 映射键唯一性与数据变化
 
@@ -280,7 +303,9 @@ dbt Dimension、共享语义 Dimension 协议及 Pydantic 实现均新增可选�
 | vendor/dbt/core/dbt/contracts/graph/semantic_manifest.py、nodes.py、parser/partial.py | semantic manifest 往返、变更识别与缓存正确性 |
 | vendor/metricflow/metricflow_semantic_interfaces | 映射协议、Pydantic 类型及共享引用校验 |
 | vendor/metricflow/metricflow_semantics | 完整映射 lookup、真实来源解析及计算语义图隔离 |
-| vendor/metricflow/metricflow/engine、execution、plan_conversion | 查询模式、最终输出映射及原生执行计划接入 |
+| vendor/metricflow/metricflow_semantics/specs/query_spec.py | 独立展示规格及复制、序列化兼容 |
+| vendor/metricflow/metricflow/dataflow | 显式映射节点、builder、visitor 和数据流优化边界 |
+| vendor/metricflow/metricflow/engine、dataset、execution、plan_conversion | 查询模式、节点到 SQL 的转换、待处理映射传递及执行计划接入 |
 | vendor/metricflow/metricflow/sql、metricflow_semantics/sql | 显示投影表达式、JOIN、排序、引用和方言渲染 |
 | vendor/metricflow/dbt-metricflow | 复用 dbt adapter 的构建期映射数据校验 |
 | src/dbt_metricflow_service/models、platform/catalog.py、platform/sealed_catalog.py | 读取正式字段并封存原生配置、来源和展示依赖 |
@@ -314,6 +339,9 @@ dbt Dimension、共享语义 Dimension 协议及 Pydantic 实现均新增可选�
 - 原始值排序和指标排序均正确；行数上限、额外探测行及 resultTruncated 保持既有语义。
 - 仅用于筛选的维度不追加映射 JOIN；未配置映射的查询行为不变。
 - 原生 engine.explain 生成的映射 SQL 与 engine.query 实际执行 SQL 采用同一执行计划转换，不依赖服务。
+- explain 的数据流计划显式包含一个映射节点及全部绑定；其位置在原始排序、limit 和别名之后、结果终点之前。无有效映射及 DIMENSION_VALUES 不含该节点。
+- QuerySpec 的复制和序列化保持展示规格；普通及 saved query 行为一致，展示规格不污染原始分组、筛选或嵌套指标计算。
+- 节点复制/比较、所有数据流优化级别、CTE/子查询和两个结果终点均保留映射语义；待处理输出转换不丢失、不重复应用，显示标签重复不被推断为唯一。
 - 直接关联原始值唯一的映射数据，不生成重复键检查、映射聚合、去重或内部诊断列；不同原始值使用相同显示值时仍保留独立结果行。
 
 ### 维度发现与执行证据
