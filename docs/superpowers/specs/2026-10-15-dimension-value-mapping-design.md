@@ -159,16 +159,20 @@ dimensions:
 
 只对最终输出中出现的已配置业务维度添加映射。如果某个维度仅出现在 WHERE 中而未输出，不为它追加展示 JOIN。
 
+一次查询支持任意数量的已选映射维度，受现有查询维度数量上限约束。若最终输出有 N 个需要映射的维度，则在同一最外层 SELECT 中追加 N 个独立的 LEFT JOIN，不限制为单次关联。
+
 内层保留原有筛选、聚合、指标依赖计算及基于原始值的排序和 `limit + 1` 取数策略。外层不新增按显示值执行的 WHERE、GROUP BY、DISTINCT、HAVING 或聚合。
 
 ### 6.2 SQL 形态
 
-下例直接关联原始值唯一的映射数据。表名和文本 CAST 由当前 adapter 的方言渲染。
+下例同时映射状态码和渠道两个维度，分别关联各自原始值唯一的映射模型。表名和文本 CAST 由当前 adapter 的方言渲染。
 
 ```sql
 SELECT
-    COALESCE(m.display_value, CAST(q.request__status_code AS VARCHAR))
+    COALESCE(m0.display_value, CAST(q.request__status_code AS VARCHAR))
         AS request__status_code,
+    COALESCE(m1.display_value, CAST(q.request__channel_code AS VARCHAR))
+        AS request__channel_code,
     q.request_count
 FROM (
     -- MetricFlow 原始查询：筛选、聚合、原始值排序和 limit + 1
@@ -178,12 +182,27 @@ LEFT JOIN (
         code AS raw_value,
         name AS display_value
     FROM analytics.dim_status_code
-) m
-    ON q.request__status_code = m.raw_value
-ORDER BY q.request__status_code;
+) m0
+    ON q.request__status_code = m0.raw_value
+LEFT JOIN (
+    SELECT
+        channel_code AS raw_value,
+        channel_name AS display_value
+    FROM analytics.dim_channel
+) m1
+    ON q.request__channel_code = m1.raw_value
+ORDER BY q.request__status_code, q.request__channel_code;
 ```
 
 该 SQL 是结构示意，不是可直接执行的完整示例。多个维度使用独立且无冲突的表别名，依次添加 LEFT JOIN。输出显式枚举列，映射列替换对应投影，指标和未映射维度保持原来的列顺序和别名。
+
+多次关联遵循以下规则：
+
+- 每个 JOIN 的左侧匹配条件都引用 q 中对应的原始维度列，不使用其他映射 JOIN 的显示值作为关联键。
+- 按最终输出维度的顺序生成确定且无冲突的别名，如 m0、m1。每个维度的输出投影只引用自己对应的映射别名。
+- 两个业务维度即使引用同一个映射 semantic model，也分别生成 JOIN 和别名。例如 source_status、target_status 都引用 status_code_mapping 时，分别以 q.source_status、q.target_status 关联，不能仅按目标模型合并 JOIN。
+- 每个维度独立处理未匹配或显示值为空的回退，不影响其他维度的映射结果。
+- 所有映射均在同一最外层完成；不为每个映射维度重新计算指标，也不逐层嵌套指标查询。
 
 即使内层已排序，外层也必须显式恢复请求的排序；不能依赖子查询顺序。外层排序引用 q 的原始结果列，而不是显示值别名。若请求没有排序，维持现有的无顺序保证语义，不增加默认排序规则。
 
@@ -207,6 +226,8 @@ ORDER BY q.request__status_code;
 映射表在构建时及后续数据更新中持续保证原始值唯一，服务不承担重复键检测或修复职责。查询按第 6 节直接投影映射模型的原始值与显示值，再执行 LEFT JOIN。
 
 不为映射追加 GROUP BY、DISTINCT、匹配条数、显示值聚合或内部诊断列。在原始值唯一的前提下，每条原始结果最多匹配一条映射记录；LEFT JOIN 保留未匹配行，因此结果行数和既有截断语义保持不变。显示值允许重复，不要求唯一。
+
+这一性质适用于连续的多个映射 JOIN：每次关联都最多匹配一条记录并保留未匹配行，因此 N 次关联后仍保持原始结果行数和指标值。
 
 ## 8. 返回协议与失败行为
 
@@ -252,6 +273,9 @@ QueryRequest 不新增映射配置字段，配置只来自选定构建。QueryRe
 - 比率和去重计数不会因相同标签被求和或重新计算。
 - 未匹配、原始 NULL、显示 NULL、空字符串分别满足约定。
 - 多维度映射、维度 expr、列顺序、列类型及别名冲突有覆盖。
+- 两个及三个以上输出维度同时映射时，分别生成对应数量的独立 LEFT JOIN；全部 ON 条件使用各自的原始结果列，行数和指标值保持不变。
+- 两个业务维度引用同一映射模型时，使用独立别名及各自的原始值关联，显示结果不串用。
+- 混合已映射维度、未配置映射维度及仅用于筛选的维度时，仅为需要映射的输出维度生成 JOIN；其中一个映射未命中不影响其他映射。
 - 原始值排序和指标排序均正确；行数上限、额外探测行及 resultTruncated 保持既有语义。
 - 仅用于筛选的维度不追加映射 JOIN；未配置映射的查询行为不变。
 - EXPLAIN 生成的映射 SQL 与 QUERY 实际执行 SQL 采用同一转换函数。
