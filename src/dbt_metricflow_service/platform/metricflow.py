@@ -8,6 +8,7 @@ from typing import Final
 from dbt_metricflow.cli.cli_configuration import CLIConfiguration
 from dbt_metricflow.cli.dbt_connectors.value_mapping_validation import validate_value_mapping_data
 from metricflow.engine.metricflow_engine import MetricFlowEngine, MetricFlowQueryRequest, MetricFlowQueryType
+from metricflow_semantics.naming.linkable_spec_name import StructuredLinkableSpecName
 
 from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.adapters.starrocks import STARROCKS_ADAPTER, StarRocksSqlClient
@@ -31,6 +32,7 @@ PREVIEW_RESOURCE_UNAVAILABLE_MESSAGE: Final[str] = '预览资源不可查询'
 METRICFLOW_RESULT_MISSING_MESSAGE: Final[str] = 'MetricFlow 未返回结果集'
 
 INVALID_DIMENSIONS_CODE = strings.INVALID_QUERY
+PATH_SEPARATOR: Final[str] = "__"
 
 
 class InvalidDimensionsRequest(ValueError):
@@ -58,7 +60,13 @@ def _where_constraints(request: PlatformQueryRequest) -> list[str]:
             literal = "(" + ", ".join(_literal(value) for value in item.value) + ")"
         else:
             literal = _literal(item.value)
-        constraints.append(f"{{{{ Dimension('{item.field}') }}}} {item.operator} {literal}")
+        # 分组 token 可含完整路径，筛选须将前置角色放入 entity_path；原生解析保留时间粒度后缀。
+        links = StructuredLinkableSpecName.from_name(item.field, custom_granularity_names=()).entity_link_names
+        dimension = f"Dimension('{item.field}')"
+        if len(links) > 1:
+            local_name = item.field.split(PATH_SEPARATOR, len(links) - 1)[-1]
+            dimension = f"Dimension('{local_name}', entity_path={list(links[:-1])!r})"
+        constraints.append(f"{{{{ {dimension} }}}} {item.operator} {literal}")
     return constraints
 
 

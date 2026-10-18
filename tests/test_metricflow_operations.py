@@ -12,6 +12,22 @@ from dbt_metricflow_service.platform import metricflow
 from dbt_metricflow_service.platform.models import PlatformQueryRequest
 
 
+@pytest.mark.parametrize("field,expression", [
+    ("consumer__dima", "{{ Dimension('consumer__dima') }} = 'NORTH'"),
+    ("account__consumer__dima", "{{ Dimension('consumer__dima', entity_path=['account']) }} = 'NORTH'"),
+    ("store__account__consumer__dima", "{{ Dimension('consumer__dima', entity_path=['store', 'account']) }} = 'NORTH'"),
+    ("account__consumer__created_at__day",
+     "{{ Dimension('consumer__created_at__day', entity_path=['account']) }} = 'NORTH'"),
+])
+def test_filter_preserves_role_path_in_native_dimension_expression(field, expression):
+    """筛选的多跳角色须通过 entity_path 传给 MetricFlow，不能只使用分组 token。"""
+    request = PlatformQueryRequest(
+        runId=uuid4(), mode="QUERY", metrics=["orders"],
+        filters=[{"field": field, "operator": "=", "value": "NORTH"}],
+    )
+    assert metricflow._where_constraints(request) == [expression]
+
+
 @pytest.fixture
 def engine_context(monkeypatch):
     calls = []
