@@ -269,7 +269,7 @@ wheels = [
 
 [[package]]
 name = "dbt-core"
-source = { directory = "vendor/dbt/core" }
+source = { editable = "vendor/dbt/core" }
 dependencies = [
     { name = "agate" },
     { name = "click" },
@@ -373,7 +373,7 @@ wheels = [
 
 [[package]]
 name = "dbt-metricflow"
-source = { directory = "vendor/metricflow/dbt-metricflow" }
+source = { editable = "vendor/metricflow/dbt-metricflow" }
 dependencies = [
     { name = "click" },
     { name = "dbt-core" },
@@ -456,13 +456,13 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "dbt-core", directory = "vendor/dbt/core" },
+    { name = "dbt-core", editable = "vendor/dbt/core" },
     { name = "dbt-duckdb", specifier = "==1.11.0" },
-    { name = "dbt-metricflow", directory = "vendor/metricflow/dbt-metricflow" },
+    { name = "dbt-metricflow", editable = "vendor/metricflow/dbt-metricflow" },
     { name = "dbt-postgres", specifier = "==1.11.0" },
     { name = "dbt-starrocks", specifier = "==1.12.2" },
     { name = "fastapi", specifier = "==0.141.1" },
-    { name = "metricflow", directory = "vendor/metricflow" },
+    { name = "metricflow", editable = "vendor/metricflow" },
     { name = "psycopg2-binary", specifier = "==2.9.13" },
     { name = "pyyaml", specifier = "==6.0.3" },
     { name = "sqlalchemy", specifier = ">=2.0,<2.1" },
@@ -871,7 +871,7 @@ msgpack = [
 
 [[package]]
 name = "metricflow"
-source = { directory = "vendor/metricflow" }
+source = { editable = "vendor/metricflow" }
 dependencies = [
     { name = "importlib-metadata" },
     { name = "jinja2" },

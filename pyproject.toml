@@ -19,9 +19,9 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-dbt-core = { path = "vendor/dbt/core" }
-dbt-metricflow = { path = "vendor/metricflow/dbt-metricflow" }
-metricflow = { path = "vendor/metricflow" }
+dbt-core = { path = "vendor/dbt/core", editable = true }
+dbt-metricflow = { path = "vendor/metricflow/dbt-metricflow", editable = true }
+metricflow = { path = "vendor/metricflow", editable = true }
 
 [dependency-groups]
 dev = [
