@@ -59,7 +59,7 @@ async def test_only_build_persists_memory_manifest_without_other_artifacts(publi
     assert result.output_set_id == "sealed-output"
     assert len(calls) == 1
     assert calls[0][1] == "BUILDING"
-    assert json.loads(captured["manifest_json"])["memory_build"] is True
+    assert json.loads(captured["memory_files"]["target/manifest.json"])["memory_build"] is True
     assert "validation_json" not in captured["metadata"].model_dump()
     assert yaml.safe_load((project / "dbt_project.yml").read_text())["target-path"] == "target"
     assert not (project / "target").exists()
@@ -71,6 +71,34 @@ async def test_build_preserves_project_macros_and_model_configuration(publicatio
     await execute_build(executor, job, project)
     assert all(path.read_bytes() == content for path, content in files.items())
     assert set((project / "macros").iterdir()) == {project / "macros/generate_schema_name.sql"}
+
+
+async def test_build_context_calls_client_with_paths_and_target(publication_executor, monkeypatch):
+    from dbt_metricflow_service.delegates.clients.dbt_client import DbtClient
+
+    executor, job, project, _, captured = publication_executor
+    calls = []
+
+    def build(self, selected_project, profiles, *, target, target_path, callbacks):
+        assert selected_project == project
+        assert profiles == executor.settings.profiles_dir
+        assert target == job.profile_binding_id
+        assert target_path == project / "target"
+        calls.append(callbacks)
+        return SimpleNamespace(manifest=SimpleNamespace(
+            writable_manifest=lambda: SimpleNamespace(to_dict=lambda **_: {"memory_build": True}),
+        ))
+
+    async def invoke(_job, context, phase, *, manifest_sink):
+        assert context.argv == ("dbt", "build")
+        assert phase == "BUILDING"
+        manifest_sink(context.operation([]).manifest)
+
+    monkeypatch.setattr(DbtClient, "build", build)
+    executor._dbt = invoke
+    await execute_build(executor, job, project)
+    assert calls == [[]]
+    assert captured["memory_files"]
 
 
 async def test_missing_memory_manifest_cannot_publish(publication_executor):

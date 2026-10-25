@@ -24,7 +24,7 @@ class DimensionOption(Contract):
 
 class AvailableDimensions(Contract):
     build_id: str
-    metric_resource_ids: list[str]
+    metrics: list[str]
     dimensions: list[DimensionOption]
 
 

@@ -136,13 +136,17 @@ def test_build_without_output_cannot_be_published(store):
     assert store.get(row.job_id).status == "RUNNING"
 
 
-def test_deadline_expires_queued_build_before_claim(store):
+def test_legacy_deadline_does_not_expire_healthy_build(store):
     name = project(store)
     worker = str(uuid4())
     row = reserve(store, name, timeout_seconds=-1)
-    assert store.claim(worker, toolchain_version=VERSION) is None
-    store.recover()
-    assert store.get(row.job_id).error_code == "TASK_TIMEOUT"
+    assert store.recover() == 0
+    attempt = store.claim(worker, toolchain_version=VERSION)
+    assert attempt.job_id == row.job_id
+    assert store.phase(row.job_id, attempt.lease_token, "BUILDING", external=True)
+    assert store.recover() == 0
+    assert store.finish(row.job_id, attempt.lease_token, succeeded=False, error_code="BUILD_FAILED")
+    assert store.get(row.job_id).error_code == "BUILD_FAILED"
 
 
 

@@ -84,7 +84,6 @@ async def test_engine_python_logs_are_redacted_before_host_handlers(tmp_path, mo
 
 @pytest.mark.parametrize("metricflow", [False, True])
 async def test_sdk_failure_restores_environment_and_logging(tmp_path, monkeypatch, metricflow):
-    import dbt_metricflow_service.platform.metricflow as module
 
     # 失败分支也必须撤销当前工程的全局配置，后续调用可以正常取得串行锁。
     logger = logging.getLogger("dbt_metricflow")
@@ -97,9 +96,10 @@ async def test_sdk_failure_restores_environment_and_logging(tmp_path, monkeypatc
 
     monkeypatch.setattr(dbtRunner, "invoke", invoke)
     if metricflow:
-        monkeypatch.setattr(module, "execute_available_dimensions", lambda *args: invoke(None, []))
+        def execute(*args):
+            return invoke(None, [])
         request = MetricFlowRequest(
-            {"DBT_PROJECT_DIR": str(tmp_path), "DBT_PROFILES_DIR": str(tmp_path)}, module.execute_available_dimensions,
+            {"DBT_PROJECT_DIR": str(tmp_path), "DBT_PROFILES_DIR": str(tmp_path)}, execute,
         )
         result = (await run_metricflow(PROJECT, request, 5, 64, before_start)).record
         assert result.exit_code is None
@@ -127,7 +127,7 @@ async def test_dbt_completed_failure_is_distinct_from_interrupted_write(tmp_path
     assert error.value.stopped is stopped
 
 
-async def test_timed_out_dbt_write_keeps_unknown_outcome(tmp_path, monkeypatch):
+async def test_slow_dbt_write_preserves_engine_failure(tmp_path, monkeypatch):
     release = threading.Event()
 
     def invoke(*_):
@@ -142,19 +142,19 @@ async def test_timed_out_dbt_write_keeps_unknown_outcome(tmp_path, monkeypatch):
     job = leased_job(job_id=PROJECT, lease_token=PROJECT, project_id=PROJECT)
     with pytest.raises(ExecutionError) as error:
         await executor._dbt(job, command(tmp_path), "BUILDING")
-    assert error.value.code == "COMMAND_TIMEOUT"
-    assert error.value.stopped is False
+    assert error.value.code == "COMMAND_FAILED"
+    assert error.value.stopped is True
 
 
 @pytest.mark.parametrize("metricflow", [False, True])
 async def test_rejected_lease_never_invokes_sdk(tmp_path, monkeypatch, metricflow):
-    import dbt_metricflow_service.platform.metricflow as module
 
     # 串行等待后的租约检查失败时不得进入 SDK，也不能把锁留给已拒绝任务。
     calls = []
     monkeypatch.setattr(dbtRunner, "invoke", lambda *_: calls.append(True))
-    monkeypatch.setattr(module, "execute_available_dimensions", lambda *_: calls.append(True))
-    spec = MetricFlowRequest({}, module.execute_available_dimensions) if metricflow else command(tmp_path)
+    def execute(*args):
+        return calls.append(True)
+    spec = MetricFlowRequest({}, execute) if metricflow else command(tmp_path)
     run = run_metricflow if metricflow else run_dbt
 
     async def expired():
@@ -167,10 +167,9 @@ async def test_rejected_lease_never_invokes_sdk(tmp_path, monkeypatch, metricflo
 
 @pytest.mark.parametrize("cancel", [False, True])
 @pytest.mark.parametrize("metricflow", [False, True])
-async def test_timeout_or_cancel_keeps_slot_until_call_exits(tmp_path, monkeypatch, cancel, metricflow):
-    import dbt_metricflow_service.platform.metricflow as module
+async def test_slow_call_or_cancel_keeps_slot_until_call_exits(tmp_path, monkeypatch, cancel, metricflow):
 
-    # 取消/超时不能提前释放全局锁，后续调用也不能提前执行租约检查。
+    # 取消/慢调用不能提前释放全局锁，后续调用也不能提前执行租约检查。
     started, release = threading.Event(), threading.Event()
     entered = []
     checked = []
@@ -192,9 +191,8 @@ async def test_timeout_or_cancel_keeps_slot_until_call_exits(tmp_path, monkeypat
             invoke(None, [])
             return DataQueryResult()
 
-        monkeypatch.setattr(module, "execute_available_dimensions", execute)
         spec = MetricFlowRequest(
-            {"DBT_PROJECT_DIR": str(tmp_path), "DBT_PROFILES_DIR": str(tmp_path)}, module.execute_available_dimensions,
+            {"DBT_PROJECT_DIR": str(tmp_path), "DBT_PROFILES_DIR": str(tmp_path)}, execute,
         )
     run = run_metricflow if metricflow else run_dbt
     first = asyncio.create_task(run(PROJECT, spec, 5 if cancel else 0.03, 64, before_start))
@@ -216,9 +214,9 @@ async def test_timeout_or_cancel_keeps_slot_until_call_exits(tmp_path, monkeypat
         assert isinstance(results[0], asyncio.CancelledError)
     else:
         record = results[0].record if metricflow else results[0]
-        assert record.status == JobStatus.TIMED_OUT
+        assert record.status == JobStatus.SUCCEEDED
         if metricflow:
-            assert results[0].payload is None
+            assert results[0].payload == DataQueryResult()
     assert results[1].status == JobStatus.SUCCEEDED
     assert checked == [True]
 
@@ -254,17 +252,15 @@ async def test_unsupported_command_is_rejected_before_authorization(tmp_path):
 
 
 async def test_metricflow_calls_python_function_without_child(tmp_path, monkeypatch):
-    import dbt_metricflow_service.platform.metricflow as module
 
     def execute(project, profiles):
         assert os.getpid() == calling_pid
         return DataQueryResult()
 
     calling_pid = os.getpid()
-    monkeypatch.setattr(module, "execute_available_dimensions", execute)
     spec = MetricFlowRequest(
         {**os.environ, "DBT_PROJECT_DIR": str(tmp_path), "DBT_PROFILES_DIR": str(tmp_path)},
-        module.execute_available_dimensions,
+        execute,
     )
     result = await run_metricflow(PROJECT, spec, 5, 64, before_start)
     assert result.record.status == JobStatus.SUCCEEDED
@@ -273,11 +269,11 @@ async def test_metricflow_calls_python_function_without_child(tmp_path, monkeypa
 
 
 async def test_metricflow_success_does_not_use_command_exit_codes(tmp_path, monkeypatch):
-    import dbt_metricflow_service.platform.metricflow as module
 
-    monkeypatch.setattr(module, "execute_available_dimensions", lambda *args: DataQueryResult())
+    def execute(*args):
+        return DataQueryResult()
     spec = MetricFlowRequest(
-        {"DBT_PROJECT_DIR": str(tmp_path), "DBT_PROFILES_DIR": str(tmp_path)}, module.execute_available_dimensions,
+        {"DBT_PROJECT_DIR": str(tmp_path), "DBT_PROFILES_DIR": str(tmp_path)}, execute,
     )
     result = await run_metricflow(PROJECT, spec, 5, 64, before_start)
     assert result.record.status == JobStatus.SUCCEEDED
@@ -286,15 +282,14 @@ async def test_metricflow_success_does_not_use_command_exit_codes(tmp_path, monk
 
 
 async def test_metricflow_invalid_available_dimensions_returns_business_error_without_exit_code(tmp_path, monkeypatch):
-    import dbt_metricflow_service.platform.metricflow as module
+    from dbt_metricflow_service.delegates.clients import InvalidDimensionsRequest
 
     def execute(project, profiles, *, metrics):
-        raise module.InvalidDimensionsRequest(SECRET)
+        raise InvalidDimensionsRequest(SECRET)
 
-    monkeypatch.setattr(module, "execute_available_dimensions", execute)
     request = MetricFlowRequest(
         {"DBT_PROJECT_DIR": str(tmp_path), "DBT_PROFILES_DIR": str(tmp_path)},
-        partial(module.execute_available_dimensions, metrics=("missing",)),
+        partial(execute, metrics=("missing",)),
     )
     result = await run_metricflow(PROJECT, request, 5, 64, before_start)
     assert result.error_code == "INVALID_QUERY"

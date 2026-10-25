@@ -43,18 +43,20 @@ def realtime(tmp_path, secrets):
 
     # 故意不提供 reserve/claim/finish/result 等持久化方法。
     runtime.jobs = SimpleNamespace(query_run=query_run)
-    runtime.artifacts = SimpleNamespace(materialize=materialize)
+    runtime.artifacts = SimpleNamespace(materialize=materialize, read_file=lambda *_: b"saved manifest")
     return runtime, build, events
 
 
 def test_repeated_calls_execute_in_memory_and_remove_workspaces(realtime, monkeypatch):
-    import dbt_metricflow_service.platform.metricflow as engine
+    import dbt_metricflow_service.delegates.clients.metric_flow_client as engine
 
     runtime, build, events = realtime
     calls, paths = [], []
     payload = PlatformQueryRequest(runId=uuid4(), mode="QUERY", metrics=["orders"])
 
-    def execute(project, profiles, request):
+    def execute(self, request):
+        project = self._project
+        assert self._manifest == b"saved manifest"
         assert request is payload
         assert events[-1] == "lock"
         assert (project / "dbt_project.yml").is_file()
@@ -62,7 +64,7 @@ def test_repeated_calls_execute_in_memory_and_remove_workspaces(realtime, monkey
         calls.append(request)
         return DataQueryResult(rows=[[len(calls)]])
 
-    monkeypatch.setattr(engine, "execute_programmatic", execute)
+    monkeypatch.setattr(engine.MetricFlowClient, "query", execute)
     assert runtime.execute_query(build, payload) == DataQueryResult(rows=[[1]])
     assert runtime.execute_query(build, payload) == DataQueryResult(rows=[[2]])
     assert paths[0] != paths[1]
@@ -70,25 +72,98 @@ def test_repeated_calls_execute_in_memory_and_remove_workspaces(realtime, monkey
     assert events == ["lock", "unlock", "lock", "unlock"]
 
 
+def test_preview_context_dispatches_directly_to_dbt_client(realtime, monkeypatch):
+    from dbt_metricflow_service.delegates.clients.dbt_client import DbtClient
+    from dbt_metricflow_service.delegates.clients.metric_flow_client import MetricFlowClient
+
+    runtime, build, events = realtime
+    paths = []
+
+    def preview(self, selector, *, project, profiles, limit):
+        assert self._content == b"saved manifest"
+        assert selector == "orders"
+        assert limit == 10
+        assert (profiles / "profiles.yml").is_file()
+        assert events == ["lock"]
+        paths.append(project)
+        return DataQueryResult(rows=[[1]])
+
+    monkeypatch.setattr(DbtClient, "preview", preview)
+    monkeypatch.setattr(MetricFlowClient, "query", lambda *_: pytest.fail("preview called MetricFlow"))
+    result = runtime.execute_query(build, PlatformQueryRequest(
+        runId=uuid4(), mode="PREVIEW", selector="orders", limit=10,
+    ))
+    assert result.rows == [[1]]
+    assert events == ["lock", "unlock"]
+    assert not paths[0].exists()
+
+
+@pytest.mark.parametrize("failure", [None, "slow", "native"])
+def test_lineage_uses_temporary_context_without_data_cleanup_lock(realtime, monkeypatch, failure):
+    import os
+    import time
+
+    from dbt_metricflow_service.delegates.clients.dbt_client import DbtClient
+    from dbt_metricflow_service.execution.embedded import ENGINE_LOCK
+
+    runtime, build, events = realtime
+    original_environment = dict(os.environ)
+    paths = []
+
+    def materialize(set_id, project):
+        assert set_id == build.output_set_id
+        (project / "dbt_project.yml").write_text("name: test\nprofile: test\n")
+
+    def lineage(self, selector, *, project, profiles):
+        assert ENGINE_LOCK.locked()
+        assert not events
+        assert self._content == b"saved manifest"
+        assert selector == "1+orders+1"
+        paths.extend([project, profiles])
+        os.environ["DBT_LINEAGE_TEST"] = "temporary"
+        if failure == "slow":
+            time.sleep(0.04)
+            assert project.exists()
+        if failure == "native":
+            raise ValueError("native error")
+        return [{"unique_id": "model.sample.orders", "depends_on": {"nodes": []}}]
+
+    runtime.jobs = SimpleNamespace()  # 血缘不需要 query_run，也不受 CLEANED 状态限制。
+    runtime.artifacts.materialize = materialize
+    monkeypatch.setattr(DbtClient, "lineage", lineage)
+    if failure == "slow":
+        runtime.settings = replace(runtime.settings, command_timeout_seconds=0.01)
+    if failure == "native":
+        with pytest.raises(ServiceError) as caught:
+            runtime.lineage(build, "1+orders+1")
+        assert caught.value.status == 503
+    else:
+        assert runtime.lineage(build, "1+orders+1")[0]["unique_id"] == "model.sample.orders"
+    assert not ENGINE_LOCK.locked()
+    assert all(not path.exists() for path in paths)
+    assert dict(os.environ) == original_environment
+
+
 @pytest.mark.parametrize(
     "failure,code,status",
     [
         ("invalid", "INVALID_QUERY", 422),
         ("connection", "COMMAND_FAILED", 503),
-        ("timeout", "COMMAND_TIMEOUT", 504),
+        ("slow", None, None),
     ],
 )
 def test_errors_release_lock_and_do_not_publish_late_results(realtime, monkeypatch, failure, code, status):
     import time
 
-    import dbt_metricflow_service.platform.metricflow as engine
+    import dbt_metricflow_service.delegates.clients.metric_flow_client as engine
 
     runtime, build, events = realtime
     paths = []
-    if failure == "timeout":
+    if failure == "slow":
         runtime.settings = replace(runtime.settings, command_timeout_seconds=0.01)
 
-    def execute(project, profiles, request):
+    def execute(self, request):
+        project = self._project
         paths.append(project)
         if failure == "invalid":
             raise engine.InvalidDimensionsRequest("private-details")
@@ -99,12 +174,16 @@ def test_errors_release_lock_and_do_not_publish_late_results(realtime, monkeypat
         assert project.exists()
         return DataQueryResult(rows=[[123]])
 
-    monkeypatch.setattr(engine, "execute_programmatic", execute)
-    with pytest.raises(ServiceError) as caught:
-        runtime.execute_query(build, PlatformQueryRequest(runId=uuid4(), mode="QUERY", metrics=["orders"]))
-    assert caught.value.status == status
-    assert caught.value.error.code == code
-    assert "private-details" not in str(caught.value)
+    monkeypatch.setattr(engine.MetricFlowClient, "query", execute)
+    request = PlatformQueryRequest(runId=uuid4(), mode="QUERY", metrics=["orders"])
+    if failure == "slow":
+        assert runtime.execute_query(build, request).rows == [[123]]
+    else:
+        with pytest.raises(ServiceError) as caught:
+            runtime.execute_query(build, request)
+        assert caught.value.status == status
+        assert caught.value.error.code == code
+        assert "private-details" not in str(caught.value)
     assert events == ["lock", "unlock"]
     assert all(not path.exists() for path in paths)
 
@@ -121,7 +200,7 @@ def test_errors_release_lock_and_do_not_publish_late_results(realtime, monkeypat
     ],
 )
 def test_realtime_result_size_and_shape(realtime, monkeypatch, value, limit, error_code):
-    import dbt_metricflow_service.platform.metricflow as engine
+    import dbt_metricflow_service.delegates.clients.metric_flow_client as engine
 
     if isinstance(value, DataQueryResult):
         serialized = json.dumps(
@@ -131,7 +210,7 @@ def test_realtime_result_size_and_shape(realtime, monkeypatch, value, limit, err
 
     runtime, build, events = realtime
     runtime.settings = replace(runtime.settings, max_result_bytes=limit)
-    monkeypatch.setattr(engine, "execute_programmatic", lambda *args, **kwargs: value)
+    monkeypatch.setattr(engine.MetricFlowClient, "query", lambda *args, **kwargs: value)
     if error_code is None:
         assert runtime.execute_query(build, PlatformQueryRequest(runId=uuid4(), mode="QUERY")) is value
     else:
@@ -143,7 +222,7 @@ def test_realtime_result_size_and_shape(realtime, monkeypatch, value, limit, err
 
 @pytest.mark.parametrize("binary", [False, True])
 def test_realtime_non_json_result_is_a_sanitized_service_failure(realtime, monkeypatch, binary):
-    import dbt_metricflow_service.platform.metricflow as engine
+    import dbt_metricflow_service.delegates.clients.metric_flow_client as engine
 
     runtime, build, events = realtime
 
@@ -152,7 +231,7 @@ def test_realtime_non_json_result_is_a_sanitized_service_failure(realtime, monke
             return "private-cell-details"
 
     cell = b"private-cell-details" if binary else PrivateCell()
-    monkeypatch.setattr(engine, "execute_programmatic", lambda *args, **kwargs: DataQueryResult(rows=[[cell]]))
+    monkeypatch.setattr(engine.MetricFlowClient, "query", lambda *args, **kwargs: DataQueryResult(rows=[[cell]]))
     with pytest.raises(ServiceError) as caught:
         runtime.execute_query(build, PlatformQueryRequest(runId=uuid4(), mode="QUERY"))
     assert caught.value.status == 503
@@ -164,7 +243,7 @@ def test_realtime_non_json_result_is_a_sanitized_service_failure(realtime, monke
 def test_waiting_queries_do_not_hold_cleanup_connections(realtime, monkeypatch):
     import time
 
-    import dbt_metricflow_service.platform.metricflow as engine
+    import dbt_metricflow_service.delegates.clients.metric_flow_client as engine
 
     runtime, build, events = realtime
 
@@ -172,7 +251,7 @@ def test_waiting_queries_do_not_hold_cleanup_connections(realtime, monkeypatch):
         time.sleep(0.01)
         return DataQueryResult(rows=[[1]])
 
-    monkeypatch.setattr(engine, "execute_programmatic", execute)
+    monkeypatch.setattr(engine.MetricFlowClient, "query", execute)
     with ThreadPoolExecutor(max_workers=9) as pool:
         results = list(pool.map(
             lambda _: runtime.execute_query(build, PlatformQueryRequest(runId=uuid4(), mode="QUERY")), range(9),
@@ -182,7 +261,7 @@ def test_waiting_queries_do_not_hold_cleanup_connections(realtime, monkeypatch):
 
 
 def test_real_database_query_path_only_reads_without_persisting_records(store, tmp_path, monkeypatch, secrets):
-    import dbt_metricflow_service.platform.metricflow as engine
+    import dbt_metricflow_service.delegates.clients.metric_flow_client as engine
     from tests.test_application_reads import reads
     from tests.test_catalog_queries import ready_build
 
@@ -192,8 +271,8 @@ def test_real_database_query_path_only_reads_without_persisting_records(store, t
     runtime.settings = replace(infrastructure(), profiles_dir=tmp_path, command_timeout_seconds=5,
                                max_output_bytes=64, temp_root=tmp_path / "queries")
     runtime.jobs, runtime.artifacts = jobs, artifacts
-    monkeypatch.setattr(engine, "execute_programmatic", lambda *args, **kwargs: DataQueryResult(rows=[[1]]))
-    monkeypatch.setattr(engine, "execute_available_dimensions", lambda *args, **kwargs: DimensionQueryResult())
+    monkeypatch.setattr(engine.MetricFlowClient, "query", lambda *args, **kwargs: DataQueryResult(rows=[[1]]))
+    monkeypatch.setattr(engine.MetricFlowClient, "available_dimensions", lambda *args, **kwargs: DimensionQueryResult())
     with reads(store.db) as statements:
         options = ("revenue",)
         query = PlatformQueryRequest(runId=uuid4(), mode="QUERY")
@@ -212,21 +291,22 @@ def test_real_database_query_path_only_reads_without_persisting_records(store, t
 
 
 def test_dimension_runtime_repeats_calls_with_explicit_metrics(realtime, monkeypatch):
-    import dbt_metricflow_service.platform.metricflow as engine
+    import dbt_metricflow_service.delegates.clients.metric_flow_client as engine
 
     runtime, build, events = realtime
     metrics = ("orders",)
     paths = []
 
-    def discover(project, profiles, *, metrics):
+    def discover(self, *, metrics):
+        project = self._project
         assert metrics == ("orders",)
         assert events[-1] == "lock"
         assert (project / "dbt_project.yml").is_file()
         paths.append(project)
         return DimensionQueryResult(allowed_filters=["="] if len(paths) == 1 else ["IN"])
 
-    monkeypatch.setattr(engine, "execute_available_dimensions", discover)
-    monkeypatch.setattr(engine, "execute_programmatic", lambda *args, **kwargs: pytest.fail("data API was called"))
+    monkeypatch.setattr(engine.MetricFlowClient, "available_dimensions", discover)
+    monkeypatch.setattr(engine.MetricFlowClient, "query", lambda *args, **kwargs: pytest.fail("data API was called"))
     assert runtime.available_dimensions(build, metrics).allowed_filters == ["="]
     assert runtime.available_dimensions(build, metrics).allowed_filters == ["IN"]
     assert paths[0] != paths[1]
@@ -236,15 +316,15 @@ def test_dimension_runtime_repeats_calls_with_explicit_metrics(realtime, monkeyp
 
 @pytest.mark.parametrize("dimensions", [True, False])
 def test_runtime_rejects_the_other_operations_result_type(realtime, monkeypatch, dimensions):
-    import dbt_metricflow_service.platform.metricflow as engine
+    import dbt_metricflow_service.delegates.clients.metric_flow_client as engine
 
     runtime, build, events = realtime
     if dimensions:
-        monkeypatch.setattr(engine, "execute_available_dimensions", lambda *args, **kwargs: DataQueryResult())
+        monkeypatch.setattr(engine.MetricFlowClient, "available_dimensions", lambda *args, **kwargs: DataQueryResult())
         def execute():
             return runtime.available_dimensions(build, ("orders",))
     else:
-        monkeypatch.setattr(engine, "execute_programmatic", lambda *args, **kwargs: DimensionQueryResult())
+        monkeypatch.setattr(engine.MetricFlowClient, "query", lambda *args, **kwargs: DimensionQueryResult())
         def execute():
             return runtime.execute_query(build, PlatformQueryRequest(runId=uuid4(), mode="QUERY"))
     with pytest.raises(ServiceError) as caught:
@@ -256,19 +336,20 @@ def test_runtime_rejects_the_other_operations_result_type(realtime, monkeypatch,
 
 @pytest.mark.parametrize("failure,code,status", [
     ("invalid", "INVALID_QUERY", 422), ("connection", "COMMAND_FAILED", 503),
-    ("timeout", "COMMAND_TIMEOUT", 504),
+    ("slow", None, None),
 ])
 def test_dimension_errors_keep_http_semantics_and_release_workspace(realtime, monkeypatch, failure, code, status):
     import time
 
-    import dbt_metricflow_service.platform.metricflow as engine
+    import dbt_metricflow_service.delegates.clients.metric_flow_client as engine
 
     runtime, build, events = realtime
     paths = []
-    if failure == "timeout":
+    if failure == "slow":
         runtime.settings = replace(runtime.settings, command_timeout_seconds=0.01)
 
-    def discover(project, profiles, *, metrics):
+    def discover(self, *, metrics):
+        project = self._project
         paths.append(project)
         if failure == "invalid":
             raise engine.InvalidDimensionsRequest("private-details")
@@ -279,12 +360,15 @@ def test_dimension_errors_keep_http_semantics_and_release_workspace(realtime, mo
         assert events == ["lock"]
         return DimensionQueryResult()
 
-    monkeypatch.setattr(engine, "execute_available_dimensions", discover)
-    with pytest.raises(ServiceError) as caught:
-        runtime.available_dimensions(build, ("orders",))
-    assert caught.value.error.code == code
-    assert caught.value.status == status
-    assert "private-details" not in str(caught.value)
+    monkeypatch.setattr(engine.MetricFlowClient, "available_dimensions", discover)
+    if failure == "slow":
+        assert runtime.available_dimensions(build, ("orders",)) == DimensionQueryResult()
+    else:
+        with pytest.raises(ServiceError) as caught:
+            runtime.available_dimensions(build, ("orders",))
+        assert caught.value.error.code == code
+        assert caught.value.status == status
+        assert "private-details" not in str(caught.value)
     assert all(not path.exists() for path in paths)
     assert events == ["lock", "unlock"]
 
@@ -296,7 +380,7 @@ def test_cancelled_queries_wait_for_worker_and_restore_environment(realtime, mon
     import os
     import threading
 
-    import dbt_metricflow_service.platform.metricflow as engine
+    import dbt_metricflow_service.delegates.clients.metric_flow_client as engine
     import dbt_metricflow_service.runtime.service as service
     from dbt_metricflow_service.execution.embedded import ENGINE_LOCK
 
@@ -306,8 +390,10 @@ def test_cancelled_queries_wait_for_worker_and_restore_environment(realtime, mon
     original_environment = dict(os.environ)
     original_run = asyncio.run
 
-    def execute(project, profiles, **kwargs):
+    def execute(self, **kwargs):
+        project = self._project
         paths.append(project)
+        profiles = self._profiles
         profile_paths.append(profiles)
         os.environ["DBT_ENV_SECRET_QUERY_CANCEL"] = "private-query-value"
         started.set()
@@ -339,7 +425,7 @@ def test_cancelled_queries_wait_for_worker_and_restore_environment(realtime, mon
         raise asyncio.CancelledError
 
     monkeypatch.setattr(service.asyncio, "run", lambda coroutine: original_run(cancel_while_running(coroutine)))
-    monkeypatch.setattr(engine, "execute_available_dimensions" if dimensions else "execute_programmatic", execute)
+    monkeypatch.setattr(engine.MetricFlowClient, "available_dimensions" if dimensions else "query", execute)
     with pytest.raises(asyncio.CancelledError):
         if dimensions:
             runtime.available_dimensions(build, ("orders",))
@@ -353,16 +439,17 @@ def test_cancelled_queries_wait_for_worker_and_restore_environment(realtime, mon
 
 @pytest.mark.parametrize("dimensions", [True, False])
 @pytest.mark.parametrize("invalid_dimensions", [False, True])
-def test_timeout_takes_precedence_over_late_engine_errors(realtime, monkeypatch, dimensions, invalid_dimensions):
+def test_slow_engine_errors_keep_original_error(realtime, monkeypatch, dimensions, invalid_dimensions):
     import time
 
-    import dbt_metricflow_service.platform.metricflow as engine
+    import dbt_metricflow_service.delegates.clients.metric_flow_client as engine
 
     runtime, build, events = realtime
     runtime.settings = replace(runtime.settings, command_timeout_seconds=0.01)
     paths = []
 
-    def execute(project, profiles, **kwargs):
+    def execute(self, **kwargs):
+        project = self._project
         paths.append(project)
         time.sleep(0.04)
         assert project.exists()
@@ -371,14 +458,14 @@ def test_timeout_takes_precedence_over_late_engine_errors(realtime, monkeypatch,
             "private-late-error"
         )
 
-    monkeypatch.setattr(engine, "execute_available_dimensions" if dimensions else "execute_programmatic", execute)
+    monkeypatch.setattr(engine.MetricFlowClient, "available_dimensions" if dimensions else "query", execute)
     with pytest.raises(ServiceError) as caught:
         if dimensions:
             runtime.available_dimensions(build, ("orders",))
         else:
             runtime.execute_query(build, PlatformQueryRequest(runId=uuid4(), mode="QUERY"))
-    assert caught.value.error.code == "COMMAND_TIMEOUT"
-    assert caught.value.status == 504
+    assert caught.value.error.code == ("INVALID_QUERY" if invalid_dimensions else "COMMAND_FAILED")
+    assert caught.value.status == (422 if invalid_dimensions else 503)
     assert "private-late-error" not in str(caught.value)
     assert events == ["lock", "unlock"]
     assert all(not path.exists() for path in paths)

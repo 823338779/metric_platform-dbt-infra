@@ -8,8 +8,7 @@ from uuid import UUID
 
 from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.application.builds import BuildService
-from dbt_metricflow_service.application.catalog import CatalogService
-from dbt_metricflow_service.models.payloads import AvailableDimensions, DimensionOption, JsonObject
+from dbt_metricflow_service.models.payloads import AvailableDimensions, DimensionOption
 from dbt_metricflow_service.models.queries import (
     AvailableDimensionsRequest,
     AvailableDimensionsView,
@@ -24,7 +23,6 @@ from ..platform.query_time import canonical_query, normalize_query_time, query_t
 from .errors import ServiceError
 from .query_plan import compile_query
 
-METRIC_BUILD_CONFLICT_MESSAGE: Final = "selected metric does not belong to this build"
 QUERY_RESPONSE_LIMIT_MESSAGE: Final = "query response exceeds the size limit"
 UNAVAILABLE_BUILD_MESSAGE: Final = "build is not available for new engine tasks"
 
@@ -33,12 +31,11 @@ MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
 class QueryService:
     def __init__(
-        self, builds: BuildService, catalogs: CatalogService,
+        self, builds: BuildService,
         execute: Callable[[StoredBuild, PlatformQueryRequest], DataQueryResult],
         discover_dimensions: Callable[[StoredBuild, tuple[str, ...]], DimensionQueryResult],
     ) -> None:
         self.builds = builds
-        self.catalogs = catalogs
         self.execute = execute
         self.discover_dimensions = discover_dimensions
 
@@ -55,26 +52,16 @@ class QueryService:
     ) -> AvailableDimensionsView:
         build = self.builds.load(build_id)
         self._available(build)
-        catalog = self.catalogs.read_build(build)
-        selected = sorted(set(request.metric_resource_ids))
-        result, _ = self._available_dimensions(build, selected, catalog)
+        selected = sorted(set(request.metrics))
+        result, _ = self._available_dimensions(build, selected)
         return AvailableDimensionsView(
-            build_id=result.build_id, metric_resource_ids=result.metric_resource_ids, dimensions=result.dimensions
+            build_id=result.build_id, metrics=result.metrics, dimensions=result.dimensions
         )
 
-    @staticmethod
-    def _metrics(manifest: JsonObject, selected: list[str]) -> dict[str, JsonObject]:
-        metrics = cast(dict[str, JsonObject], manifest.get(strings.DBT_METRICS_FIELD, {}))
-        if any(key not in metrics for key in selected):
-            raise ServiceError(strings.INVALID_METRIC_RESOURCE, METRIC_BUILD_CONFLICT_MESSAGE)
-        return {**cast(dict[str, JsonObject], manifest.get(strings.DBT_NODES_FIELD, {})),
-                **cast(dict[str, JsonObject], manifest.get(strings.DBT_SOURCES_FIELD, {})), **metrics}
-
     def _available_dimensions(
-        self, build: StoredBuild, selected: list[str], catalog: JsonObject,
+        self, build: StoredBuild, selected: list[str],
     ) -> tuple[AvailableDimensions, dict[str, DimensionBinding]]:
-        indexed = self._metrics(catalog, selected)
-        native = self.discover_dimensions(build, tuple(cast(str, indexed[key][strings.NAME_FIELD]) for key in selected))
+        native = self.discover_dimensions(build, tuple(selected))
         return map_available_dimensions(build.build_id, selected, native)
 
     def submit(self, build_id: UUID | str, request: QueryRequest, caller: str) -> QueryResult:
@@ -83,14 +70,12 @@ class QueryService:
         timezone = build.config_snapshot.business_timezone
         request = normalize_query_time(request, timezone)
         body = canonical_query(request)
-        catalog = self.catalogs.read_build(build)
-        indexed = self._metrics(catalog, body.metric_resource_ids)
         dimensions: list[DimensionOption] = []
         mapping: dict[str, DimensionBinding] = {}
         if request.group_by or request.filters or request.dimension_option_id:
-            available, mapping = self._available_dimensions(build, body.metric_resource_ids, catalog)
+            available, mapping = self._available_dimensions(build, body.metrics)
             dimensions = available.dimensions
-        engine = compile_query(request, cast(str, build.run_id), indexed, dimensions, mapping)
+        engine = compile_query(request, cast(str, build.run_id), dimensions, mapping)
         payload = self.execute(build, engine)
         metadata = query_time_metadata(body, timezone)
         result = QueryResult(

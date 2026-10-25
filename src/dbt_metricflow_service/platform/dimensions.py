@@ -54,4 +54,4 @@ def map_available_dimensions(
             operators=entry.operators if entry.operators is not None else native.allowed_filters,
         ))
         mapping[option_id] = DimensionBinding(token, entry.grain_tokens)
-    return AvailableDimensions(build_id=str(build_id), metric_resource_ids=selected, dimensions=output), mapping
+    return AvailableDimensions(build_id=str(build_id), metrics=selected, dimensions=output), mapping

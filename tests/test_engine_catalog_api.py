@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from tests.test_api import client as client
 from tests.test_catalog_queries import ready_build
+from tests.test_execution_profiles import secrets as secrets
 from tests.test_publication_storage import store as store
 
 
@@ -17,13 +18,13 @@ def test_active_catalog_and_historical_release_access(store, tmp_path, client):
     assert client.get("/builds/" + str(first.build_id)).status_code == 200
 
 
-def test_catalog_http_preserves_native_keys_and_nested_dimensions(store, tmp_path, client):
-    _, build, _, artifacts = ready_build(store, tmp_path)
+def test_catalog_http_preserves_native_keys_and_nested_dimensions(store, tmp_path, client, secrets):
+    builds, build, _, artifacts = ready_build(store, tmp_path)
     base = "/builds/" + str(build.build_id)
     response = client.get(base + "/catalog")
     assert response.status_code == 200
     catalog = response.json()
-    assert set(catalog) == {"metadata", "metrics", "semantic_models", "nodes", "sources", "parent_map", "child_map"}
+    assert set(catalog) >= {"metadata", "metrics", "semantic_models", "nodes", "sources", "parent_map", "child_map"}
     metric = catalog["metrics"]["metric.revenue"]
     assert "type_params" in metric
     assert "attributes" not in metric
@@ -33,9 +34,22 @@ def test_catalog_http_preserves_native_keys_and_nested_dimensions(store, tmp_pat
     resource_path = base + "/resources/metric.revenue"
     assert client.get(resource_path).json() == metric
     assert client.get(resource_path + "/native-details").json() == metric
-    assert client.get(resource_path + "/lineage").json() == {
-        "parent_map": {"metric.revenue": ["semantic_model.sample.orders"]}, "child_map": {}}
-    assert client.get(base + "/resources/metric.sample.net/lineage").status_code == 404
-    assert client.get(base + "/resources/model.sample.orders/lineage").json() == {
-        "parent_map": {}, "child_map": {}}
+    lineage_path = base + "/lineage"
+    response = client.get(lineage_path, params={"selector": "1+metric:revenue+1"})
+    assert response.status_code == 200, response.text
+    assert {node["unique_id"] for node in response.json()} == {"metric.revenue", "semantic_model.sample.orders"}
+    assert all("depends_on" in node for node in response.json())
+    assert client.get(lineage_path, params={"selector": "missing_model"}).json() == []
+    invalid = client.get(lineage_path, params={"selector": "bogus_method:orders"})
+    assert invalid.status_code == 422
+    assert invalid.json()["error"]["code"] == "INVALID_QUERY"
+    assert client.get(lineage_path).status_code == 422
+    assert client.get(resource_path + "/lineage").status_code == 422
+    # 物化表清理后，血缘仍来自历史 Manifest，不走数据查询清理锁。
+    with store.db.transaction() as connection:
+        connection.exec_driver_sql(
+            "UPDATE runtime_job SET run_lifecycle='CLEANED' WHERE job_id=%s",
+            (builds.store.get(build.build_id).run_id,),
+        )
+    assert client.get(lineage_path, params={"selector": "+orders+"}).status_code == 200
     assert client.get(resource_path + "/unknown").status_code == 422

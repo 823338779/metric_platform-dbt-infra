@@ -220,7 +220,7 @@ async def test_expired_lease_does_not_start_engine(execution, monkeypatch, tmp_p
 
 
 @pytest.mark.parametrize("cancel", [True, False])
-async def test_cancellation_or_timeout_waits_for_engine_before_workspace_removal(execution, monkeypatch, cancel):
+async def test_cancellation_or_slow_call_waits_for_engine_before_workspace_removal(execution, monkeypatch, cancel):
     executor, _, _, _ = execution
     started, release = threading.Event(), threading.Event()
     finished = []
@@ -230,7 +230,7 @@ async def test_cancellation_or_timeout_waits_for_engine_before_workspace_removal
     job = claimed(execution, CLEANUP_JOB, CLEANUP_PAYLOAD)
     workspace = executor.settings.temp_root / str(job.job_id) / str(job.attempt_id)
 
-    # 取消或超时后引擎仍可写工作目录；必须等待这次写入结束才能移除目录。
+    # 取消或慢调用期间引擎仍可写工作目录；必须等待这次写入结束才能移除目录。
     def execute(project, profiles):
         started.set()
         assert release.wait(5)
@@ -267,9 +267,7 @@ async def test_cancellation_or_timeout_waits_for_engine_before_workspace_removal
     if cancel:
         assert isinstance(result, asyncio.CancelledError)
     else:
-        assert isinstance(result, ExecutionError)
-        assert result.code == "COMMAND_TIMEOUT"
-        assert result.stopped is False
+        assert result is None
     assert finished == [True]
     assert not workspace.exists()
 
@@ -278,24 +276,21 @@ async def test_cancellation_or_timeout_waits_for_engine_before_workspace_removal
 
 
 
-async def test_timeout_retains_bounded_diagnostics_and_unknown_stop(execution, monkeypatch):
+async def test_slow_success_retains_bounded_diagnostics(execution, monkeypatch):
     executor, _, project_id, _ = execution
     executor.settings = dataclasses.replace(executor.settings, command_timeout_seconds=0.2, max_output_bytes=32)
     job = claimed(execution, "RUN_CLEANUP", JobRequest())
-    # 诊断经过真实 SDK 日志收集器，超时仍需等线程返回后才能上报。
+    # 诊断经过真实 SDK 日志收集器，等待线程返回后上报。
     def execute(project, profiles):
         logging.getLogger(ENGINE_LOGGER).warning(DIAGNOSTIC)
         time.sleep(0.3)
         return SimpleNamespace(success=True, exception=None)
 
     programmatic_engine(monkeypatch, execute)
-    with pytest.raises(ExecutionError) as error:
-        await run_build(executor, job, executor.settings.temp_root)
-    assert error.value.code == "COMMAND_TIMEOUT"
-    assert error.value.stopped is False
-    assert error.value.payload.status == "timed_out"
-    assert len(error.value.payload.stdout.encode()) <= 32
-    assert error.value.payload.output_truncated is True
+    record = await run_build(executor, job, executor.settings.temp_root)
+    assert record.status == "succeeded"
+    assert len(record.stdout.encode()) <= 32
+    assert record.output_truncated is True
 
 
 async def test_write_engine_connection_loss_does_not_confirm_external_stop(execution, monkeypatch):

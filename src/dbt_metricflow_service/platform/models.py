@@ -44,7 +44,7 @@ class PlatformQueryRequest(BaseModel):
     end_time: datetime | None = Field(default=None, alias=strings.END_TIME_ALIAS)
     order_by: list[str] = Field(default_factory=list, alias=strings.ORDER_BY_ALIAS)
     limit: int = Field(default=1000, ge=1, le=10_000)
-    dataset_resource_id: str | None = Field(default=None, alias=strings.DATASET_RESOURCE_ID_ALIAS)
+    selector: str | None = None
     dimension: str | None = None
 
 

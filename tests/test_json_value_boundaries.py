@@ -6,10 +6,10 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
+from dbt_metricflow_service.delegates.metricflow.queries import _json_cell
 from dbt_metricflow_service.models.native import NativeNode
 from dbt_metricflow_service.models.queries import SelectedFilter
 from dbt_metricflow_service.platform.models import DataQueryResult
-from dbt_metricflow_service.platform.queries import _json_cell
 
 
 def test_native_extensions_round_trip_recursive_json_without_coercion():

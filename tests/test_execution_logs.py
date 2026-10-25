@@ -108,3 +108,27 @@ async def test_sdk_exception_without_events_is_logged_and_redacted(tmp_path, mon
     assert "invalid model: ***" in captured[-1].message
     assert "invalid model: ***" in record.stdout
     assert secret not in repr(captured)
+
+
+async def test_execution_paths_are_removed_before_log_sink_and_diagnostics(tmp_path, monkeypatch):
+    project, profiles = tmp_path / "project", tmp_path / "profiles"
+    captured = []
+
+    def invoke(self, args):
+        for callback in self.callbacks:
+            callback(msg_from_base_event(JinjaLogInfo(msg=f"compiled {project / 'target/compiled/orders.sql'}")))
+        logging.getLogger("dbt.adapter").warning("profile %s/profiles.yml", profiles.as_posix())
+        return SimpleNamespace(success=False, exception=RuntimeError(repr(str(project)) + " models/orders.sql"))
+
+    monkeypatch.setattr(dbtRunner, "invoke", invoke)
+    environment = {"DBT_PROJECT_DIR": str(project), "DBT_PROFILES_DIR": str(profiles),
+                   "DBT_TARGET_PATH": str(project / "target")}
+    record = await run_dbt("project", CommandSpec(("dbt", "build"), project, environment, True),
+                           5, 4096, authorize, log_sink=captured.append)
+    assert record.status == JobStatus.FAILED
+    for text in [record.stdout, *(entry.message for entry in captured)]:
+        assert str(tmp_path) not in text
+        assert tmp_path.as_posix() not in text
+        assert repr(str(project))[1:-1] not in text
+    assert "orders.sql" in record.stdout
+    assert "profiles.yml" in record.stdout

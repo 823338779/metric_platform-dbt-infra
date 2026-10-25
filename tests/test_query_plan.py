@@ -8,13 +8,8 @@ from dbt_metricflow_service.models.payloads import DimensionOption
 from dbt_metricflow_service.models.queries import QueryRequest
 from dbt_metricflow_service.platform.dimensions import DimensionBinding, map_available_dimensions
 from dbt_metricflow_service.platform.models import DimensionQueryResult
-from tests.catalog_helpers import resource
 
 RUN = "00000000-0000-0000-0000-000000000001"
-RESOURCES = {
-    "metric.revenue": resource("metric.revenue", name="revenue"),
-    "dataset.orders": resource("dataset.orders"),
-}
 DIMENSIONS = [DimensionOption.model_validate({
     "optionId": "region", "displayName": "Region",
     "dimensionType": "categorical", "valueType": "string", "granularities": [], "operators": ["IN"],
@@ -25,32 +20,32 @@ MAPPING = {"region": DimensionBinding("order__region", {})}
 @pytest.mark.parametrize("mode", ["QUERY", "EXPLAIN"])
 def test_query_maps_selected_ids_filters_and_order(mode):
     request = QueryRequest(
-        mode=mode, metricResourceIds=["metric.revenue", "metric.revenue"],
+        mode=mode, metrics=["revenue", "revenue"],
         groupBy=[{"optionId": "region"}],
         filters=[{"optionId": "region", "operator": "IN", "value": ["east", None]}],
-        orderBy=[{"fieldId": "metric.revenue", "direction": "DESC"}, {"fieldId": "region", "direction": "ASC"}],
+        orderBy=[{"fieldId": "revenue", "direction": "DESC"}, {"fieldId": "region", "direction": "ASC"}],
         startTime="2026-10-01T00:00:00", limit=12,
     )
-    plan = compile_query(request, RUN, RESOURCES, DIMENSIONS, MAPPING).model_dump(mode="json", by_alias=True)
+    plan = compile_query(request, RUN, DIMENSIONS, MAPPING).model_dump(mode="json", by_alias=True)
     assert plan == {
         "runId": RUN, "mode": mode, "metrics": ["revenue"],
         "groupBy": ["order__region"],
         "filters": [{"field": "order__region", "operator": "IN", "value": ["east", None]}],
         "orderBy": ["-revenue", "order__region"], "startTime": "2026-10-01T00:00:00", "endTime": None,
-        "limit": 12, "datasetResourceId": None, "dimension": None,
+        "limit": 12, "selector": None, "dimension": None,
     }
 
 
 def test_preview_and_dimension_values_keep_their_fixed_selection():
-    preview = QueryRequest(mode="PREVIEW", datasetResourceId="dataset.orders")
-    plan = compile_query(preview, RUN, RESOURCES, [], {})
-    assert plan.dataset_resource_id == "dataset.orders"
+    preview = QueryRequest(mode="PREVIEW", selector="orders")
+    plan = compile_query(preview, RUN, [], {})
+    assert plan.selector == "orders"
     assert plan.metrics == []
     values = QueryRequest(
         mode="DIMENSION_VALUES",
-        metricResourceIds=["metric.revenue"], dimensionOptionId="region",
+        metrics=["revenue"], dimensionOptionId="region",
     )
-    assert compile_query(values, RUN, RESOURCES, DIMENSIONS, MAPPING).dimension == "order__region"
+    assert compile_query(values, RUN, DIMENSIONS, MAPPING).dimension == "order__region"
 
 
 @pytest.mark.parametrize(("extra", "code"), [
@@ -60,9 +55,9 @@ def test_preview_and_dimension_values_keep_their_fixed_selection():
     ({"startTime": "2026-10-02", "endTime": "2026-10-01"}, "INVALID_TIME_RANGE"),
 ])
 def test_unavailable_selections_keep_public_errors(extra, code):
-    request = QueryRequest(mode="QUERY", metricResourceIds=["metric.revenue"], **extra)
+    request = QueryRequest(mode="QUERY", metrics=["revenue"], **extra)
     with pytest.raises(ServiceError) as failure:
-        compile_query(request, RUN, RESOURCES, DIMENSIONS, MAPPING)
+        compile_query(request, RUN, DIMENSIONS, MAPPING)
     assert failure.value.error.code == code
 
 
@@ -80,7 +75,7 @@ def test_base_time_option_changes_grouping_and_order_with_selected_grain(grain):
         "allowedFilters": ["="],
     }
     available, mapping = map_available_dimensions(
-        RUN, ["metric.revenue"], DimensionQueryResult.model_validate(native)
+        RUN, ["revenue"], DimensionQueryResult.model_validate(native)
     )
     assert len(available.dimensions) == 1
     option = available.dimensions[0]
@@ -88,17 +83,17 @@ def test_base_time_option_changes_grouping_and_order_with_selected_grain(grain):
     assert option.granularities == ["day", "month"]
     selection = {"optionId": option.option_id, **({"grain": grain} if grain else {})}
     request = QueryRequest(
-        mode="QUERY", metricResourceIds=["metric.revenue"], groupBy=[selection],
+        mode="QUERY", metrics=["revenue"], groupBy=[selection],
         orderBy=[{"fieldId": option.option_id, "direction": "DESC"}],
     )
-    plan = compile_query(request, RUN, RESOURCES, available.dimensions, mapping)
+    plan = compile_query(request, RUN, available.dimensions, mapping)
     expected = "metric_time__" + (grain or "day")
     assert plan.group_by == [expected]
     assert plan.order_by == ["-" + expected]
     # 服务未声明的粒度不能靠前端拼接绕过校验。
     request.group_by[0].grain = "hour"
     with pytest.raises(ServiceError) as failure:
-        compile_query(request, RUN, RESOURCES, available.dimensions, mapping)
+        compile_query(request, RUN, available.dimensions, mapping)
     assert failure.value.error.code == "INVALID_DIMENSION_OPTION"
 
 
@@ -115,7 +110,7 @@ def test_metric_time_grains_form_one_option_even_without_a_native_base_dimension
         "allowedFilters": ["="],
     }
     available, mapping = map_available_dimensions(
-        RUN, ["metric.revenue"], DimensionQueryResult.model_validate(native)
+        RUN, ["revenue"], DimensionQueryResult.model_validate(native)
     )
     assert len(available.dimensions) == 3
     option = available.dimensions[-1]

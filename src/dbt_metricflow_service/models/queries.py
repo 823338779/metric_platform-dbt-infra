@@ -15,7 +15,7 @@ from .builds import Contract
 from .payloads import DimensionOption, NormalizedTimeRange, ResultColumn
 
 INVALID_PREVIEW_FIELDS_MESSAGE: Final[str] = 'invalid PREVIEW fields'
-METRICS_REQUIRED_MESSAGE: Final[str] = 'metrics are required and datasetResourceId is not allowed'
+METRICS_REQUIRED_MESSAGE: Final[str] = 'metrics are required and selector is not allowed'
 DIMENSION_OPTION_REQUIRED_MESSAGE: Final[str] = 'dimensionOptionId is required'
 DIMENSION_OPTION_MODE_MESSAGE: Final[str] = 'dimensionOptionId only belongs to DIMENSION_VALUES'
 
@@ -43,19 +43,19 @@ class SelectedOrder(Contract):
 
 
 class AvailableDimensionsRequest(Contract):
-    metric_resource_ids: list[str] = Field(min_length=1, max_length=100, description="指标资源集合")
+    metrics: list[str] = Field(min_length=1, max_length=100, description="MetricFlow 原生指标名集合")
 
 
 class QueryRequest(Contract):
     mode: QueryMode = Field(description="受控的引擎查询模式")
-    metric_resource_ids: list[str] = Field(default_factory=list, max_length=100, description="指标资源集合")
+    metrics: list[str] = Field(default_factory=list, max_length=100, description="MetricFlow 原生指标名集合")
     group_by: list[SelectedDimension] = Field(default_factory=list, max_length=100, description="有序分组")
     filters: list[SelectedFilter] = Field(default_factory=list, max_length=100, description="类型化过滤条件")
     start_time: datetime | None = Field(default=None, description="起点，按构建业务时区解释")
     end_time: datetime | None = Field(default=None, description="终点，按构建业务时区解释")
     order_by: list[SelectedOrder] = Field(default_factory=list, max_length=100, description="有序排序条件")
     limit: int = Field(default=1000, ge=1, le=10000, description="最多返回的结果行数")
-    dataset_resource_id: str | None = Field(default=None, description="PREVIEW 的数据集身份")
+    selector: str | None = Field(default=None, description="dbt show 的原生节点选择器，必须匹配一个非 seed 节点")
     dimension_option_id: str | None = Field(default=None, description="DIMENSION_VALUES 的维度选项")
 
     @model_validator(mode=strings.VALIDATOR_AFTER)
@@ -63,8 +63,8 @@ class QueryRequest(Contract):
         # 先拒绝引擎会忽略的模式字段，选项归属在应用层查固定目录确认。
         if self.mode == QueryMode.PREVIEW:
             if (
-                not self.dataset_resource_id
-                or self.metric_resource_ids
+                not self.selector
+                or self.metrics
                 or self.group_by
                 or self.filters
                 or self.order_by
@@ -73,7 +73,7 @@ class QueryRequest(Contract):
                 or self.dimension_option_id
             ):
                 raise ValueError(INVALID_PREVIEW_FIELDS_MESSAGE)
-        elif not self.metric_resource_ids or self.dataset_resource_id:
+        elif not self.metrics or self.selector:
             raise ValueError(METRICS_REQUIRED_MESSAGE)
         if self.mode == QueryMode.DIMENSION_VALUES:
             if not self.dimension_option_id:
@@ -85,7 +85,7 @@ class QueryRequest(Contract):
 
 class AvailableDimensionsView(Contract):
     build_id: UUID = Field(description="固定构建身份")
-    metric_resource_ids: list[str] = Field(description="规范化指标集合")
+    metrics: list[str] = Field(description="规范化指标集合")
     dimensions: list[DimensionOption] = Field(description="当前构建及所选指标集合可用的维度")
 
 

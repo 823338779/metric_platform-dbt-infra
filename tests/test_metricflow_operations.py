@@ -1,6 +1,5 @@
 """Independent dimension/data APIs keep MetricFlow semantics and error boundaries."""
 
-from contextlib import nullcontext
 from datetime import datetime
 from decimal import Decimal
 from types import SimpleNamespace
@@ -8,7 +7,9 @@ from uuid import uuid4
 
 import pytest
 
-from dbt_metricflow_service.platform import metricflow
+from dbt_metricflow_service.delegates.clients import dbt_client
+from dbt_metricflow_service.delegates.clients import metric_flow_client as metricflow
+from dbt_metricflow_service.delegates.clients.dbt_client import DbtClient
 from dbt_metricflow_service.platform.models import PlatformQueryRequest
 
 
@@ -62,11 +63,13 @@ def engine_context(monkeypatch):
         ),
     )
     monkeypatch.setattr(metricflow, "CLIConfiguration", lambda: configuration)
+    monkeypatch.setattr(DbtClient, "write_semantic_manifest", lambda *_: None)
     return engine, configuration, calls
 
 
 def test_dimensions_have_a_dedicated_result_and_do_not_query_rows(tmp_path, engine_context):
-    result = metricflow.execute_available_dimensions(tmp_path, tmp_path, ("orders",))
+    client = metricflow.MetricFlowClient(b"manifest", project=tmp_path, profiles=tmp_path)
+    result = client.available_dimensions(("orders",))
     assert result.metrics[0].name == "orders"
     assert result.dimensions[0].token == "order__region"
     assert result.time_dimensions
@@ -82,7 +85,7 @@ def test_data_request_preserves_filters_time_order_and_limit(tmp_path, engine_co
         startTime=datetime(2026, 1, 1), endTime=datetime(2026, 2, 1),
         filters=[{"field": "order__region", "operator": "IN", "value": ["O'Reilly", "East"]}],
     )
-    result = metricflow.execute_programmatic(tmp_path, tmp_path, request)
+    result = metricflow.MetricFlowClient(b"manifest", project=tmp_path, profiles=tmp_path).query(request)
     assert not hasattr(result, "dimensions")
     kind, native = engine_context[2][-1]
     assert kind == ("explain" if mode == "EXPLAIN" else "query")
@@ -107,76 +110,78 @@ def test_data_request_preserves_filters_time_order_and_limit(tmp_path, engine_co
 
 def test_only_dimension_selection_errors_are_business_errors(tmp_path, engine_context):
     with pytest.raises(metricflow.InvalidDimensionsRequest):
-        metricflow.execute_available_dimensions(tmp_path, tmp_path, ("missing",))
-    with pytest.raises(ValueError) as failure:
-        metricflow.execute_programmatic(tmp_path, tmp_path, PlatformQueryRequest(
-            runId=uuid4(), mode="QUERY", metrics=["missing"],
-        ))
-    assert not isinstance(failure.value, metricflow.InvalidDimensionsRequest)
+        metricflow.MetricFlowClient(b"manifest", project=tmp_path, profiles=tmp_path).available_dimensions(("missing",))
 
 
-@pytest.mark.parametrize("operation", ["execute_available_dimensions", "execute_programmatic"])
+
+@pytest.mark.parametrize("operation", ["available_dimensions", "query"])
 def test_initialization_errors_are_not_reclassified(tmp_path, engine_context, operation):
     def fail(**kwargs):
         raise ValueError("connection initialization")
     engine_context[1].setup = fail
-    argument = ("orders",) if operation == "execute_available_dimensions" else PlatformQueryRequest(
+    argument = ("orders",) if operation == "available_dimensions" else PlatformQueryRequest(
         runId=uuid4(), mode="QUERY", metrics=["orders"],
     )
     with pytest.raises(ValueError, match="connection initialization") as failure:
-        getattr(metricflow, operation)(tmp_path, tmp_path, argument)
+        getattr(metricflow.MetricFlowClient(b"manifest", project=tmp_path, profiles=tmp_path), operation)(argument)
     assert not isinstance(failure.value, metricflow.InvalidDimensionsRequest)
 
 
-def test_data_query_validates_dimensions_before_execution(tmp_path, engine_context):
-    with pytest.raises(ValueError):
-        metricflow.execute_programmatic(tmp_path, tmp_path, PlatformQueryRequest(
-            runId=uuid4(), mode="QUERY", metrics=["orders"], groupBy=["unknown"],
-        ))
-    assert not any(kind == "query" for kind, _ in engine_context[2])
+@pytest.mark.parametrize("mode", ["QUERY", "EXPLAIN", "DIMENSION_VALUES"])
+def test_query_goes_directly_to_engine_without_metadata_preflight(tmp_path, engine_context, mode):
+    engine, _, calls = engine_context
+
+    def forbid(**kwargs):
+        pytest.fail("query must not discover metrics or dimensions before execution")
+
+    engine.list_metrics = engine.list_dimensions = forbid
+    result = metricflow.MetricFlowClient(b"manifest", project=tmp_path, profiles=tmp_path).query(PlatformQueryRequest(
+        runId=uuid4(), mode=mode, metrics=["unknown_metric"], groupBy=["unknown_dimension"],
+        dimension="unknown_dimension", orderBy=["-unknown_dimension"],
+    ))
+    kind, native = calls[-1]
+    assert kind == ("explain" if mode == "EXPLAIN" else "query")
+    assert list(native.metric_names) == ["unknown_metric"]
+    assert list(native.group_by_names) == ["unknown_dimension"]
+    assert list(native.order_by_names) == ["-unknown_dimension"]
+    assert sum(kind in {"query", "explain"} for kind, _ in calls) == 1
+    assert result.sql if mode == "EXPLAIN" else result.rows
 
 
 def test_missing_data_result_is_an_error(tmp_path, engine_context):
     engine_context[0].query = lambda _: SimpleNamespace(result_df=None)
     with pytest.raises(ValueError, match=metricflow.METRICFLOW_RESULT_MISSING_MESSAGE):
-        metricflow.execute_programmatic(tmp_path, tmp_path, PlatformQueryRequest(
+        metricflow.MetricFlowClient(b"manifest", project=tmp_path, profiles=tmp_path).query(PlatformQueryRequest(
             runId=uuid4(), mode="QUERY", metrics=["orders"],
         ))
 
 
 @pytest.mark.parametrize("rows,truncated", [([], False), ([(1,), (2,)], True)])
-def test_preview_uses_adapter_and_preserves_empty_columns(tmp_path, monkeypatch, engine_context, rows, truncated):
+def test_preview_uses_dbt_show_and_preserves_empty_columns(tmp_path, monkeypatch, engine_context, rows, truncated):
     engine, configuration, calls = engine_context
-    import json
-
-    target = tmp_path / "target"
-    target.mkdir()
-    (target / "manifest.json").write_text(json.dumps({"nodes": {"table.orders": {
-        "resource_type": "model", "config": {"materialized": "table"}, "relation_name": '\"fixed\".\"orders\"',
-    }}}))
-    configuration.dbt_artifacts.adapter.connection_named = lambda _: nullcontext()
-
-    def execute(sql, fetch):
-        assert sql == 'select * from "fixed"."orders" limit 2'
-        assert fetch is True
-        class Table(list):
-            column_names = ["orders"]
-        table = Table(rows)
-        table.rows = rows
-        return None, table
-
-    configuration.dbt_artifacts.adapter.execute = execute
+    monkeypatch.setattr(DbtClient, "_manifest", property(lambda _: "native manifest"))
+    class Table(list):
+        column_names = ["orders"]
+    table = Table(rows)
+    table.rows = rows
+    def invoke(args):
+        assert args[0] == "show"
+        assert args[args.index("--limit") + 1] == "2"
+        assert "resource_type:seed" in args
+        return SimpleNamespace(success=True, result=SimpleNamespace(results=[SimpleNamespace(agate_table=table)]))
+    def runner(*, manifest, callbacks):
+        assert manifest == "native manifest"
+        return SimpleNamespace(invoke=invoke)
+    monkeypatch.setattr(dbt_client, "dbtRunner", runner)
     engine.list_metrics = lambda **_: pytest.fail("preview requested metric metadata")
-    result = metricflow.execute_programmatic(tmp_path, tmp_path, PlatformQueryRequest(
-        runId=uuid4(), mode="PREVIEW", datasetResourceId="table.orders", limit=1,
-    ))
+    result = DbtClient(b"manifest").preview("table.orders", project=tmp_path, profiles=tmp_path, limit=1)
     assert result.rows == ([list(rows[0])] if rows else [])
     assert result.truncated is truncated
     assert result.columns[0].type == ("int" if rows else "unknown")
 
 
 @pytest.mark.parametrize("operation", [
-    "execute_available_dimensions", "execute_programmatic",
+    "available_dimensions", "query",
 ])
 def test_starrocks_uses_adapter_backed_engine(tmp_path, monkeypatch, engine_context, operation):
     engine, configuration, _ = engine_context
@@ -197,10 +202,29 @@ def test_starrocks_uses_adapter_backed_engine(tmp_path, monkeypatch, engine_cont
     configuration.mf = None
     monkeypatch.setattr(metricflow, "StarRocksSqlClient", sql_client)
     monkeypatch.setattr(metricflow, "MetricFlowEngine", create_engine)
-    if operation == "execute_available_dimensions":
-        metricflow.execute_available_dimensions(tmp_path, tmp_path, ("orders",))
-    elif operation == "execute_programmatic":
-        metricflow.execute_programmatic(tmp_path, tmp_path, PlatformQueryRequest(
+    if operation == "available_dimensions":
+        metricflow.MetricFlowClient(b"manifest", project=tmp_path, profiles=tmp_path).available_dimensions(("orders",))
+    elif operation == "query":
+        metricflow.MetricFlowClient(b"manifest", project=tmp_path, profiles=tmp_path).query(PlatformQueryRequest(
             runId=uuid4(), mode="QUERY", metrics=["orders"],
         ))
     assert clients == [client]
+
+
+@pytest.mark.parametrize("mode", ["QUERY", "EXPLAIN"])
+def test_native_query_errors_keep_business_error_classification(tmp_path, engine_context, mode):
+    from metricflow_semantics.errors.error_classes import InvalidQueryException
+
+    calls = []
+    failure = InvalidQueryException("unknown native metric")
+
+    def reject(request):
+        calls.append(request)
+        raise failure
+
+    engine_context[0].query = engine_context[0].explain = reject
+    with pytest.raises(metricflow.InvalidDimensionsRequest) as caught:
+        metricflow.MetricFlowClient(b"manifest", project=tmp_path, profiles=tmp_path).query(PlatformQueryRequest(
+            runId=uuid4(), mode=mode, metrics=["missing"]))
+    assert caught.value.__cause__ is failure
+    assert len(calls) == 1

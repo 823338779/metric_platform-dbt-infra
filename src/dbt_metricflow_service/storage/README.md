@@ -23,9 +23,9 @@ Session 关闭 autoflush，涉及锁顺序或外键依赖时显式 flush。数�
 
 字段类型、默认值、可空性及主键由真实 PostgreSQL 初始化回归校验。表约束、索引和触发器由 schema.sql 定义，不使用 `create_all()` 或运行时反射补建结构。UUID 以字符串传递，JSON 的 `None` 保持 SQL NULL 语义。
 
-任务只包含构建和清理，完成事务封存产物并更新状态，不保存通用结果表。查询全程在内存中执行，以共享会话锁阻止并发清理，不产生持久任务。目录以封存的 Manifest 为唯一来源，在读取时派生资源与血缘；产物集合仅记录来源与完整性字段，不另存完整目录或重复元数据 JSON。旧分支、发布关系和默认输出复用表已移除。
+任务只包含构建和清理，完成事务封存产物并更新状态，不保存通用结果表。查询全程在内存中执行，以共享会话锁阻止并发清理，不产生持久任务。目录以封存的 Manifest 为唯一来源，仅由 ManifestCapture 传递原文，再由 dbt SDK 提供原生节点与依赖；产物集合仅记录来源与完整性字段，不另存完整目录或重复元数据 JSON。旧分支、发布关系和默认输出复用表已移除。
 
-构建输出的 `target/manifest.json` 来自唯一一次 `dbt build` 返回的内存 Manifest，使用 dbt 的 WritableManifest 和 JSON 编码器，持久化不读取本地 Manifest。构建成功后仅统一执行副本的 target-path，不注入 schema/alias 宏。完成事务只要求 Manifest，不再要求 catalog.json、人工验证标记或查询探测证明。其他已有产物仍从工作目录捕获；大小、摘要、租约及事务封存规则不变。
+构建输出的 `target/manifest.json` 来自唯一一次 `dbt build` 返回的内存 Manifest，使用 dbt 的 WritableManifest 和 JSON 编码器，持久化不读取本地 Manifest。构建成功后仅统一执行副本的 target-path，不注入 schema/alias 宏。完成事务只要求 Manifest，不再要求 catalog.json、人工验证标记或查询探测证明。ManifestCapture.persist 负责将内存内容与对应产物路径交给通用 memory_files 接口；存储层不再单独识别 manifest_json 参数。其他已有产物仍从工作目录捕获；大小、摘要、租约及事务封存规则不变。
 
 Manifest 使用 UTF-8 紧凑 JSON（不转义中文、去掉分隔符空格），入库时采用 gzip level 6 压缩，固定 `mtime=0`。仅在压缩结果更小时保存 `codec=gzip`，否则保留 `raw`。`raw_size`、`raw_sha256` 和集合摘要按压缩前内容计算，`stored_size` 记录实际存储字节数；容量限制仍按原始内容执行。`read_file` 和 `materialize` 按 codec 自动解压并校验，旧 raw 记录继续可读，无需迁移；已有产物不自动重写。
 

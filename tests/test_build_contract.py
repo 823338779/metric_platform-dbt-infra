@@ -71,28 +71,28 @@ def test_invalid_build_inputs(changes):
 def test_query_modes_are_strict_and_build_is_outside_body():
     from dbt_metricflow_service.models.queries import QueryRequest
 
-    query = {"mode": "QUERY", "metricResourceIds": ["metric.revenue"]}
+    query = {"mode": "QUERY", "metrics": ["revenue"]}
     assert QueryRequest.model_validate(query).limit == 1000
     for changed in (
         {"limit": 10001},
         {"offset": 0},
         {"buildId": SHA},
         {"releaseId": SHA},
-        {"datasetResourceId": "table.a"},
-        {"metricResourceIds": []},
+        {"selector": "table.a"},
+        {"metrics": []},
     ):
         with pytest.raises(ValidationError):
             QueryRequest.model_validate({**query, **changed})
     with pytest.raises(ValidationError):
-        QueryRequest.model_validate({**query, "mode": "PREVIEW", "datasetResourceId": "table.a"})
+        QueryRequest.model_validate({**query, "mode": "PREVIEW", "selector": "table.a"})
 
 
 def test_available_dimensions_require_nonempty_metrics_without_task_key():
     from dbt_metricflow_service.models.queries import AvailableDimensionsRequest
 
     with pytest.raises(ValidationError):
-        AvailableDimensionsRequest.model_validate({"metricResourceIds": []})
-    assert AvailableDimensionsRequest.model_validate({"metricResourceIds": ["m", "m"]})
+        AvailableDimensionsRequest.model_validate({"metrics": []})
+    assert AvailableDimensionsRequest.model_validate({"metrics": ["m", "m"]})
 
 
 def test_exchange_fixture_matches_models():

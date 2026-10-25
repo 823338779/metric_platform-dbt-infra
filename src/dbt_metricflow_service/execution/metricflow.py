@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Generic, TypeVar
@@ -11,6 +11,8 @@ from uuid import uuid4
 
 from metricflow_semantics.errors.error_classes import DimensionValueMappingError
 
+from dbt_metricflow_service import constants as strings
+from dbt_metricflow_service.delegates.clients import InvalidDimensionsRequest
 from dbt_metricflow_service.models.artifacts import Contract
 
 from .embedded import PROFILES_ENV, PROJECT_ENV, create_output, engine_environment, run_serialized
@@ -35,7 +37,7 @@ class MetricFlowResult(Generic[ResultT]):
 
     # 记录执行状态与日志；MetricFlow 不设置命令退出码。
     record: JobRecord
-    # 成功时直接返回的业务对象，失败或超时时为空。
+    # 成功时直接返回的业务对象，失败时为空。
     payload: ResultT | None = field(default=None, repr=False)
     # 可向调用方公开的业务错误码，不包含原始异常文本。
     error_code: str | None = None
@@ -45,15 +47,11 @@ async def run_metricflow(
     project: str, request: MetricFlowRequest[ResultT], timeout_seconds: float, max_output_bytes: int,
     before_start: Callable[[], Awaitable[None]],
 ) -> MetricFlowResult[ResultT]:
-    """在共享串行保护下执行 MetricFlow；超时结果不发布业务数据。"""
-    result, timed_out = await run_serialized(
-        lambda: invoke_metricflow(project, request, max_output_bytes), timeout_seconds, before_start,
+    """在共享串行保护下执行 MetricFlow，等待引擎返回。"""
+    # timeout_seconds 仅保留调用兼容。
+    return await run_serialized(
+        lambda: invoke_metricflow(project, request, max_output_bytes), before_start,
     )
-    if timed_out:
-        return replace(result, record=result.record.with_outcome(
-            status=JobStatus.TIMED_OUT, exit_code=result.record.exit_code, stderr=result.record.stderr,
-        ), payload=None)
-    return result
 
 
 def invoke_metricflow(
@@ -67,15 +65,13 @@ def invoke_metricflow(
     error_type = ""
     try:
         with engine_environment(request.environment, output):
-            from ..platform.metricflow import INVALID_DIMENSIONS_CODE, InvalidDimensionsRequest
-
             # 业务错误在 MetricFlow 边界识别，成功结果保持原始内存对象。
             try:
                 payload = request.operation(
                     Path(request.environment[PROJECT_ENV]), Path(request.environment[PROFILES_ENV]),
                 )
             except (InvalidDimensionsRequest, DimensionValueMappingError):
-                error_code = INVALID_DIMENSIONS_CODE
+                error_code = strings.INVALID_QUERY
             else:
                 status = JobStatus.SUCCEEDED
     except Exception as error:

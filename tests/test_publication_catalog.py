@@ -41,7 +41,29 @@ def package():
         "metric.sample.orders": ["semantic_model.sample.orders"],
     }
     manifest["child_map"] = {"metric.sample.orders": ["metric.sample.net"]}
-    return manifest
+    from dbt.artifacts.schemas.manifest import WritableManifest
+    from dbt.contracts.graph.nodes import Metric, ModelNode, SemanticModel
+    manifest["metrics"]["metric.sample.net"]["depends_on"] = {
+        "nodes": ["metric.sample.orders", "metric.sample.returns"]}
+    for section, cls, resource_type in (("nodes", ModelNode, "model"),
+                                         ("semantic_models", SemanticModel, "semantic_model"),
+                                         ("metrics", Metric, "metric")):
+        for key, value in manifest[section].items():
+            value.update(unique_id=key, resource_type=resource_type, package_name="sample", path="orders.yml",
+                         original_file_path="models/orders.yml", fqn=["sample", value["name"]], created_at=1.0)
+            if section == "nodes":
+                value["checksum"] = {"name": "sha256", "checksum": "fixture"}
+            elif section == "semantic_models":
+                value.update(model="{{ ref('" + value["name"] + "') }}", node_relation=None)
+            else:
+                value.setdefault("label", value["name"])
+                value.setdefault("description", "")
+            manifest[section][key] = cls.from_dict(value).to_resource().to_dict(omit_none=False)
+    for section in ("sources", "macros", "docs", "exposures", "groups", "selectors", "disabled",
+                    "group_map", "saved_queries", "unit_tests"):
+        manifest.setdefault(section, {})
+    manifest["metadata"].update(generated_at="2026-10-25T00:00:00Z", dbt_version="1.12.0-a1")
+    return WritableManifest.from_dict(manifest).to_dict(omit_none=False, context={"artifact": True})
 
 
 
@@ -52,44 +74,28 @@ def service_for(manifest):
 
 
 def build(manifest=None):
-    return service_for(package() if manifest is None else manifest).read(uuid4())[1]
+    return service_for(package() if manifest is None else manifest).list(uuid4())
 
 
-def test_catalog_returns_native_sections_without_resource_translation():
+def test_catalog_returns_dbt_sdk_serialization():
+    from dbt.artifacts.schemas.manifest import WritableManifest
     manifest = package()
-    manifest["metrics"]["metric.sample.net"]["vendor_extension"] = {"raw_key": None}
-    manifest["macros"] = {"macro.sample.secret": {"macro_sql": "not catalog data"}}
-    result = service_for(manifest).list(uuid4())
-    assert result == {key: manifest.get(key, {}) for key in (
-        "metadata", "metrics", "semantic_models", "nodes", "sources", "parent_map", "child_map")}
-    assert result["metrics"]["metric.sample.net"] == manifest["metrics"]["metric.sample.net"]
-    assert "dimensions" not in result
-    assert result["semantic_models"]["semantic_model.sample.orders"]["dimensions"] == [{
-        "name": "region", "type": "categorical"}]
+    assert service_for(manifest).list(uuid4()) == WritableManifest.from_dict(manifest).to_dict(
+        omit_none=False, context={"artifact": True})
 
 
 def test_detail_and_native_details_return_exact_native_object():
+    from dbt_metricflow_service.delegates.clients.dbt_client import DbtClient
     manifest = package()
     service = service_for(manifest)
+    native = DbtClient(json.dumps(manifest).encode())._manifest
     for section in ("metrics", "nodes", "semantic_models"):
         key = next(iter(manifest[section]))
-        assert service.resource(uuid4(), key) == manifest[section][key]
-        assert service.resource(uuid4(), key, "native-details") == manifest[section][key]
+        assert service.resource(uuid4(), key) == native.expect(key).to_dict(omit_none=False)
+        assert service.resource(uuid4(), key, "native-details") == native.expect(key).to_dict(omit_none=False)
     with pytest.raises(ServiceError) as error:
         service.resource(uuid4(), "semantic_model.sample.orders.dimension.region")
     assert error.value.status == 404
-
-
-def test_lineage_returns_native_maps_without_inference():
-    manifest = package()
-    manifest["parent_map"]["metric.sample.orders"] = ["semantic_model.sample.orders", "model.sample.ephemeral"]
-    service = service_for(manifest)
-    assert service.resource(uuid4(), "metric.sample.orders", "lineage") == {
-        "parent_map": {"metric.sample.orders": manifest["parent_map"]["metric.sample.orders"]},
-        "child_map": {"metric.sample.orders": ["metric.sample.net"]},
-    }
-    del manifest["parent_map"]["metric.sample.net"]
-    assert service.resource(uuid4(), "metric.sample.net", "lineage")["parent_map"] == {}
 
 
 def test_catalog_service_reads_only_saved_manifest():
@@ -99,14 +105,39 @@ def test_catalog_service_reads_only_saved_manifest():
         return json.dumps(package()).encode()
     stored = SimpleNamespace(build_status="SUCCEEDED", output_set_id="historical")
     service = CatalogService(None, SimpleNamespace(read_file=read_file))
-    assert service.read_build(stored) == package()
+    assert json.loads(service.read_build(stored)) == package()
     assert calls == [("historical", "target/manifest.json")]
+
+
+def test_source_lookup_uses_database_snapshot_relative_path_without_local_io(monkeypatch):
+    from pathlib import Path
+
+    content = json.dumps(package()).encode()
+    calls = []
+
+    def read_file(set_id, path):
+        calls.append((set_id, path))
+        return content if set_id == "output" else b"models: []"
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("historical source lookup must not open a local file")
+
+    stored = SimpleNamespace(build_status="SUCCEEDED", output_set_id="output", run_id="run")
+    builds = SimpleNamespace(get=lambda _: stored, jobs=SimpleNamespace(
+        get=lambda _: SimpleNamespace(input_set_id="source"),
+    ))
+    service = CatalogService(builds, SimpleNamespace(read_file=read_file))
+    monkeypatch.setattr(Path, "open", forbidden)
+    source = service.resource(uuid4(), "model.sample.orders", "source")
+    assert source.path == "models/orders.yml"
+    assert source.content == "models: []"
+    assert calls == [("output", "target/manifest.json"), ("source", "models/orders.yml")]
 
 
 @pytest.mark.parametrize("content", [b"broken-json", b"[]", b"{}"])
 def test_catalog_service_rejects_corrupt_manifest(content):
     stored = SimpleNamespace(build_status="SUCCEEDED", output_set_id="historical")
-    service = CatalogService(None, SimpleNamespace(read_file=lambda *_: content))
+    service = CatalogService(SimpleNamespace(get=lambda _: stored), SimpleNamespace(read_file=lambda *_: content))
     with pytest.raises(ServiceError) as error:
-        service.read_build(stored)
+        service.list(uuid4())
     assert error.value.status == 503

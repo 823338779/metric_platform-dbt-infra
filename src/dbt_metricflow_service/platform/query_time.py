@@ -22,7 +22,7 @@ def normalize_query_time(request: QueryRequest, timezone: str) -> QueryRequest:
 
 def canonical_query(request: QueryRequest) -> QueryRequest:
     result = request.model_copy()
-    result.metric_resource_ids = sorted(set(request.metric_resource_ids))
+    result.metrics = sorted(set(request.metrics))
     return result
 
 

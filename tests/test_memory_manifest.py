@@ -18,6 +18,7 @@ from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.entities import ArtifactFile, ArtifactSet
 from tests.resource_helpers import make_resource_project
 from tests.schema_helpers import isolated_database
+from tests.test_manifest_capture import manifest_object
 
 
 def test_runner_returns_final_manifest_for_parse_build_and_docs(tmp_path, monkeypatch):
@@ -102,7 +103,9 @@ async def test_real_docs_manifest_roundtrips_through_database_without_disk_captu
         assert capture.manifest.nodes
     content = capture.content
     disk = project / "target/manifest.json"
-    assert json.loads(content) == json.loads(disk.read_bytes())
+    assert json.loads(content) == capture.manifest.writable_manifest().to_dict(
+        omit_none=False, context={"artifact": True, "portable": True},
+    )
     original_open = Path.open
 
     def guarded_open(path, *args, **kwargs):
@@ -115,12 +118,12 @@ async def test_real_docs_manifest_roundtrips_through_database_without_disk_captu
         with db.transaction() as connection:
             connection.exec_driver_sql("INSERT INTO runtime_project(project_id) VALUES ('memory')")
         store = ArtifactStore(db)
-        identifier = store.capture("memory", project, kind="EXECUTION", manifest_json=content)
+        identifier = capture.persist(store, "memory", project)
         assert store.read_file(identifier, "target/manifest.json") == content
         from dbt_metricflow_service.application.catalog import CatalogService
 
-        catalog = CatalogService(None, store).read_build(SimpleNamespace(
-            build_status="SUCCEEDED", output_set_id=identifier))
+        catalog = json.loads(CatalogService(None, store).read_build(SimpleNamespace(
+            build_status="SUCCEEDED", output_set_id=identifier)))
         assert catalog["metrics"]
         assert any(item["dimensions"] for item in catalog["semantic_models"].values())
         assert catalog["parent_map"]
@@ -143,7 +146,9 @@ def test_manifest_compression_preserves_integrity_and_raw_limits(tmp_path, paylo
         with db.transaction() as connection:
             connection.exec_driver_sql("INSERT INTO runtime_project(project_id) VALUES ('memory')")
         store = ArtifactStore(db, max_file_bytes=max(len(payload), len(project_text)))
-        identifier = store.capture("memory", tmp_path, kind="EXECUTION", manifest_json=payload)
+        capture = ManifestCapture(store.max_file_bytes)
+        capture(manifest_object(json.loads(payload)))
+        identifier = capture.persist(store, "memory", tmp_path)
         with db.session() as session:
             row = session.get(ArtifactFile, (identifier, "target/manifest.json"))
             assert row.codec == codec
@@ -181,13 +186,15 @@ def test_capture_uses_memory_manifest_even_without_disk_file(tmp_path, monkeypat
         return original_open(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "open", guarded_open)
-    payload = b'{"nodes": {}, "metadata": {"source": "memory"}}'
+    payload = b'{"nodes":{},"metadata":{"source":"memory"}}'
     with isolated_database() as db:
         db.initialize()
         with db.transaction() as connection:
             connection.exec_driver_sql("INSERT INTO runtime_project(project_id) VALUES ('memory')")
         store = ArtifactStore(db)
-        identifier = store.capture("memory", tmp_path, kind="EXECUTION", manifest_json=payload)
+        capture = ManifestCapture(store.max_file_bytes)
+        capture(manifest_object(json.loads(payload)))
+        identifier = capture.persist(store, "memory", tmp_path)
         assert store.read_file(identifier, relative) == payload
         destination = tmp_path / "restored"
         store.materialize(identifier, destination)
@@ -200,4 +207,4 @@ def test_memory_manifest_obeys_capture_size_limits(tmp_path, file_limit, set_lim
     (tmp_path / "dbt_project.yml").write_text("name: memory\n", encoding="utf-8")
     store = ArtifactStore(None, max_file_bytes=file_limit, max_set_bytes=set_limit)
     with pytest.raises(ValueError, match="size limit"):
-        store.capture("memory", tmp_path, kind="EXECUTION", manifest_json=b"x" * 65)
+        store.capture("memory", tmp_path, kind="EXECUTION", memory_files={"target/manifest.json": b"x" * 65})

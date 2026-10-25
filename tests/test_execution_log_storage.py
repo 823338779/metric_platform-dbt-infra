@@ -166,10 +166,14 @@ async def test_real_parse_and_build_persist_internal_debug_and_model_events(tmp_
             assert result.status == JobStatus.SUCCEEDED
         with db.transaction() as connection:
             rows = connection.exec_driver_sql(
-                "SELECT phase,command,level,event_name,node_id,invocation_id "
+                "SELECT phase,command,level,event_name,node_id,invocation_id,message "
                 "FROM runtime_execution_log WHERE job_id=%s ORDER BY log_id", (job.job_id,),
             ).mappings().all()
         assert {row["phase"] for row in rows} == {"PARSING", "BUILDING"}
+        for row in rows:
+            normalized = row["message"].replace("\\\\", "\\").replace("\\", "/")
+            assert project.as_posix() not in normalized
+            assert profiles.as_posix() not in normalized
         assert any(row["event_name"] == "MainReportArgs" and row["level"] == "debug" for row in rows)
         assert any(row["event_name"] == "MainReportVersion" for row in rows)
         assert any(row["event_name"] == "LogModelResult" and row["node_id"].startswith("model.") for row in rows)

@@ -10,7 +10,6 @@ from pydantic import ValidationError
 from dbt_metricflow_service.application.queries import QueryService
 from dbt_metricflow_service.models.queries import AvailableDimensionsRequest, QueryRequest
 from dbt_metricflow_service.platform.models import DataQueryResult, DimensionQueryResult
-from tests.catalog_helpers import catalog, resource
 from tests.data_helpers import stored_build
 from tests.synchronous_queries import NATIVE_AVAILABLE_DIMENSIONS
 
@@ -34,13 +33,12 @@ def live_service():
         return DataQueryResult(columns=[{"name": "orders", "type": "int"}], rows=[[count]], truncated=False)
 
     builds = SimpleNamespace(load=lambda _: build, query_unavailable_reason=lambda _: None, timeout=30)
-    catalogs = SimpleNamespace(read_build=lambda _: catalog([resource("metric.orders")]))
-    return QueryService(builds, catalogs, execute, discover_dimensions), build_id, executions
+    return QueryService(builds, execute, discover_dimensions), build_id, executions
 
 
 def test_identical_queries_execute_again_and_return_updated_rows(live_service):
     service, build_id, executions = live_service
-    request = QueryRequest(mode="QUERY", metricResourceIds=["metric.orders"])
+    request = QueryRequest(mode="QUERY", metrics=["orders"])
     first = service.submit(build_id, request, "platform")
     second = service.submit(build_id, request, "platform")
     assert not {"queryId", "state", "resultAvailable", "nextOffset"} & second.model_dump(by_alias=True).keys()
@@ -51,7 +49,7 @@ def test_identical_queries_execute_again_and_return_updated_rows(live_service):
 
 def test_available_dimensions_are_recomputed_with_updated_metadata(live_service):
     service, build_id, executions = live_service
-    request = AvailableDimensionsRequest(metricResourceIds=["metric.orders"])
+    request = AvailableDimensionsRequest(metrics=["orders"])
     first = service.available_dimensions(build_id, request, "platform")
     second = service.available_dimensions(build_id, request, "platform")
     assert first.dimensions[0].operators == ["="]
@@ -61,6 +59,6 @@ def test_available_dimensions_are_recomputed_with_updated_metadata(live_service)
 
 def test_query_rejects_removed_idempotency_key():
     with pytest.raises(ValidationError) as failure:
-        QueryRequest(mode="QUERY", metricResourceIds=["metric.orders"], idempotencyKey="old-key")
+        QueryRequest(mode="QUERY", metrics=["orders"], idempotencyKey="old-key")
     assert any(error["loc"] == ("idempotencyKey",) and error["type"] == "extra_forbidden"
                for error in failure.value.errors())

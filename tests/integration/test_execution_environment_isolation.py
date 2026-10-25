@@ -79,13 +79,13 @@ def test_real_environment_isolation(tmp_path):
         def query(build):
             catalog = client.get(f"/builds/{build['buildId']}/catalog", params={"kind": "METRIC"})
             assert catalog.status_code == 200, catalog.text
-            metric = next(iter(catalog.json()["metrics"]))
+            metric = next(iter(catalog.json()["metrics"].values()))["name"]
             response = client.post("/query", params={"build_id": build["buildId"]}, headers=headers,
-                json={"mode": "QUERY", "metricResourceIds": [metric], "limit": 10})
+                json={"mode": "QUERY", "metrics": [metric], "limit": 10})
             assert response.status_code == 200, response.text
             assert response.json()["rows"]
             explained = client.post("/query", params={"build_id": build["buildId"]}, headers=headers,
-                json={"mode": "EXPLAIN", "metricResourceIds": [metric], "limit": 10})
+                json={"mode": "EXPLAIN", "metrics": [metric], "limit": 10})
             assert explained.status_code == 200, explained.text
             assert build["execution"]["schema"] in explained.json()["sql"]
             return response.json()["rows"]

@@ -11,25 +11,16 @@ from metricflow_semantics.errors.error_classes import InvalidQueryException
 from pydantic import TypeAdapter
 
 from dbt_metricflow_service import constants as strings
+from dbt_metricflow_service.models.payloads import JsonValue, ResultColumn
 from dbt_metricflow_service.platform.models import (
     DataQueryResult,
     DimensionQueryResult,
     NativeDimension,
     NativeMetric,
     NativeTimeDimension,
-    PlatformQueryRequest,
-    QueryMode,
 )
 
-from ..models.payloads import JsonValue, ResultColumn
-
 METRIC_SELECTION_INVALID_MESSAGE: Final[str] = '指标不存在或为空'
-METRICS_NOT_QUERYABLE_MESSAGE: Final[str] = '指标不可查询'
-GROUP_DIMENSIONS_INCOMPATIBLE_MESSAGE: Final[str] = '分组维度不可组合'
-ORDER_FIELDS_INCOMPATIBLE_MESSAGE: Final[str] = '排序字段不可组合'
-DIMENSION_VALUES_UNAVAILABLE_MESSAGE: Final[str] = '维度值字段不可查询'
-FILTER_NOT_ALLOWED_MESSAGE: Final[str] = '筛选条件不在允许范围内'
-INVALID_DATE_RANGE_MESSAGE: Final[str] = '日期范围无效'
 
 ALLOWED_OPERATORS = frozenset({"=", "!=", ">", ">=", "<", "<=", strings.IN})
 TIME_TYPE = strings.TIME_DIMENSION_TYPE
@@ -84,32 +75,6 @@ def available_dimensions(engine: MetricFlowEngine, metrics: tuple[str, ...]) -> 
         metrics=[NativeMetric(name=name) for name in metrics], dimensions=dimensions,
         time_dimensions=time_dimensions, allowed_filters=sorted(ALLOWED_OPERATORS),
     )
-
-
-
-def validate_query(request: PlatformQueryRequest, available: DimensionQueryResult) -> None:
-    """所有查询字段先与该固定 run 的原生可用项比对。"""
-
-    metrics = {item.name for item in available.metrics}
-    dimensions = {item.token for item in available.dimensions}
-    time_dimensions = {item.token for item in available.time_dimensions}
-    # 命名日期维度的粒度保留在对应选项上，验证时纳入允许的原生 token。
-    time_dimensions.update(
-        token for item in available.dimensions for token in item.grain_tokens.values()
-    )
-    if not request.metrics or not set(request.metrics) <= metrics:
-        raise ValueError(METRICS_NOT_QUERYABLE_MESSAGE)
-    if not set(request.group_by) <= dimensions | time_dimensions:
-        raise ValueError(GROUP_DIMENSIONS_INCOMPATIBLE_MESSAGE)
-    orderable = metrics | dimensions | time_dimensions
-    if any(item.lstrip("-") not in orderable for item in request.order_by):
-        raise ValueError(ORDER_FIELDS_INCOMPATIBLE_MESSAGE)
-    if request.mode is QueryMode.DIMENSION_VALUES and request.dimension not in dimensions | time_dimensions:
-        raise ValueError(DIMENSION_VALUES_UNAVAILABLE_MESSAGE)
-    if any(item.field not in dimensions or item.operator not in ALLOWED_OPERATORS for item in request.filters):
-        raise ValueError(FILTER_NOT_ALLOWED_MESSAGE)
-    if request.start_time and request.end_time and request.start_time > request.end_time:
-        raise ValueError(INVALID_DATE_RANGE_MESSAGE)
 
 
 def _json_cell(value: JsonValue | Decimal | date | datetime | bytes) -> JsonValue:

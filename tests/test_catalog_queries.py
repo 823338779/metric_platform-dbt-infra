@@ -26,7 +26,7 @@ def ready_build(store, tmp_path, before_finish=None):
     directory = tmp_path / uuid4().hex
     target = directory / "target"
     target.mkdir(parents=True)
-    (directory / "dbt_project.yml").write_text("name: sample\nversion: '1.0'\n", encoding="utf-8")
+    (directory / "dbt_project.yml").write_text("name: sample\nversion: '1.0'\nprofile: sample\n", encoding="utf-8")
     artifacts = ArtifactStore(store.db)
     evidence = {
         "source_commit_sha": build.commit_sha,
@@ -39,11 +39,9 @@ def ready_build(store, tmp_path, before_finish=None):
     from tests.test_publication_catalog import package
 
     manifest = package()
-    manifest["metrics"] = {"metric.revenue": {
-        "name": "revenue", "label": "Revenue", "type": "simple",
-        "type_params": {"metric_aggregation_params": {"semantic_model": "orders", "agg": "sum"}},
-        "depends_on": {"nodes": ["semantic_model.sample.orders"]},
-    }}
+    metric = manifest["metrics"]["metric.sample.orders"]
+    metric.update(name="revenue", unique_id="metric.revenue")
+    manifest["metrics"] = {"metric.revenue": metric}
     manifest["parent_map"] = {"metric.revenue": ["semantic_model.sample.orders"]}
     manifest["child_map"] = {"semantic_model.sample.orders": ["metric.revenue"]}
     (target / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
@@ -128,14 +126,13 @@ def test_cleanup_completion_preserves_catalog_and_source(store, tmp_path):
 
 
 def test_option_scope_includes_build_and_metric_set(store, tmp_path):
-    from dbt_metricflow_service.application.catalog import CatalogService
     from dbt_metricflow_service.application.queries import QueryService
     from dbt_metricflow_service.models.queries import AvailableDimensionsRequest
 
     app, build, jobs, artifacts = ready_build(store, tmp_path)
     execute = inline_executor()
-    queries = QueryService(app, CatalogService(app.store, artifacts), execute, execute.discover_dimensions)
-    body = AvailableDimensionsRequest(metricResourceIds=["metric.revenue"])
+    queries = QueryService(app, execute, execute.discover_dimensions)
+    body = AvailableDimensionsRequest(metrics=["revenue"])
     first = queries.available_dimensions(build.build_id, body, CALLER)
     assert first.dimensions == queries.available_dimensions(build.build_id, body, CALLER).dimensions
     assert first.build_id == build.build_id
@@ -143,7 +140,6 @@ def test_option_scope_includes_build_and_metric_set(store, tmp_path):
 
 
 def test_historical_environment_missing_is_503(store, tmp_path):
-    from dbt_metricflow_service.application.catalog import CatalogService
     from dbt_metricflow_service.application.errors import ServiceError
     from dbt_metricflow_service.application.queries import QueryService
     from dbt_metricflow_service.models.queries import AvailableDimensionsRequest
@@ -151,23 +147,22 @@ def test_historical_environment_missing_is_503(store, tmp_path):
     app, build, jobs, artifacts = ready_build(store, tmp_path)
     app.toolchain = "different"
     execute = inline_executor()
-    query = QueryService(app, CatalogService(app.store, artifacts), execute, execute.discover_dimensions)
+    query = QueryService(app, execute, execute.discover_dimensions)
     with pytest.raises(ServiceError) as failure:
         query.available_dimensions(
-            build.build_id, AvailableDimensionsRequest(metricResourceIds=["metric.revenue"]), CALLER
+            build.build_id, AvailableDimensionsRequest(metrics=["revenue"]), CALLER
         )
     assert failure.value.status == 503
 
 
 def test_explain_returns_in_memory_without_result_store(store, tmp_path, monkeypatch):
-    from dbt_metricflow_service.application.catalog import CatalogService
     from dbt_metricflow_service.application.queries import QueryService
     from dbt_metricflow_service.models.queries import QueryRequest
 
     app, build, jobs, artifacts = ready_build(store, tmp_path)
     monkeypatch.setattr(jobs, "reserve", lambda *_: pytest.fail("query created a task"))
     execute = inline_executor()
-    queries = QueryService(app, CatalogService(app.store, artifacts), execute, execute.discover_dimensions)
-    result = queries.submit(build.build_id, QueryRequest(mode="EXPLAIN", metricResourceIds=["metric.revenue"]), CALLER)
+    queries = QueryService(app, execute, execute.discover_dimensions)
+    result = queries.submit(build.build_id, QueryRequest(mode="EXPLAIN", metrics=["revenue"]), CALLER)
     assert result.sql == "select 1"
     assert not hasattr(result, "query_id")

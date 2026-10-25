@@ -9,7 +9,6 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import event
 
-from dbt_metricflow_service.application.catalog import CatalogService
 from dbt_metricflow_service.application.errors import ServiceError
 from dbt_metricflow_service.application.queries import QueryService
 from dbt_metricflow_service.models.queries import QueryRequest
@@ -76,11 +75,11 @@ def test_history_cursor_filters_and_concurrent_insert(store, deployments):
 def test_query_submission_does_not_read_deployments(store, tmp_path):
     app, build, jobs, artifacts = ready_build(store, tmp_path)
     execute = inline_executor()
-    queries = QueryService(app, CatalogService(app.store, artifacts), execute, execute.discover_dimensions)
+    queries = QueryService(app, execute, execute.discover_dimensions)
     with reads(store.db) as statements:
         view = queries.submit(
             build.build_id,
-            QueryRequest(mode="EXPLAIN", metricResourceIds=["metric.revenue"]),
+            QueryRequest(mode="EXPLAIN", metrics=["revenue"]),
             CALLER,
         )
     assert view.sql == "select 1"

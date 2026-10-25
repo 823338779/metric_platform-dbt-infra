@@ -36,13 +36,11 @@ async def run_dbt(
     # 在授权和引擎初始化前拒绝非 dbt 入口。
     if command.argv[:1] != (DBT,):
         raise ValueError(UNSUPPORTED_ENGINE_COMMAND)
-    record, timed_out = await run_serialized(
+    # timeout_seconds 仅保留调用兼容；执行等待引擎返回。
+    return await run_serialized(
         lambda: _invoke_dbt(project, command, max_output_bytes, log_sink, manifest_sink),
-        timeout_seconds, before_start,
+        before_start,
     )
-    if timed_out:
-        return record.with_outcome(status=JobStatus.TIMED_OUT, exit_code=None, stderr=record.stderr)
-    return record
 
 
 def _invoke_dbt(
@@ -56,14 +54,15 @@ def _invoke_dbt(
     error_type = ""
     try:
         with engine_environment(command.environment, output, log_sink) as capture_text:
-            from dbt.cli.main import dbtRunner
+            from dbt_metricflow_service.delegates.clients.dbt_client import DbtClient
 
             # dbt 事件经同一个脱敏入口进入日志缓冲区。
             def capture(event: EventMsg) -> None:
                 capture_text(EngineLog.from_dbt(event))
 
             try:
-                result = dbtRunner(callbacks=[capture]).invoke(list(command.argv[1:]))
+                result = (command.operation([capture]) if command.operation is not None
+                          else DbtClient().invoke(list(command.argv[1:]), callbacks=[capture]))
                 exit_code = 0 if result.success else (2 if result.exception is not None else 1)
                 if result.exception is not None:
                     error_type = type(result.exception).__name__

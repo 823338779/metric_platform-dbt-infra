@@ -9,10 +9,7 @@ from dbt_metricflow.cli.cli_configuration import CLIConfiguration
 from metricflow.engine.metricflow_engine import MetricFlowQueryRequest
 from metricflow_semantics.errors.error_classes import DimensionValueMappingError
 
-from dbt_metricflow_service.platform.metricflow import (
-    execute_available_dimensions,
-    execute_programmatic,
-)
+from dbt_metricflow_service.delegates.clients.metric_flow_client import MetricFlowClient
 from dbt_metricflow_service.platform.models import PlatformQueryRequest
 from tests.dimension_mapping_helpers import write_mapping_project
 
@@ -33,7 +30,8 @@ def test_dbt_to_service_mapping_and_raw_dimension_values(mapping_project):
     source = manifest["semantic_models"]["semantic_model.mapping_test.requests"]
     semantic_source = next(model for model in semantic["semantic_models"] if model["name"] == "requests")
     assert source["dimensions"][0]["value_mapping"] == semantic_source["dimensions"][0]["value_mapping"]
-    dimensions = execute_available_dimensions(project, project, ("requests_count",))
+    client = MetricFlowClient((project / "target/manifest.json").read_bytes(), project=project, profiles=project)
+    dimensions = client.available_dimensions(("requests_count",))
     assert {"raw_value", "display_value"}.isdisjoint(item.name for item in dimensions.dimensions)
     assert next(item for item in dimensions.dimensions if item.name == "status").semantic_model_name == "requests"
     args = {
@@ -43,28 +41,24 @@ def test_dbt_to_service_mapping_and_raw_dimension_values(mapping_project):
         "orderBy": ["request__status"],
         "limit": 3,
     }
-    result = execute_programmatic(project, project, PlatformQueryRequest(mode="QUERY", **args))
+    result = client.query(PlatformQueryRequest(mode="QUERY", **args))
     assert result.rows == [["成功", 100], ["失败", 20], ["失败", 10]]
     assert result.columns[0].type == "str"
     assert result.truncated
-    raw = execute_programmatic(
-        project, project, PlatformQueryRequest(mode="DIMENSION_VALUES", dimension="request__status", **args)
+    raw = client.query(
+        PlatformQueryRequest(mode="DIMENSION_VALUES", dimension="request__status", **args)
     )
     assert raw.rows == [[200], [404], [502]]
     assert raw.columns[0].type != "str"
-    explained = execute_programmatic(project, project, PlatformQueryRequest(mode="EXPLAIN", **args))
+    explained = client.query(PlatformQueryRequest(mode="EXPLAIN", **args))
     assert explained.sql.count("LEFT OUTER JOIN") == 1
-    multiple = execute_programmatic(
-        project,
-        project,
+    multiple = client.query(
         PlatformQueryRequest(
             mode="EXPLAIN", **{**args, "groupBy": ["request__status", "request__target_status", "request__channel"]}
         ),
     )
     assert multiple.sql.count("LEFT OUTER JOIN") == 3
-    multiple_result = execute_programmatic(
-        project,
-        project,
+    multiple_result = client.query(
         PlatformQueryRequest(
             mode="QUERY",
             **{**args, "groupBy": ["request__status", "request__target_status", "request__channel"]},

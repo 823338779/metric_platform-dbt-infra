@@ -97,7 +97,7 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
     store = BuildStore(runtime.db)
     builds = BuildService(store, runtime.toolchain, 180)
     catalogs = CatalogService(store, runtime.artifacts)
-    queries = QueryService(builds, catalogs, runtime.execute_query, runtime.available_dimensions)
+    queries = QueryService(builds, runtime.execute_query, runtime.available_dimensions)
     deployments = DeploymentService(
         DeploymentStore(runtime.db),
         lambda repository, branch: remote_head(repository, branch, settings.temp_root),
@@ -160,40 +160,40 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
         }.intersection(paths)
         assert yaml.safe_load(project_file.read_text(encoding="utf-8"))["target-path"] == "custom-target"
         resources = catalogs.list(first.build_id)
-        metric = next(iter(resources["metrics"]))
-        dataset = next(key for key, item in resources["nodes"].items() if item["resource_type"] == "model")
+        metric = next(iter(resources["metrics"].values()))["name"]
+        dataset = next(item["name"] for item in resources["nodes"].values() if item["resource_type"] == "model")
         result = await asyncio.to_thread(
             queries.available_dimensions,
             first.build_id,
-            AvailableDimensionsRequest(metricResourceIds=[metric]),
+            AvailableDimensionsRequest(metrics=[metric]),
             "integration",
         )
         dimensions = result.dimensions
         dimension = next(item.option_id for item in dimensions if item.dimension_type != "time")
-        first_result = await query(first.build_id, mode="QUERY", metricResourceIds=[metric])
+        first_result = await query(first.build_id, mode="QUERY", metrics=[metric])
         assert Decimal(str(first_result.rows[0][0])) == Decimal("31.00")
-        explain = await query(first.build_id, mode="EXPLAIN", metricResourceIds=[metric])
+        explain = await query(first.build_id, mode="EXPLAIN", metrics=[metric])
         assert explain.sql and "select" in explain.sql.lower()
-        assert (await query(first.build_id, mode="PREVIEW", datasetResourceId=dataset)).rows
+        assert (await query(first.build_id, mode="PREVIEW", selector=dataset)).rows
         assert (
             await query(
-                first.build_id, mode="DIMENSION_VALUES", metricResourceIds=[metric], dimensionOptionId=dimension
+                first.build_id, mode="DIMENSION_VALUES", metrics=[metric], dimensionOptionId=dimension
             )
         ).rows
         # 语义变更也执行完整构建，固定 schema 中的模型保持原表名。
-        before = catalogs.read(first.build_id)[1]
+        before = catalogs.list(first.build_id)
         yaml_file = next(path for path in (repo / "models").glob("*.yml") if "revenue" in path.read_text())
         yaml_file.write_text(yaml_file.read_text() + "\n# semantic documentation update\n")
         git(repo, "commit", "-am", "semantic-change")
         semantic = await build()
-        after = catalogs.read(semantic.build_id)[1]
+        after = catalogs.list(semantic.build_id)
         assert {item["relation_name"] for item in after["nodes"].values() if item["resource_type"] == "model"} == {
             item["relation_name"] for item in before["nodes"].values() if item["resource_type"] == "model"
         }
         completed = await asyncio.to_thread(
             queries.submit,
             first.build_id,
-            QueryRequest(mode="QUERY", metricResourceIds=[metric]),
+            QueryRequest(mode="QUERY", metrics=[metric]),
             "integration",
         )
         # 新源码覆盖同名表，旧构建查询同样读取当前数据。
@@ -205,10 +205,10 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
         assert deployments.current(target).active_build_id == second.build_id
         assert completed.rows == first_result.rows
         assert Decimal(
-            str((await query(first.build_id, mode="QUERY", metricResourceIds=[metric])).rows[0][0])
+            str((await query(first.build_id, mode="QUERY", metrics=[metric])).rows[0][0])
         ) == Decimal("32.00")
         assert Decimal(
-            str((await query(second.build_id, mode="QUERY", metricResourceIds=[metric])).rows[0][0])
+            str((await query(second.build_id, mode="QUERY", metrics=[metric])).rows[0][0])
         ) == Decimal("32.00")
         # dbt 自己报告解析失败，服务记录失败且不切换当前部署。
         invalid = repo / "models" / "invalid.sql"
@@ -233,7 +233,7 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
         assert deployments.reconcile(target, rejected.initial_deployment.generation).deployment_status == "FAILED"
         assert deployments.current(target).active_build_id == second.build_id
         assert Decimal(
-            str((await query(first.build_id, mode="QUERY", metricResourceIds=[metric])).rows[0][0])
+            str((await query(first.build_id, mode="QUERY", metrics=[metric])).rows[0][0])
         ) == Decimal("32.00")
         # 清理结束旧构建查询生命周期，保留共享物理表、历史目录和源码。
         first_run = store.get(first.build_id).run_id
@@ -249,10 +249,11 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
                 is not None
             )
         assert catalogs.list(first.build_id)["metrics"]
-        assert catalogs.resource(first.build_id, dataset, "source").content
+        assert catalogs.resource(first.build_id, next(key for key, item in resources["nodes"].items()
+            if item["name"] == dataset), "source").content
         with pytest.raises(ServiceError):
-            await query(first.build_id, mode="QUERY", metricResourceIds=[metric])
-        assert (await query(second.build_id, mode="QUERY", metricResourceIds=[metric])).rows
+            await query(first.build_id, mode="QUERY", metrics=[metric])
+        assert (await query(second.build_id, mode="QUERY", metrics=[metric])).rows
     finally:
         with runtime.db.transaction() as connection:
             connection.exec_driver_sql(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))

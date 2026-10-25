@@ -15,11 +15,6 @@ class NativeProjection(BaseModel):
         return self.model_dump(mode=strings.JSON_MODE, by_alias=True, exclude_unset=True)
 
 
-class NativeMetadata(NativeProjection):
-    dbt_schema_version: str | None = None
-    adapter_type: str | None = None
-
-
 class NativeDependencies(NativeProjection):
     nodes: list[str] = Field(default_factory=list)
 
@@ -139,14 +134,6 @@ class NativeNode(NativeProjection):
     value_mapping: NativeValueMapping | None = None
     freshness: NativeFreshness | None = None
     loaded_at_query: str | None = None
-
-
-class NativeManifest(NativeProjection):
-    metadata: NativeMetadata = Field(default_factory=NativeMetadata)
-    nodes: dict[str, NativeNode]
-    sources: dict[str, NativeNode] = Field(default_factory=dict)
-    semantic_models: dict[str, NativeNode] = Field(default_factory=dict)
-    metrics: dict[str, NativeNode] = Field(default_factory=dict)
 
 
 class SemanticManifest(NativeProjection):

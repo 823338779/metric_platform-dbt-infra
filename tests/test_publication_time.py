@@ -10,7 +10,7 @@ def test_equivalent_offsets_share_business_calendar_but_execute_separately(store
     service, job, release = query_service(store, tmp_path)
     request = PublishedQueryRequest(
         mode="QUERY",
-        metricResourceIds=["metric.sample.orders"],
+        metrics=["orders"],
         startTime="2026-09-30T16:00:00Z",
     )
     accepted = service.submit(release.build_id, request, "platform")
@@ -30,7 +30,7 @@ def test_naive_business_calendar_is_preserved(store, tmp_path):
     service, job, release = query_service(store, tmp_path)
     request = PublishedQueryRequest(
         mode="QUERY",
-        metricResourceIds=["metric.sample.orders"],
+        metrics=["orders"],
         startTime="2026-10-01T00:00:00",
     )
     service.submit(release.build_id, request, "platform")
@@ -42,7 +42,7 @@ def test_naive_business_calendar_is_preserved(store, tmp_path):
 def test_capabilities_disclose_project_path_and_time_contract(store, tmp_path):
     service, job, _ = query_service(store, tmp_path)
     request = PublishedQueryRequest(
-        mode="QUERY", metricResourceIds=["metric.sample.orders"]
+        mode="QUERY", metrics=["orders"]
     )
     view = service.submit(service.fixture_available_dimensions.build_id, request, "platform")
     assert view.business_timezone == "Asia/Shanghai"
@@ -57,7 +57,7 @@ def test_query_error_identifies_invalid_dimension(store, tmp_path):
     service, job, release = query_service(store, tmp_path)
     request = PublishedQueryRequest(
         mode="QUERY",
-        metricResourceIds=["metric.sample.orders"],
+        metrics=["orders"],
         groupBy=[{"optionId": "missing"}],
     )
     with pytest.raises(PublicationError) as caught:

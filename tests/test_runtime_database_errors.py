@@ -33,7 +33,7 @@ async def test_database_errors_return_503(runtime_pair, monkeypatch, error):
                                     base_url="http://test") as client:
             response = await client.post(
                 "/query", params={"build_id": str(uuid4())}, headers={"Authorization": "Bearer test"},
-                json={"mode": "QUERY", "metricResourceIds": ["metric.orders"]},
+                json={"mode": "QUERY", "metrics": ["orders"]},
             )
         assert response.status_code == 503
         assert response.json()["error"]["code"] == "STORAGE_UNAVAILABLE"

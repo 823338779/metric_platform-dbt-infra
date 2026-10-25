@@ -71,7 +71,6 @@ RUN_CLEANUP = strings.RUN_CLEANUP
 NEVER = strings.NEVER
 EXTERNAL = strings.EXTERNAL
 OUTCOME_UNKNOWN = strings.EXECUTION_OUTCOME_UNKNOWN
-TIMEOUT = strings.TASK_TIMEOUT
 LEASE_EXPIRED = strings.LEASE_EXPIRED
 ACTIVE = strings.ACTIVE
 CLEANING = strings.CLEANING
@@ -373,7 +372,6 @@ class JobStore:
                 .where(
                     RuntimeJob.status == QUEUED,
                     RuntimeJob.available_at <= func.clock_timestamp(),
-                    RuntimeJob.deadline_at > func.clock_timestamp(),
                     RuntimeJob.config_version.in_(versions),
                     RuntimeJob.toolchain_version == toolchain_version,
                     true() if kinds is None else RuntimeJob.kind.in_(kinds),
@@ -424,7 +422,6 @@ class JobStore:
                 RuntimeAttempt.state == EXECUTING,
                 RuntimeAttempt.lease_token == str(token),
                 RuntimeAttempt.lease_expires_at > func.clock_timestamp(),
-                RuntimeJob.deadline_at > func.clock_timestamp(),
             )
             .with_for_update(of=(RuntimeJob, RuntimeAttempt))
             .execution_options(populate_existing=True)
@@ -676,42 +673,36 @@ class JobStore:
             return True
 
     def recover(self) -> int:
-        # 恢复只处理过期租约/截止时间，健康实例的 RUNNING 任务不会被启动流程打断。
+        # 恢复只处理过期租约，健康实例的 RUNNING 任务不会被启动流程打断。
         with self.db.fact_session() as session:
             jobs = session.scalars(
                 select(RuntimeJob)
                 .where(
                     RuntimeJob.status.in_((QUEUED, RUNNING)),
-                    or_(
-                        RuntimeJob.deadline_at <= func.clock_timestamp(),
-                        select(RuntimeAttempt.attempt_id)
-                        .where(
-                            RuntimeAttempt.attempt_id == RuntimeJob.current_attempt_id,
-                            RuntimeAttempt.lease_expires_at <= func.clock_timestamp(),
-                        )
-                        .exists(),
-                    ),
+                    select(RuntimeAttempt.attempt_id)
+                    .where(
+                        RuntimeAttempt.attempt_id == RuntimeJob.current_attempt_id,
+                        RuntimeAttempt.lease_expires_at <= func.clock_timestamp(),
+                    )
+                    .exists(),
                 )
                 .order_by(RuntimeJob.created_at)
                 .with_for_update(of=RuntimeJob, skip_locked=True)
             ).all()
             for job in jobs:
-                now = session.scalar(select(func.clock_timestamp()))
                 attempt = (
                     session.get(RuntimeAttempt, job.current_attempt_id, with_for_update=True)
                     if job.current_attempt_id
                     else None
                 )
                 external = bool(attempt and attempt.execution_stage == EXTERNAL)
-                timed_out = job.deadline_at <= now
                 if attempt:
                     attempt.state = EXPIRED_UNCONFIRMED if external else STOPPED
                     attempt.finished_at = func.clock_timestamp()
                     attempt.stop_confirmed_at = None if external else func.clock_timestamp()
                     session.flush()
                 retry = (
-                    not timed_out
-                    and job.attempt_no < job.max_attempts
+                    job.attempt_no < job.max_attempts
                     and job.retry_policy != NEVER
                     and not external
                 )
@@ -722,7 +713,7 @@ class JobStore:
                     job.available_at = func.clock_timestamp() + timedelta(seconds=delay)
                     session.flush()
                 else:
-                    code = TIMEOUT if timed_out else OUTCOME_UNKNOWN if external else LEASE_EXPIRED
+                    code = OUTCOME_UNKNOWN if external else LEASE_EXPIRED
                     job.status = FAILED
                     job.error_code = code
                     job.error_detail = JobErrorDetail(external_outcome_unknown=external).model_dump(

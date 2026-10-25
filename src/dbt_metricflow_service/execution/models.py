@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Final, Mapping
+from typing import TYPE_CHECKING, Final, Mapping
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from dbt_metricflow_service import constants as strings
+
+if TYPE_CHECKING:
+    from dbt_common.events.base_types import EventMsg
+
+    from dbt_metricflow_service.delegates.clients.dbt_client import DbtResult
 
 JOB_ID_DESCRIPTION: Final[str] = "服务进程内唯一的任务标识。"
 JOB_PROJECT_DESCRIPTION: Final[str] = "任务所属的安全项目标识。"
@@ -66,9 +72,11 @@ class JobRecord(BaseModel):
 class CommandSpec:
     """一次进程内 dbt 调用所需的参数、目录和隔离环境。"""
 
-    # 首项标识 dbt，其余参数交给 dbtRunner.invoke。
+    # 诊断命令身份；无绑定操作时，其余参数交给 DbtClient.invoke。
     argv: tuple[str, ...]
     cwd: Path
     environment: Mapping[str, str]
     # 是否需要持久化外部写入标记及保守的取消保护。
     write_operation: bool
+    # 已组装上下文的 client 操作；为空时兼容原生命令调用。
+    operation: Callable[[list[Callable[[EventMsg], None]]], DbtResult] | None = field(default=None, repr=False)

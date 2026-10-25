@@ -13,7 +13,7 @@ def test_query_returns_all_bounded_rows_without_pagination(store, tmp_path):
     service, _, build = query_service(store, tmp_path)
     rows = [[i, "12345678901234567890.123456789", None] for i in range(403)]
     service.execute = inline_executor(query_result={"columns": [], "rows": rows, "truncated": True})
-    request = QueryRequest(mode="QUERY", metricResourceIds=["metric.sample.orders"])
+    request = QueryRequest(mode="QUERY", metrics=["orders"])
     result = service.submit(build.build_id, request, "p")
     assert result.rows == rows
     assert result.result_truncated
@@ -25,5 +25,5 @@ def test_oversized_response_is_rejected(store, tmp_path):
     service, _, build = query_service(store, tmp_path)
     service.execute = inline_executor(query_result={"columns": [], "rows": [["x" * (9 * 1024 * 1024)]]})
     with pytest.raises(ServiceError) as error:
-        service.submit(build.build_id, QueryRequest(mode="QUERY", metricResourceIds=["metric.sample.orders"]), "p")
+        service.submit(build.build_id, QueryRequest(mode="QUERY", metrics=["orders"]), "p")
     assert error.value.error.code == "RESULT_TOO_LARGE"

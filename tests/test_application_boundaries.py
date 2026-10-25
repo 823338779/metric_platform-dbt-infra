@@ -31,10 +31,25 @@ def test_application_dependency_graph_excludes_http_and_runtime():
         visited.add(path)
         for module in imported_modules(path):
             assert not any(module == prefix or module.startswith(prefix + ".") for prefix in forbidden), (path, module)
+            # client 是明确的工具边界，业务层可以调用其方法，但不穿透到 SDK 实现。
+            if module.startswith("dbt_metricflow_service.delegates.clients"):
+                continue
             if module.startswith("dbt_metricflow_service."):
                 dependency = PACKAGE.joinpath(*module.split(".")[1:]).with_suffix(".py")
                 if dependency.is_file():
                     queue.append(dependency)
+
+
+def test_engine_entrypoints_are_owned_by_clients():
+    clients = PACKAGE / "delegates" / "clients"
+    for path in PACKAGE.rglob("*.py"):
+        imports = set(imported_modules(path))
+        if any(module.startswith("dbt.cli") or module == "dbt_metricflow.cli.cli_configuration"
+               for module in imports):
+            assert path.is_relative_to(clients), path
+        if path.is_relative_to(PACKAGE / "delegates"):
+            assert not any(module.startswith(("fastapi", "dbt_metricflow_service.runtime"))
+                           for module in imports), path
 
 
 def test_http_routes_have_no_sql_and_models_have_no_io():

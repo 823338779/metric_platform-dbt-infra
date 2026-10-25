@@ -19,14 +19,14 @@ from tests.test_publication_storage import store as store
 
 def test_available_dimensions_response_contains_result_without_task_protocol():
     build_id = str(uuid4())
-    result = {"buildId": build_id, "metricResourceIds": ["metric.orders"], "dimensions": []}
+    result = {"buildId": build_id, "metrics": ["orders"], "dimensions": []}
     service = SimpleNamespace(available_dimensions=lambda *args: result)
     app = FastAPI()
     app.include_router(router(service, lambda: "platform"))
     client = TestClient(app)
 
     response = client.post(
-        "/query/available-dimensions", params={"build_id": build_id}, json={"metricResourceIds": ["metric.orders"]}
+        "/query/available-dimensions", params={"build_id": build_id}, json={"metrics": ["orders"]}
     )
 
     assert response.status_code == 200
@@ -43,7 +43,7 @@ def test_query_routes_keep_request_body_limit(path):
     service = SimpleNamespace(available_dimensions=lambda *args: pytest.fail("oversized request reached service"))
     app.include_router(router(service, lambda: "platform"))
     response = TestClient(app).post(
-        path, params={"build_id": str(uuid4())}, json={"metricResourceIds": ["metric." + "x" * 50]},
+        path, params={"build_id": str(uuid4())}, json={"metrics": ["metric." + "x" * 50]},
     )
     assert response.status_code == 413
     assert response.json()["error"]["code"] == "REQUEST_TOO_LARGE"
@@ -63,7 +63,7 @@ def test_query_response_contains_rows_without_persistent_identity():
     client = TestClient(app)
 
     response = client.post("/query", params={"build_id": build_id}, json={
-        "mode": "QUERY", "metricResourceIds": ["metric.orders"],
+        "mode": "QUERY", "metrics": ["orders"],
     })
 
     assert response.status_code == 200
@@ -79,7 +79,7 @@ def test_query_rejects_invalid_page_before_execution(fields):
     service = SimpleNamespace(submit=lambda *args: pytest.fail("invalid page reached execution"))
     app.include_router(router(service, lambda: "platform"))
     response = TestClient(app).post("/query", params={"build_id": str(uuid4())}, json={
-        "mode": "QUERY", "metricResourceIds": ["metric.orders"],
+        "mode": "QUERY", "metrics": ["orders"],
         **fields,
     })
     assert response.status_code == 422
@@ -90,7 +90,7 @@ def test_query_rejects_invalid_page_before_execution(fields):
 def test_query_routes_require_valid_build_parameter(path, params):
     app = FastAPI()
     app.include_router(router(SimpleNamespace(), lambda: "platform"))
-    body = {"metricResourceIds": ["metric.orders"]}
+    body = {"metrics": ["orders"]}
     if path == "/query":
         body.update(mode="QUERY")
     response = TestClient(app).post(path, params=params, json=body)
@@ -102,7 +102,7 @@ def test_query_routes_require_valid_build_parameter(path, params):
 def test_query_routes_reject_build_id_in_body(path):
     app = FastAPI()
     app.include_router(router(SimpleNamespace(), lambda: "platform"))
-    body = {"buildId": str(uuid4()), "metricResourceIds": ["metric.orders"]}
+    body = {"buildId": str(uuid4()), "metrics": ["orders"]}
     if path == "/query":
         body.update(mode="QUERY")
     response = TestClient(app).post(path, params={"build_id": str(uuid4())}, json=body)
@@ -122,7 +122,7 @@ def test_failed_query_returns_http_error_in_original_request(store, tmp_path, co
     register_exception_handlers(app)
     app.include_router(router(service, lambda: "platform"))
     response = TestClient(app).post("/query", params={"build_id": build.build_id}, json={
-        "mode": "QUERY", "metricResourceIds": ["metric.sample.orders"],
+        "mode": "QUERY", "metrics": ["orders"],
     })
     assert response.status_code == status
     assert response.json()["error"]["code"] == code
@@ -137,7 +137,7 @@ def test_post_returns_current_rows_without_persistent_identity(store, tmp_path):
     app.include_router(router(service, lambda: "platform"))
     client = TestClient(app)
     params = {"build_id": build.build_id}
-    body = {"mode": "QUERY", "metricResourceIds": ["metric.sample.orders"], "limit": 1000}
+    body = {"mode": "QUERY", "metrics": ["orders"], "limit": 1000}
     first = client.post("/query", params=params, json=body)
     assert first.status_code == 200
     assert first.json()["rows"] == payload["rows"]
@@ -155,7 +155,7 @@ def test_query_computes_current_dimensions_before_compiling(store, tmp_path):
     option = service.fixture_available_dimensions.dimensions[0].option_id
     count = len(service.execute.calls)
     service.submit(build.build_id, QueryRequest(
-        mode="QUERY", metricResourceIds=["metric.sample.orders"], groupBy=[{"optionId": option}],
+        mode="QUERY", metrics=["orders"], groupBy=[{"optionId": option}],
     ), "platform")
     assert service.execute.calls[count][1] == ("orders",)
     assert service.execute.calls[count + 1][1].mode == "QUERY"

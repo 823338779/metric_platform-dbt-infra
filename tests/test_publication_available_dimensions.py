@@ -12,7 +12,7 @@ from tests.test_publication_storage import store as store
 
 def test_recomputed_available_dimensions_keep_stable_option_ids(store, tmp_path):
     service, job, build = query_service(store, tmp_path)
-    request = AvailableDimensionsRequest(metricResourceIds=["metric.sample.orders"])
+    request = AvailableDimensionsRequest(metrics=["orders"])
     result = service.available_dimensions(build.build_id, request, "platform")
     assert result.dimensions == service.fixture_available_dimensions.dimensions
     count = len(service.execute.calls)

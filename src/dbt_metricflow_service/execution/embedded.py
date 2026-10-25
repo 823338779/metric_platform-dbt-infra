@@ -18,6 +18,7 @@ from .logs import EngineLog
 from .output import REDACTION_MARKER, SECRET_ENVIRONMENT_PREFIX, _RedactingTailBuffer
 
 LOG_SINK_FAILED = "Engine log capture failed: %s"
+RUNTIME_PATH_MARKER = "[runtime]"
 
 # 共享线程调度只保留调用方的返回类型，不解释引擎请求或结果。
 T = TypeVar("T")
@@ -72,10 +73,9 @@ async def _settle(task: asyncio.Task[T]) -> T:
 
 async def run_serialized(
     invoke: Callable[[], T],
-    timeout_seconds: float,
     before_start: Callable[[], Awaitable[None]],
-) -> tuple[T, bool]:
-    """获得串行槽位后校验租约，返回调用结果及是否超时；取消也须等线程退出。"""
+) -> T:
+    """获得串行槽位后校验租约，返回调用结果；取消也须等线程退出。"""
     # 等待锁时保持可取消，不占用线程池或阻塞服务心跳。
     while not ENGINE_LOCK.acquire(blocking=False):
         await asyncio.sleep(LOCK_POLL_SECONDS)
@@ -83,9 +83,7 @@ async def run_serialized(
         await before_start()
         task = asyncio.create_task(asyncio.to_thread(invoke))
         try:
-            return await asyncio.wait_for(asyncio.shield(task), timeout_seconds), False
-        except TimeoutError:
-            return await _settle(task), True
+            return await asyncio.shield(task)
         except asyncio.CancelledError:
             await _settle(task)
             raise
@@ -115,6 +113,12 @@ def engine_environment(
     original_events = get_event_manager()
     event_lock = threading.Lock()
     secrets = {value for name, value in os.environ.items() if name.startswith(SECRET_ENVIRONMENT_PREFIX) and value}
+    runtime_paths = {
+        spelling
+        for name in (PROJECT_ENV, PROFILES_ENV, strings.DBT_TARGET_PATH)
+        if (path := environment.get(name))
+        for spelling in (path, path.replace("\\", "/"), path.replace("\\", "\\\\"))
+    }
     sink_failed = False
 
     def capture_text(entry: EngineLog) -> None:
@@ -125,6 +129,8 @@ def engine_environment(
                            if name.startswith(SECRET_ENVIRONMENT_PREFIX) and value)
 
             def redact(value: str) -> str:
+                for path in sorted(runtime_paths, key=len, reverse=True):
+                    value = value.replace(path, RUNTIME_PATH_MARKER)
                 for secret in sorted(secrets, key=len, reverse=True):
                     value = value.replace(secret, REDACTION_MARKER)
                 return value

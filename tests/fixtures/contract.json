@@ -121,8 +121,8 @@
       "name": "available-dimensions-request",
       "model": "AvailableDimensionsRequest",
       "value": {
-        "metricResourceIds": [
-          "metric.revenue"
+        "metrics": [
+          "revenue"
         ]
       }
     },
@@ -131,8 +131,8 @@
       "model": "AvailableDimensionsView",
       "value": {
         "buildId": "12345678-1234-4234-8234-123456789abc",
-        "metricResourceIds": [
-          "metric.revenue"
+        "metrics": [
+          "revenue"
         ],
         "dimensions": []
       }
@@ -142,8 +142,8 @@
       "model": "QueryRequest",
       "value": {
         "mode": "QUERY",
-        "metricResourceIds": [
-          "metric.revenue"
+        "metrics": [
+          "revenue"
         ],
         "groupBy": [],
         "filters": [],
@@ -151,7 +151,7 @@
         "endTime": null,
         "orderBy": [],
         "limit": 1000,
-        "datasetResourceId": null,
+        "selector": null,
         "dimensionOptionId": null
       }
     },
@@ -160,8 +160,8 @@
       "model": "QueryRequest",
       "value": {
         "mode": "EXPLAIN",
-        "metricResourceIds": [
-          "metric.revenue"
+        "metrics": [
+          "revenue"
         ],
         "groupBy": [],
         "filters": [],
@@ -169,7 +169,7 @@
         "endTime": null,
         "orderBy": [],
         "limit": 1000,
-        "datasetResourceId": null,
+        "selector": null,
         "dimensionOptionId": null
       }
     },
@@ -178,14 +178,14 @@
       "model": "QueryRequest",
       "value": {
         "mode": "PREVIEW",
-        "metricResourceIds": [],
+        "metrics": [],
         "groupBy": [],
         "filters": [],
         "startTime": null,
         "endTime": null,
         "orderBy": [],
         "limit": 1000,
-        "datasetResourceId": "model.orders",
+        "selector": "orders",
         "dimensionOptionId": null
       }
     },
@@ -194,8 +194,8 @@
       "model": "QueryRequest",
       "value": {
         "mode": "DIMENSION_VALUES",
-        "metricResourceIds": [
-          "metric.revenue"
+        "metrics": [
+          "revenue"
         ],
         "groupBy": [],
         "filters": [],
@@ -203,7 +203,7 @@
         "endTime": null,
         "orderBy": [],
         "limit": 1000,
-        "datasetResourceId": null,
+        "selector": null,
         "dimensionOptionId": "53bb4f22c1b44e93a386de1f08b67a37"
       }
     },

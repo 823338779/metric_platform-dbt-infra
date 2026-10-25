@@ -43,7 +43,6 @@ RUN_CLEANUP = strings.RUN_CLEANUP
 PROJECT_DIRECTORY = strings.PROJECT_DIRECTORY
 ERROR_LEASE_LOST = strings.LEASE_LOST
 ERROR_COMMAND_FAILED = strings.COMMAND_FAILED
-ERROR_COMMAND_TIMEOUT = strings.COMMAND_TIMEOUT
 TARGET_DIRECTORY = strings.TARGET_DIRECTORY
 
 
@@ -78,7 +77,7 @@ class ExecutionError(RuntimeError):
         self.code = code
         # 引擎输出已由进程内执行器脱敏并限制字节数。
         self.payload = payload or JobErrorDetail()
-        # 超时不能证明目标仓库已经停止执行。
+        # 连接异常等失败不能证明目标仓库已经停止执行。
         self.stopped = stopped
 
 
@@ -212,7 +211,7 @@ class RuntimeExecutor:
                 manifest_sink=manifest_sink,
             )
         finally:
-            # run_dbt 在取消和超时时也等待引擎退出，此后才允许关闭日志队列。
+            # run_dbt 在取消时也等待引擎退出，此后才允许关闭日志队列。
             await _thread(writer.close)
         # parse/debug 正常退出无需写入核对，写命令失联不能据退出码释放保护。
         self._check_record(record, may_write=spec.write_operation)
@@ -220,15 +219,14 @@ class RuntimeExecutor:
 
     @staticmethod
     def _check_record(record: JobRecord, *, may_write: bool) -> None:
-        # 仅统一已脱敏的运行诊断与超时保护，不解释引擎特有的业务结果。
+        # 仅统一已脱敏的运行诊断，不解释引擎特有的业务结果。
         if record.status is not JobStatus.SUCCEEDED:
-            timed_out = record.status is JobStatus.TIMED_OUT
-            # dbt 的退出码 1 表示已完整返回模型/测试失败；异常退出和超时仍不能证明写入停止。
+            # dbt 的退出码 1 表示已完整返回模型/测试失败；异常退出仍不能证明写入停止。
             completed_failure = record.status is JobStatus.FAILED and record.exit_code == 1
             raise ExecutionError(
-                ERROR_COMMAND_TIMEOUT if timed_out else ERROR_COMMAND_FAILED,
+                ERROR_COMMAND_FAILED,
                 JobErrorDetail.model_validate(record, from_attributes=True),
-                stopped=not timed_out and (not may_write or completed_failure),
+                stopped=not may_write or completed_failure,
             )
 
     @staticmethod
