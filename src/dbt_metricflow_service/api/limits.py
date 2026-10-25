@@ -18,7 +18,7 @@ REQUEST_BODY_TOO_LARGE: Final[str] = "request body exceeds limit"
 logger = logging.getLogger(__name__)
 DEFAULT_MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024
 ENGINE_WRITE_PATH = re.compile(
-    r"^/(builds|deployments|builds/[^/]+/cancel|query(?:/available-dimensions)?)$"
+    r"^/(builds|query(?:/available-dimensions)?)$"
 )
 
 

@@ -144,4 +144,5 @@ def test_legacy_independent_deployment_remains_readable(store, tmp_path):
     )
     assert deploy.reconcile(key, build.initial_deployment.generation).deployment_status == "DEPLOYED"
     assert deploy.current(key).active_build_id == build.build_id
-    assert deploy.history(key, cursor=None, limit=20).items[0].build_id == build.build_id
+    history = deploy.list(key.repository, key.environment, key.branch_name)
+    assert history.items[0].build_id == build.build_id
