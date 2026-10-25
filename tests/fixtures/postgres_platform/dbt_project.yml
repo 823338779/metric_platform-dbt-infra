@@ -1,8 +1,0 @@
-name: postgres_platform
-version: '1.0.0'
-config-version: 2
-profile: postgres_platform
-model-paths: [models]
-models:
-  postgres_platform:
-    +materialized: table
