@@ -15,6 +15,35 @@ from dbt_metricflow_service.execution.query import QueryExecutor
 from dbt_metricflow_service.models.queries import QueryRequest
 
 
+def test_available_dimensions_reads_saved_manifest_each_request_without_workspace(monkeypatch, settings):
+    calls = []
+    build = SimpleNamespace(build_id="build", output_set_id="saved-output")
+
+    class Artifacts:
+        def read_file(self, set_id, path):
+            calls.append((set_id, path))
+            return b"saved-manifest"
+
+    class Client:
+        def __init__(self, manifest):
+            assert manifest == b"saved-manifest"
+
+        def available_dimensions(self, metrics):
+            assert metrics == ("revenue",)
+            return DimensionQueryResult()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("dimension discovery must not materialize a workspace or profile")
+
+    monkeypatch.setattr("dbt_metricflow_service.execution.query.MetricFlowClient", Client)
+    monkeypatch.setattr("dbt_metricflow_service.execution.query.materialized_workspace", forbidden)
+    monkeypatch.setattr("dbt_metricflow_service.execution.query.materialized_profile", forbidden)
+    executor = QueryExecutor(settings, Artifacts())
+    executor.available_dimensions(build, ("revenue",))
+    executor.available_dimensions(build, ("revenue",))
+    assert calls == [("saved-output", "target/manifest.json")] * 2
+
+
 def test_dimension_query_uses_one_context_and_one_client(monkeypatch, settings):
     build = SimpleNamespace(build_id="00000000-0000-0000-0000-000000000001",
                             config_snapshot=SimpleNamespace(schema_name="analytics"))

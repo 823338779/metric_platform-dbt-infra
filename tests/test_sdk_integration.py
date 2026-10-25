@@ -109,7 +109,10 @@ def test_real_build_and_all_http_operations(database, settings, build_request, t
     assert logs.json()["nextCursor"]
     catalog = client.get(f"/builds/{build_id}/catalog")
     assert catalog.status_code == 200, catalog.text
-    assert "model.api_review.orders" in catalog.json()["nodes"]
+    resources = {row["unique_id"]: row for row in catalog.json()}
+    assert resources["model.api_review.orders"]["resource_type"] == "model"
+    assert resources["metric.api_review.revenue"]["resource_type"] == "metric"
+    assert resources["semantic_model.api_review.orders"]["resource_type"] == "semantic_model"
     resource = client.get(f"/builds/{build_id}/resources/model.api_review.orders")
     assert resource.status_code == 200, resource.text
     assert "12.34" in resource.json()["source"]["content"]

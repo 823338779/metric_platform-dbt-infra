@@ -15,6 +15,8 @@ from dbt.cli.main import dbtRunnerResult as DbtResult
 from dbt.contracts.graph.manifest import Manifest
 from dbt.contracts.graph.semantic_manifest import SemanticManifest
 from dbt.exceptions import InvalidSelectorError
+from metricflow_semantic_interfaces.implementations.semantic_manifest import PydanticSemanticManifest
+from metricflow_semantics.model.dbt_manifest_parser import transform_dbt_generated_manifest
 
 from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.engines import InvalidDimensionsRequest
@@ -26,7 +28,6 @@ from dbt_metricflow_service.models.queries import ResultColumn
 if TYPE_CHECKING:
     from dbt_common.events.base_types import EventMsg
 
-ARTIFACT_CONTEXT = "artifact"
 DBT_LIST = "ls"
 MANIFEST_REQUIRED_MESSAGE = "saved Manifest is required for this operation"
 LINEAGE_FAILED_MESSAGE = "dbt ls command failed"
@@ -73,9 +74,6 @@ class DbtClient:
             args.extend([strings.DBT_TARGET_PATH_OPTION, str(target_path)])
         return self.invoke(args, callbacks=callbacks)
 
-    def catalog(self) -> JsonObject:
-        return cast(JsonObject, self._artifact.to_dict(omit_none=False, context={ARTIFACT_CONTEXT: True}))
-
     def resource(self, resource_id: str) -> JsonObject:
         return cast(JsonObject, self._manifest.expect(resource_id).to_dict(omit_none=False))
 
@@ -100,6 +98,15 @@ class DbtClient:
         """调用 dbt 转换器生成 MetricFlow 输入，无需重新 parse 业务定义。"""
         path.parent.mkdir(parents=True, exist_ok=True)
         SemanticManifest(self._manifest).write_json_to_file(str(path))
+
+    def semantic_manifest(self) -> PydanticSemanticManifest:
+        """直接从构建 Manifest 转换内存语义模型，保留 MetricFlow 的原生转换规则。"""
+        return transform_dbt_generated_manifest(SemanticManifest(self._manifest)._get_pydantic_semantic_manifest())
+
+    @property
+    def adapter_type(self) -> str:
+        """读取构建时记录的 SQL 方言，不加载本地项目配置。"""
+        return self._artifact.metadata.adapter_type
 
     def preview(self, selector: str, *, project: Path, profiles: Path, limit: int) -> DataQueryResult:
         result = self.invoke([

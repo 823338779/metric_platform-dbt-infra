@@ -46,7 +46,6 @@ def api(monkeypatch, settings, build_request):
                         lambda *args: ([], None))
     monkeypatch.setattr("dbt_metricflow_service.storage.execution_logs.ExecutionLogStore.list",
                         lambda *args: ([], "poll-cursor", False))
-    monkeypatch.setattr("dbt_metricflow_service.engines.dbt.DbtClient.catalog", lambda _: {"nodes": {}})
     monkeypatch.setattr("dbt_metricflow_service.engines.dbt.DbtClient.resource",
                         lambda *args: {"unique_id": "model.orders"})
     monkeypatch.setattr("dbt_metricflow_service.engines.dbt.DbtClient.source_path", lambda *args: "models/orders.sql")
@@ -59,7 +58,7 @@ def api(monkeypatch, settings, build_request):
     ("GET", f"/builds?environmentId={ENVIRONMENT}", None, 200, "items"),
     ("GET", f"/builds/{BUILD_ID}", None, 200, "execution"),
     ("GET", f"/builds/{BUILD_ID}/execution-logs", None, 200, "nextCursor"),
-    ("GET", f"/builds/{BUILD_ID}/catalog", None, 200, "nodes"),
+    ("GET", f"/builds/{BUILD_ID}/catalog", None, 200, None),
     ("GET", f"/builds/{BUILD_ID}/resources/model.orders", None, 200, "source"),
     ("GET", f"/builds/{BUILD_ID}/lineage?selector=orders", None, 200, None),
     ("GET", f"/deployments?repository=repo&environmentId={ENVIRONMENT}", None, 200, "items"),
@@ -86,6 +85,8 @@ def test_openapi_describes_modes_and_system_responses(api):
     _, app, _ = api
     paths = app.openapi()["paths"]
     assert sum(method in {"get", "post"} for item in paths.values() for method in item) == 14
+    catalog_content = paths["/builds/{build_id}/catalog"]["get"]["responses"]["200"]["content"]
+    assert catalog_content["application/json"]["schema"]["type"] == "array"
     schema = paths["/query"]["post"]["requestBody"]["content"]["application/json"]["schema"]
     assert schema["discriminator"]["propertyName"] == "mode"
     assert set(schema["discriminator"]["mapping"]) == {"QUERY", "EXPLAIN", "PREVIEW", "DIMENSION_VALUES"}
@@ -115,10 +116,11 @@ def test_invalid_queries_do_not_start_engine(api, body):
 
 
 @pytest.mark.parametrize("threshold", [1e-5, 1e-7])
-def test_lineage_limit_matches_http_json_bytes(api, settings, threshold):
+@pytest.mark.parametrize("suffix", ["lineage?selector=orders", "catalog"])
+def test_resource_list_limit_matches_http_json_bytes(api, settings, threshold, suffix):
     _, _, queries = api
     queries.lineage = lambda *args: [{"config": {"meta": {"threshold": threshold, "label": "中文"}}}]
-    path = f"/builds/{BUILD_ID}/lineage?selector=orders"
+    path = f"/builds/{BUILD_ID}/{suffix}"
     response = TestClient(create_app(settings)).get(path)
     assert response.status_code == 200
     actual_size = len(response.content)

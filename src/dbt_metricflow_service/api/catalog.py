@@ -16,8 +16,8 @@ from ..models.contracts import JsonObject
 def router(service: CatalogService) -> APIRouter:
     routes = APIRouter(prefix=strings.ROUTE_BUILDS)
 
-    @routes.get(strings.ROUTE_BUILD_ID_CATALOG, response_model=JsonObject)
-    def catalog(build_id: UUID) -> JsonObject:
+    @routes.get(strings.ROUTE_BUILD_ID_CATALOG, response_model=list[JsonObject])
+    def catalog(build_id: UUID) -> list[JsonObject]:
         return service.list(build_id)
 
     @routes.get(strings.ROUTE_BUILD_ID_LINEAGE, response_model=list[JsonObject])

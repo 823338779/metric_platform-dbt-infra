@@ -61,12 +61,9 @@ class CatalogService:
             raise ServiceError(strings.ARTIFACT_UNAVAILABLE, UNREADABLE_CATALOG_MESSAGE, 503) from error
         return manifest
 
-    def list(self, build_id: UUID | str) -> JsonObject:
-        _, manifest = self.read(build_id)
-        try:
-            return DbtClient(manifest).catalog()
-        except Exception as error:
-            raise ServiceError(strings.ARTIFACT_UNAVAILABLE, UNREADABLE_CATALOG_MESSAGE, 503) from error
+    def list(self, build_id: UUID | str) -> list[JsonObject]:
+        # 复用 dbt 原生 ls，以封存 Manifest 为上下文列出全部默认资源类型。
+        return self.lineage(build_id, "*")
 
     def resource(self, build_id: UUID | str, resource_id: str) -> ResourceView:
         # 一次读取固定构建的 Manifest，取得完整节点和对应源码路径。

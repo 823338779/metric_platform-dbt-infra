@@ -37,8 +37,18 @@ class QueryExecutor:
 
     def available_dimensions(self, build: StoredBuild, metrics: tuple[str, ...]) -> DimensionQueryResult:
         def invoke() -> DimensionQueryResult:
-            with self._engine_context(build) as (manifest, project, profiles):
-                return MetricFlowClient(manifest, project=project, profiles=profiles).available_dimensions(metrics)
+            try:
+                # 每次请求直接读取该构建封存的 Manifest，不还原工程或生成 profile。
+                manifest = ManifestCapture.read(self.artifacts, build.output_set_id)
+                return MetricFlowClient(manifest).available_dimensions(metrics)
+            except ServiceError:
+                raise
+            except (InvalidDimensionsRequest, DimensionValueMappingError) as error:
+                raise ServiceError(strings.INVALID_QUERY, "query execution failed", 422,
+                                   build_id=build.build_id) from error
+            except Exception as error:
+                raise ServiceError(strings.COMMAND_FAILED, "query execution failed", 503,
+                                   build_id=build.build_id) from error
         return asyncio.run(run_serialized(invoke))
 
     def execute_query(self, build: StoredBuild, request: QueryRequest) -> DataQueryResult:

@@ -10,6 +10,7 @@ from dbt_metricflow.cli.cli_configuration import CLIConfiguration
 from metricflow.engine.metricflow_engine import MetricFlowEngine, MetricFlowQueryRequest, MetricFlowQueryType
 from metricflow_semantic_interfaces.type_enums.time_granularity import TimeGranularity
 from metricflow_semantics.errors.error_classes import InformativeUserError, InvalidQueryException
+from metricflow_semantics.model.semantic_manifest_lookup import SemanticManifestLookup
 from metricflow_semantics.naming.linkable_spec_name import StructuredLinkableSpecName
 from pydantic import JsonValue
 
@@ -26,12 +27,14 @@ from dbt_metricflow_service.engines.models import (
     QueryMode,
 )
 
+from .planning import PlanningSqlClient
 from .results import serialize_rows
 
 FILTER_VALUE_UNSUPPORTED_MESSAGE: Final[str] = '筛选值类型不支持'
 IN_FILTER_LIMIT_MESSAGE: Final[str] = 'IN 筛选值超限'
 INVALID_METRICS_DIMENSIONS_MESSAGE: Final[str] = 'invalid metrics or dimensions'
 METRICFLOW_RESULT_MISSING_MESSAGE: Final[str] = 'MetricFlow 未返回结果集'
+QUERY_CONTEXT_REQUIRED_MESSAGE: Final[str] = 'query execution requires project and profiles'
 
 PATH_SEPARATOR: Final[str] = "__"
 
@@ -68,13 +71,15 @@ def _where_constraints(request: CompiledQuery) -> list[str]:
 
 
 class MetricFlowClient:
-    def __init__(self, manifest: bytes, *, project: Path, profiles: Path) -> None:
+    def __init__(self, manifest: bytes, *, project: Path | None = None, profiles: Path | None = None) -> None:
         self._manifest = manifest
         self._project = project
         self._profiles = profiles
 
     @cached_property
     def _engine(self) -> MetricFlowEngine:
+        if self._project is None or self._profiles is None:
+            raise ValueError(QUERY_CONTEXT_REQUIRED_MESSAGE)
         DbtClient(self._manifest).write_semantic_manifest(self._project / strings.SEMANTIC_MANIFEST_PATH)
         configuration = CLIConfiguration()
         configuration.setup(dbt_profiles_path=self._profiles, dbt_project_path=self._project,
@@ -87,9 +92,18 @@ class MetricFlowClient:
             )
         return configuration.mf
 
+    @cached_property
+    def _dimension_engine(self) -> MetricFlowEngine:
+        # 每个客户端只使用传入的构建快照，不写 semantic_manifest 或读取项目目录。
+        client = DbtClient(self._manifest)
+        return MetricFlowEngine(
+            semantic_manifest_lookup=SemanticManifestLookup(client.semantic_manifest()),
+            sql_client=PlanningSqlClient(client.adapter_type),
+        )
+
     def available_dimensions(self, metrics: tuple[str, ...]) -> DimensionQueryResult:
         """读取所选指标的可用维度；仅目录校验错误转换为可公开的业务错误。"""
-        engine = self._engine
+        engine = self._dimension_engine
         try:
             return available_dimensions(engine, metrics)
         except ValueError as error:

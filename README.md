@@ -158,7 +158,7 @@ uv run --frozen dbt-service-admin build --file build-request.json
 | `GET /builds`、`GET /builds/{buildId}` | environmentId 必填，repository/branchName/buildStatus 可选；固定身份读取 |
 | `GET /builds/{buildId}/execution-logs` | 按构建增量读取结构化 dbt 详细日志，支持 cursor、limit；[前端对接说明](docs/build-execution-logs-api.md) |
 | `GET /deployments/current`、`GET /deployments` | 自然键当前观察、意图历史 |
-| `GET /builds/{buildId}/catalog` | 返回 Manifest 原生指标、语义模型、节点与依赖映射 |
+| `GET /builds/{buildId}/catalog` | 通过 dbt ls 返回模型、指标、语义模型等原生资源数组 |
 | `GET /builds/{buildId}/resources/{resourceId}` | 一次返回原生节点 resource 与源码文件 source，不提供 view 入参或独立 /source 路由 |
 | `GET /builds/{buildId}/lineage?selector=...` | 用 dbt 原生 selector 查询血缘，返回 `dbt ls --output json` 的节点数组 |
 | `POST /query/available-dimensions?build_id={build_id}` | build_id 为独立 URL 参数，请求体指定 metrics，200 同步返回可用的 dimensions 列表，包含时间粒度和允许的过滤操作 |
@@ -182,13 +182,13 @@ uv run --frozen dbt-service-admin init-db
 
 空库初始化执行 storage/schema.sql。服务只支持该完整结构，不提供旧协议或旧持久化数据的升级与兼容入口。
 
-持久化保留构建、部署、异步任务及执行尝试、构建日志和必要的产物快照。成功任务不再保存通用结果和诊断副本；目录直接读取封存的 manifest.json，元数据只保存独立的版本和来源字段。完整构建每次独立执行，不保留旧发布基线和默认输出复用机制。执行产物保留恢复工程所需文件及 Manifest，dbt 同时生成的 semantic_manifest 也会保留；构建完成不要求 catalog.json 或额外验证证据；compiled/run、run_results、sources 和额外验证证据文件只在构建期间使用。
+持久化保留构建、部署、异步任务及执行尝试、构建日志和必要的产物快照。成功任务不再保存通用结果和诊断副本；目录使用封存的 manifest.json 调用 dbt ls，元数据只保存独立的版本和来源字段。完整构建每次独立执行，不保留旧发布基线和默认输出复用机制。执行产物保留恢复工程所需文件及 Manifest，dbt 同时生成的 semantic_manifest 也会保留；构建完成不要求 catalog.json 或额外验证证据；compiled/run、run_results、sources 和额外验证证据文件只在构建期间使用。
 
 服务调用采用三层流程：**业务入口 → 上下文信息组装 → 对应 client 方法**。
 
 - 业务入口：`application` 接收构建、目录、查询请求，处理业务状态和 API 契约。
-- 上下文组装：目录读取固定构建的 Manifest 原文；`QueryExecutor._engine_context` 准备 Manifest、临时项目、profile 和受保护的执行环境；构建流程准备源项目、目标和日志回调。
-- 工具入口：`engines/dbt.py` 的 `DbtClient` 提供 `build`、`catalog`、`resource`、`lineage`、`source_path`、`preview` 和语义 Manifest 转换；`engines/metricflow.py` 的 `MetricFlowClient` 提供 `available_dimensions` 与 `query`（包括 Explain、维度值）。底层 SDK 初始化和请求转换在 client 内完成。 `MetricFlowClient.query` 直接提交原生请求，不预先发现维度或校验查询字段；参数是否合法由 MetricFlow 判断，服务仅转换引擎错误类型。
+- 上下文组装：目录与血缘读取固定构建的 Manifest 原文并执行 dbt ls；`QueryExecutor._engine_context` 准备 Manifest、临时项目、profile 和受保护的执行环境；构建流程准备源项目、目标和日志回调。
+- 工具入口：`engines/dbt.py` 的 `DbtClient` 提供 `build`、`resource`、`lineage`、`source_path`、`preview` 和语义 Manifest 转换；`engines/metricflow.py` 的 `MetricFlowClient` 提供 `available_dimensions` 与 `query`（包括 Explain、维度值）。底层 SDK 初始化和请求转换在 client 内完成。 `MetricFlowClient.query` 直接提交原生请求，不预先发现维度或校验查询字段；参数是否合法由 MetricFlow 判断，服务仅转换引擎错误类型。
 
 ```python
 dbt = DbtClient(manifest_bytes)
@@ -201,9 +201,9 @@ result = metricflow.query(request)
 
 历史 client 以传入的 Manifest 原文为依据，不重新从磁盘读取 Manifest 或 parse 业务 YAML。实际 SQL 执行仍需要项目配置和连接 profile；首次 `DbtClient().build(project, profiles)` 使用源工程产生新 Manifest。日志、取消和临时目录生命周期由上下文/执行层管理，client 在该作用域内使用。 临时项目、profile、target 的实际地址只用于当次执行；引擎日志在入库和生成诊断摘要前将这些地址替换为 `[runtime]`。历史读取仅依赖构建/产物身份与相对文件名。
 
-`ManifestCapture` 只负责捕获原生对象、调用原生序列化、保存和传递字节，不查找 Manifest 字段。 保存时启用 vendored dbt 的 `portable` 序列化上下文，由 dbt 去除 `root_path`、`compiled_path`、`build_path` 运行路径字段，内存对象保留当次执行所需的路径。历史请求由 `DbtClient` 把原文整体交给 dbt `WritableManifest` / `Manifest` SDK；目录返回 SDK 的完整原生序列化结果，节点通过 `Manifest.expect` 查询，血缘由 `DbtClient` 注入历史 Manifest 后调用原生 `dbt ls --select=... --output json` 获取，服务不直接调用 dbt 图算法。源码文件路径来自 dbt 返回的节点结果。服务不再实现指标名称映射或读取 relation 后拼接预览 SQL。
+`ManifestCapture` 只负责捕获原生对象、调用原生序列化、保存和传递字节，不查找 Manifest 字段。 保存时启用 vendored dbt 的 `portable` 序列化上下文，由 dbt 去除 `root_path`、`compiled_path`、`build_path` 运行路径字段，内存对象保留当次执行所需的路径。历史请求由 `DbtClient` 把原文整体交给 dbt `WritableManifest` / `Manifest` SDK；节点通过 `Manifest.expect` 查询，目录与血缘由 `DbtClient` 注入历史 Manifest 后调用原生 `dbt ls --select=... --output json` 获取，服务不直接调用 dbt 图算法。源码文件路径来自 dbt 返回的节点结果。服务不再实现指标名称映射或读取 relation 后拼接预览 SQL。
 
-资源目录接口仅读取对应构建的 `target/manifest.json`，不生成或存储 `published_catalog.json`，也不再创建统一资源模型。`GET /builds/{buildId}/catalog` 返回 dbt SDK 的完整原生 artifact，包括 `metadata`、`metrics`、`semantic_models`、`nodes`、`sources` 和依赖映射等；字段与扩展支持以当前 dbt SDK 为准。维度直接位于 `semantic_models[unique_id].dimensions`，不存在服务生成的独立维度资源 ID。表列来自 `nodes` / `sources` 中的 YAML 声明，不代表数据库实际列清单。构建不运行 docs generate，不依赖 `catalog.json`。
+资源目录接口从数据库读取对应构建封存的 `target/manifest.json`，恢复为 dbt Manifest 并注入 `dbtRunner`，执行 `dbt ls --select=* --output json`。`GET /builds/{buildId}/catalog` 返回原生资源 JSON 数组，包含模型、指标、语义模型、来源等 dbt 默认资源类型；每项提供 `unique_id`、`name`、`resource_type`、`depends_on`、`config` 等 dbt ls 原生字段，不再返回完整 Manifest 或 `nodes` / `metrics` 等顶层映射。目录复用血缘查询的串行执行、临时工程/profile 和响应大小限制，不重新 parse 业务 YAML 或加载磁盘 Manifest。语义模型的维度和模型列声明通过资源详情接口的 `resource` 获取，不代表数据库实际列清单。构建不运行 docs generate，不依赖 `catalog.json`。
 
 此次目录接口返回格式有变化：移除 `items`、`nextCursor`、kind 筛选和搜索分页，以及资源的 `attributes`、`capabilities`、`nativeDetails` 包装。资源详情统一返回 `{buildId, resourceId, resource, source}`，`resource` 保留完整原生节点；`/builds/{buildId}/lineage?selector=...` 透传原生节点数组（包含 `unique_id`、`depends_on` 等），替代旧 `/resources/{resourceId}/lineage` 和 `parent_map/child_map` 返回结构，服务不读取 Manifest 中的依赖字段，也不自行推导或折叠 ephemeral 节点。资源详情中的 `source` 通过产物集合 ID 和工程内相对文件名读取数据库源码快照，不访问原构建目录；有源码时为 `{path, content}`（整个文件），无源码路径或输入快照时为 null，已有快照读取失败仍返回 SOURCE_UNAVAILABLE/503。独立 `/source` 路由已删除，返回 404；不支持通过 view 入参切换返回内容。调用方需要从响应的 `resource` 读取原生节点，从 `source` 读取源码。历史 Manifest 无需迁移。 新捕获的 Manifest 不保存临时执行地址；既有历史快照保持原有内容，不自动回写。
 
@@ -211,7 +211,7 @@ result = metricflow.query(request)
 
 `ls` 使用当次准备的临时项目/profile和历史 Manifest，不重新 parse 业务 YAML，不连接仓库执行查询。元数据操作复用引擎串行与环境恢复保护，不依赖物化表存在；项目配置、适配器和 profile 的初始化条件仍须满足。
 
-查询请求改用 `metrics`，直接传 MetricFlow 指标名（例如 `["revenue"]`），不再接受 `metricResourceIds` 或从 dbt unique_id 映射名称。排序的指标 `fieldId` 同样使用指标名。`available-dimensions` 仍实时调用 MetricFlow，保留按构建、指标集合和路径确定的 `optionId`；维度选项的 `name`、`semanticModelName` 来自引擎结果。
+查询请求改用 `metrics`，直接传 MetricFlow 指标名（例如 `["revenue"]`），不再接受 `metricResourceIds` 或从 dbt unique_id 映射名称。排序的指标 `fieldId` 同样使用指标名。`available-dimensions` 每次从指定 build 的已封存产物读取 `manifest.json` 原文并传给 MetricFlowClient，在内存中转换语义模型与初始化引擎；不创建临时目录、不读写本地项目或 profiles、不运行 dbt debug，也不连接数据仓库。时间粒度仍通过对应 SQL 方言的 explain 计划验证。保留按构建、指标集合和路径确定的 `optionId`；维度选项的 `name`、`semanticModelName` 来自引擎结果。
 
 PREVIEW 改用 `selector` 参数（例如 `"orders"`），交给 `dbt show` 原生选择和执行，必须匹配一个非 seed 节点。它执行已保存模型的 SQL，而不是读取既有物化表；服务不再拼接 `select * from relation`。seed 被排除，避免 dbt SeedRunner 的物化行为。旧 `datasetResourceId` 不再接受。
 
