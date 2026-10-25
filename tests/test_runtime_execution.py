@@ -13,8 +13,9 @@ import pytest
 from dbt.cli.main import dbtRunner
 from psycopg2.extras import Json
 
-import dbt_metricflow_service.runtime.dbt_executor as runtime_execution
-from dbt_metricflow_service.runtime.dbt_executor import ExecutionError, RuntimeExecutor
+import dbt_metricflow_service.execution.build as runtime_execution
+from dbt_metricflow_service.execution.build import BuildExecutor
+from dbt_metricflow_service.execution.errors import ExecutionError
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.jobs import JobStore
@@ -156,7 +157,7 @@ def execution(tmp_path):
          profiles_dir=tmp_path / "profiles",
         max_output_bytes=256, temp_root=tmp_path / "work",
     )
-    yield RuntimeExecutor(settings, jobs, artifacts), database, project_id, set_id
+    yield BuildExecutor(settings, jobs, artifacts), database, project_id, set_id
     database.close()
 
 
@@ -211,7 +212,7 @@ async def test_cancellation_or_slow_call_waits_for_engine_before_workspace_remov
             executor.settings.temp_root, job.job_id, job.attempt_id
         ) as attempt:
             project = attempt / "project"
-            await runtime_execution._thread(executor.artifacts.materialize, job.input_set_id, project)
+            await runtime_execution.run_in_thread(executor.artifacts.materialize, job.input_set_id, project)
             await run_build(executor, job, project)
 
     task = asyncio.create_task(run_engine())
@@ -282,7 +283,7 @@ async def test_repeated_cancellation_waits_for_filesystem_thread(tmp_path):
         if release.wait(5):
             marker.touch()
 
-    task = asyncio.create_task(runtime_execution._thread(operation))
+    task = asyncio.create_task(runtime_execution.run_in_thread(operation))
     try:
         async with asyncio.timeout(5):
             while not started.is_set():

@@ -289,3 +289,16 @@ uv run --frozen pytest -q -s tests/integration/test_execution_environment_isolat
 已移除构建清理任务和 `CLEANING/CLEANED` 生命周期，不再通过清理任务关闭历史查询，也不删除共享数据库对象。临时目录仍在执行结束后自动清理。存量数据库需停止服务后，在目标服务 schema 的事务内执行 `src/dbt_metricflow_service/storage/remove_run_cleanup.sql`；保留历史记录，未完成的旧清理任务标记为失败。
 
 任务 `kind` 字段已移除，执行器直接构建；产物集合的 `SOURCE/EXECUTION` 类型保留。已有数据库停服后在目标服务 schema 的事务内执行 `remove_job_kind.sql`；若仍存在旧清理生命周期字段，先执行 `remove_run_cleanup.sql`。迁移保留任务和 attempt 历史，将未完成的旧清理任务标记失败，避免当作构建领取。
+
+
+服务执行代码按职责组织，原 `runtime/` 包已移除：
+
+- `bootstrap.py`：依赖组装与服务启停，持有查询执行器和后台 worker。
+- `execution/build.py`：`BuildExecutor` 准备源码、获取目标租约，直接调用 dbt 并保存 Manifest。
+- `execution/query.py`：`QueryExecutor` 执行查询、维度获取和血缘查询。
+- `workers/build.py`：任务领取、心跳、取消和终态提交；显式接收配置、存储和实例身份。
+- `execution/environment.py`、`workspace.py`、`threads.py`：共用环境、临时目录和取消安全的线程等待。
+- `execution/dbt.py`、`logs.py`、`log_writer.py`：dbt 诊断上下文、事件结构和日志批量写入。
+- `execution/errors.py`、`models.py`、`toolchain.py`：共用执行错误、结果类型和工具链标识。
+
+HTTP 查询入口注入 `runtime.queries` 的方法；执行与 worker 模块不反向依赖 `bootstrap`，共用上下文不依赖构建或查询编排。

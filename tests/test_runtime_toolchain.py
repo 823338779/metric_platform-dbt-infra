@@ -2,10 +2,10 @@
 
 import pytest
 
-import dbt_metricflow_service.runtime.service as runtime_service
+import dbt_metricflow_service.execution.toolchain as runtime_service
 
 SOURCE_PATHS = ("application/builds.py", "storage/jobs.py", "__init__.py")
-RUNTIME_PATH = "runtime/service.py"
+RUNTIME_PATH = "execution/toolchain.py"
 UTF8 = "utf-8"
 INITIAL_SOURCE = "VALUE = 1\n"
 UPDATED_SOURCE = "VALUE = 2\n"

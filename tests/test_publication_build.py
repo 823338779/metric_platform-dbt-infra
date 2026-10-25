@@ -9,8 +9,8 @@ import pytest
 import yaml
 
 from dbt_metricflow_service.delegates.clients.dbt_client import DbtClient
-from dbt_metricflow_service.platform.build import execute_build
-from dbt_metricflow_service.runtime.dbt_executor import ExecutionError, RuntimeExecutor
+from dbt_metricflow_service.execution.build import BuildExecutor, execute_build
+from dbt_metricflow_service.execution.errors import ExecutionError
 from dbt_metricflow_service.storage.records import JobRequest
 from tests.data_helpers import leased_job
 
@@ -42,7 +42,7 @@ def publication_executor(tmp_path, monkeypatch):
         captured.update(kwargs)
         return "sealed-output"
 
-    executor = RuntimeExecutor(
+    executor = BuildExecutor(
         SimpleNamespace(profiles_dir=tmp_path, max_artifact_file_bytes=1024 * 1024, max_output_bytes=1024),
         SimpleNamespace(db=None, phase=lambda *args, **kwargs: True), SimpleNamespace(capture=capture),
     )

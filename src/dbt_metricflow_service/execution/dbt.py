@@ -8,8 +8,10 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from dbt_metricflow_service import constants as strings
+from dbt_metricflow_service.storage.records import JobErrorDetail
 
 from .embedded import create_output, engine_environment
+from .errors import ExecutionError
 from .logs import EngineLog
 from .models import JobRecord, JobStatus
 
@@ -37,8 +39,6 @@ class DbtExecution:
         self.capture_text(EngineLog.from_dbt(event))
 
     def check(self, result: DbtResult) -> None:
-        from dbt_metricflow_service.runtime.dbt_executor import ExecutionError
-
         self.exit_code = 0 if result.success else (2 if result.exception is not None else 1)
         if result.exception is not None:
             self.log_exception(result.exception)
@@ -66,9 +66,6 @@ def dbt_execution(
     project: str, environment: Mapping[str, str], max_output_bytes: int,
     log_sink: Callable[[EngineLog], None] | None = None,
 ) -> Iterator[DbtExecution]:
-    from dbt_metricflow_service.runtime.dbt_executor import ExecutionError
-    from dbt_metricflow_service.storage.records import JobErrorDetail
-
     execution = DbtExecution(project, max_output_bytes)
     try:
         with engine_environment(environment, execution.output, log_sink) as capture_text:

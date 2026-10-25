@@ -17,7 +17,7 @@ WORKSPACE_PATH_CHANGED: Final[str] = "workspace path changed during execution"
 
 @contextmanager
 def attempt_workspace(temp_root: Path, job_id: str, attempt_id: str) -> Iterator[Path]:
-    """创建安全的 attempt 目录，调用方须在退出前确认本地子进程停止。"""
+    """创建安全的 attempt 目录，调用方须在退出前等待执行线程停止。"""
     # UUID 规范化防止调用方将路径片段作为任务标识传入。
     job_name, attempt_name = str(UUID(str(job_id))), str(UUID(str(attempt_id)))
     root = Path(temp_root)

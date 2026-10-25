@@ -27,7 +27,7 @@ def runtime_pair(tmp_path):
     dsn = os.getenv("SERVICE_TEST_DATABASE_URL")
     if not dsn:
         pytest.skip("需要独立 SERVICE_TEST_DATABASE_URL 测试库")
-    from dbt_metricflow_service.runtime.service import Runtime
+    from dbt_metricflow_service.bootstrap import Runtime
     from dbt_metricflow_service.storage.postgres import Database
     db = Database(dsn)
     db.initialize()

@@ -43,9 +43,11 @@ def test_application_exposes_only_fixed_commit_business_routes(monkeypatch):
         "Runtime",
         lambda settings: SimpleNamespace(
             db=None, jobs=SimpleNamespace(db=None), artifacts=None, toolchain="test", settings=settings,
-            lineage=lambda *_: pytest.fail("unexpected lineage query"),
-            available_dimensions=lambda *_: pytest.fail("unexpected dimensions query"),
-            execute_query=lambda *_: pytest.fail("OpenAPI generation executed a query"),
+            queries=SimpleNamespace(
+                lineage=lambda *_: pytest.fail("unexpected lineage query"),
+                available_dimensions=lambda *_: pytest.fail("unexpected dimensions query"),
+                execute_query=lambda *_: pytest.fail("OpenAPI generation executed a query"),
+            ),
         ),
     )
     app = api.create_app(

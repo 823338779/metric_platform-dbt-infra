@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from typing import Final
@@ -57,3 +58,12 @@ class JobRecord(BaseModel):
             started_at=self.started_at, finished_at=self.finished_at, exit_code=exit_code,
             stdout=self.stdout, stderr=stderr, output_truncated=self.output_truncated,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionResult:
+    """执行完成的产物身份；只有 worker 的带租约事务能封存产物。"""
+    # 当前 attempt 产生的 STAGING 集合，交给发布事务封存。
+    output_set_id: str | None = None
+
+

@@ -6,8 +6,9 @@ from pathlib import Path
 from dbt_metricflow_service.delegates.clients.dbt_client import DbtClient
 from dbt_metricflow_service.execution.dbt import dbt_execution
 from dbt_metricflow_service.execution.embedded import run_serialized
-from dbt_metricflow_service.runtime.execution_logs import ExecutionLogWriter
-from dbt_metricflow_service.runtime.dbt_executor import ExecutionError, _thread
+from dbt_metricflow_service.execution.errors import ExecutionError
+from dbt_metricflow_service.execution.log_writer import ExecutionLogWriter
+from dbt_metricflow_service.execution.threads import run_in_thread
 from dbt_metricflow_service.storage.execution_logs import ExecutionLogStore
 
 
@@ -43,7 +44,7 @@ async def invoke_job_for_test(executor, job, call, phase):
             lambda: executor._authorize(job, phase, external=call.write_operation), log_sink=writer.emit,
         )
     finally:
-        await _thread(writer.close)
+        await run_in_thread(writer.close)
     if record.exit_code:
         from dbt_metricflow_service.storage.records import JobErrorDetail
         raise ExecutionError("COMMAND_FAILED", JobErrorDetail.model_validate(record, from_attributes=True),

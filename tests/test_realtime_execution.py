@@ -10,8 +10,8 @@ import pytest
 
 from dbt_metricflow_service.application.errors import ServiceError
 from dbt_metricflow_service.execution.embedded import ENGINE_LOCK
+from dbt_metricflow_service.execution.query import QueryExecutor
 from dbt_metricflow_service.platform.models import DataQueryResult, DimensionQueryResult, PlatformQueryRequest
-from dbt_metricflow_service.runtime.service import Runtime
 from tests.data_helpers import stored_build
 from tests.test_execution_profiles import secrets as secrets
 from tests.test_execution_profiles import settings as infrastructure
@@ -21,7 +21,7 @@ from tests.test_publication_storage import store as store
 
 @pytest.fixture
 def realtime(tmp_path, secrets):
-    runtime = Runtime.__new__(Runtime)
+    runtime = QueryExecutor.__new__(QueryExecutor)
     runtime.settings = replace(infrastructure(), profiles_dir=tmp_path, max_output_bytes=64,
                                temp_root=tmp_path / "queries", max_result_bytes=1024)
     build = stored_build(config_snapshot=snapshot())
@@ -254,7 +254,7 @@ def test_real_database_query_path_only_reads_without_persisting_records(store, t
 
     builds, view, jobs, artifacts = ready_build(store, tmp_path)
     build = builds.store.get(view.build_id)
-    runtime = Runtime.__new__(Runtime)
+    runtime = QueryExecutor.__new__(QueryExecutor)
     runtime.settings = replace(infrastructure(), profiles_dir=tmp_path,
                                max_output_bytes=64, temp_root=tmp_path / "queries")
     runtime.jobs, runtime.artifacts = jobs, artifacts
@@ -366,7 +366,7 @@ def test_cancelled_queries_wait_for_worker_and_restore_environment(realtime, mon
     import threading
 
     import dbt_metricflow_service.delegates.clients.metric_flow_client as engine
-    import dbt_metricflow_service.runtime.service as service
+    import dbt_metricflow_service.execution.query as service
     from dbt_metricflow_service.execution.embedded import ENGINE_LOCK
 
     runtime, build, events = realtime

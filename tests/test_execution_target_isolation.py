@@ -62,10 +62,10 @@ def test_unknown_outcome_keeps_target_blocked(store):
 async def test_worker_releases_target_after_completed_dbt_failure(store, tmp_path, monkeypatch, interrupted):
     from dbt.cli.main import dbtRunner
 
-    from dbt_metricflow_service.runtime.worker import Worker
     from dbt_metricflow_service.storage.builds import BuildStore
     from dbt_metricflow_service.storage.entities import RuntimeAttempt, RuntimeJob
     from tests.dbt_execution_helpers import EngineCall
+    from tests.worker_helpers import make_worker
 
     body = request()
     first = leased(store, body)
@@ -74,7 +74,7 @@ async def test_worker_releases_target_after_completed_dbt_failure(store, tmp_pat
     targets = ExecutionTargetStore(store.db)
     assert targets.claim(first.job_id, first.lease_token)
     assert not targets.claim(second.job_id, second.lease_token)
-    worker = Worker(SimpleNamespace(
+    worker = make_worker(SimpleNamespace(
         db=store.db, jobs=jobs, artifacts=None,
         settings=SimpleNamespace(max_output_bytes=1024, heartbeat_seconds=15),
     ))

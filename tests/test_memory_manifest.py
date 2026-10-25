@@ -10,9 +10,9 @@ import pytest
 from dbt.cli.main import dbtRunner
 from dbt.contracts.graph.manifest import Manifest
 
+from dbt_metricflow_service.execution.environment import build_engine_environment
 from dbt_metricflow_service.execution.models import JobStatus
 from dbt_metricflow_service.platform.manifest_capture import ManifestCapture
-from dbt_metricflow_service.runtime.dbt_executor import build_engine_environment
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.entities import ArtifactFile, ArtifactSet
 from tests.dbt_execution_helpers import EngineCall, invoke_for_test

@@ -22,9 +22,9 @@ from ..application.catalog import CatalogService
 from ..application.deployments import DeploymentService
 from ..application.errors import ServiceError
 from ..application.queries import QueryService
+from ..bootstrap import Runtime
 from ..models.service import HealthView, VersionsView
 from ..platform.source import is_ancestor, remote_head
-from ..runtime.service import Runtime
 from ..storage.builds import BuildStore
 from ..storage.deployments import DeploymentStore
 from . import builds, catalog, deployments, queries
@@ -58,7 +58,7 @@ def create_app(settings: Settings) -> FastAPI:
                                            partial(remote_head, temp_root=settings.temp_root),
                                            partial(is_ancestor, temp_root=settings.temp_root),
                                            builds=build_service, catalogs=catalog_service)
-    query_service = QueryService(build_service, runtime.execute_query, runtime.available_dimensions)
+    query_service = QueryService(build_service, runtime.queries.execute_query, runtime.queries.available_dimensions)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -75,7 +75,7 @@ def create_app(settings: Settings) -> FastAPI:
     register_exception_handlers(app)
     guard = mutation_guard(settings)
     for routes in (builds.router(build_service, guard, settings), deployments.router(deployment_service, guard),
-                   catalog.router(catalog_service, runtime.lineage), queries.router(query_service, guard)):
+                   catalog.router(catalog_service, runtime.queries.lineage), queries.router(query_service, guard)):
         app.include_router(routes)
 
     # 显式保留开放响应契约，避免返回类型注解额外启用响应模型校验。

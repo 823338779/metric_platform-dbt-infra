@@ -183,13 +183,14 @@ def test_api_rejects_invalid_position_inside_scoped_cursor(context, position):
 async def test_frontend_api_reads_real_dbt_parse_events(context, tmp_path):
     from types import SimpleNamespace
 
-    from dbt_metricflow_service.runtime.dbt_executor import RuntimeExecutor, build_engine_environment
+    from dbt_metricflow_service.execution.build import BuildExecutor
+    from dbt_metricflow_service.execution.environment import build_engine_environment
     from tests.dbt_execution_helpers import EngineCall
     from tests.resource_helpers import make_resource_project
 
     client, _, db, build, job = context
     project, profiles, _ = make_resource_project(tmp_path)
-    executor = RuntimeExecutor(SimpleNamespace(max_output_bytes=32), JobStore(db), None)
+    executor = BuildExecutor(SimpleNamespace(max_output_bytes=32), JobStore(db), None)
     spec = EngineCall(
         ("dbt", "parse", "--project-dir", str(project), "--profiles-dir", str(profiles)), project,
         build_engine_environment(project, profiles, "main", "test"), False,

@@ -25,8 +25,8 @@ class ExecutionLogWriter:
         self._queue: Queue[EngineLog | None] = Queue(maxsize=QUEUE_SIZE)
         self._drop_lock = Lock()
         self._dropped = 0
-        self._thread = Thread(target=self._drain, name=THREAD_NAME, daemon=True)
-        self._thread.start()
+        self.run_in_thread = Thread(target=self._drain, name=THREAD_NAME, daemon=True)
+        self.run_in_thread.start()
 
     def emit(self, entry: EngineLog) -> None:
         """只入队，绝不等待数据库；调用者负责在引擎结束后关闭。"""
@@ -42,7 +42,7 @@ class ExecutionLogWriter:
     def close(self) -> None:
         """引擎退出后排空队列；运行时必须在线程中等待，保持心跳可用。"""
         self._queue.put(None)
-        self._thread.join()
+        self.run_in_thread.join()
         if self._dropped:
             logger.warning(LOGS_DROPPED, self._dropped)
 

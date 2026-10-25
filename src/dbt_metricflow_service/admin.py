@@ -8,11 +8,11 @@ from typing import Final
 from uuid import UUID
 
 from dbt_metricflow_service import constants as strings
+from dbt_metricflow_service.bootstrap import current_toolchain
 from dbt_metricflow_service.execution.artifacts import _is_link
 from dbt_metricflow_service.models.configuration import ConfigurationModel
 from dbt_metricflow_service.models.payloads import JsonObject, JsonValue
 from dbt_metricflow_service.platform.bindings import PROJECT_NAME_PATTERN
-from dbt_metricflow_service.runtime.service import current_toolchain
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.jobs import JobStore

@@ -10,10 +10,11 @@ from types import SimpleNamespace
 import pytest
 from dbt.cli.main import dbtRunner
 
+from dbt_metricflow_service.execution.build import BuildExecutor
+from dbt_metricflow_service.execution.errors import ExecutionError
 from dbt_metricflow_service.execution.metricflow import MetricFlowRequest, run_metricflow
 from dbt_metricflow_service.execution.models import JobStatus
 from dbt_metricflow_service.platform.models import DataQueryResult
-from dbt_metricflow_service.runtime.dbt_executor import ExecutionError, RuntimeExecutor
 from tests.data_helpers import leased_job
 from tests.dbt_execution_helpers import EngineCall, invoke_for_test, invoke_job_for_test
 
@@ -115,7 +116,7 @@ async def test_sdk_failure_restores_environment_and_logging(tmp_path, monkeypatc
 async def test_dbt_completed_failure_is_distinct_from_interrupted_write(tmp_path, monkeypatch, exception, stopped):
     # dbt 正常报告模型失败后已经结束；异常中断的写入仍保留未知结果保护。
     monkeypatch.setattr(dbtRunner, "invoke", lambda *_: SimpleNamespace(success=False, exception=exception))
-    executor = RuntimeExecutor(
+    executor = BuildExecutor(
         SimpleNamespace(max_output_bytes=1024),
         SimpleNamespace(db=None, phase=lambda *args, **kwargs: True), None,
     )
@@ -134,7 +135,7 @@ async def test_slow_dbt_write_preserves_engine_failure(tmp_path, monkeypatch):
         return SimpleNamespace(success=False, exception=None)
 
     monkeypatch.setattr(dbtRunner, "invoke", invoke)
-    executor = RuntimeExecutor(
+    executor = BuildExecutor(
         SimpleNamespace(max_output_bytes=1024),
         SimpleNamespace(db=None, phase=lambda *args, **kwargs: True), None,
     )
@@ -229,7 +230,7 @@ async def test_executor_calls_dbt_without_subprocess(tmp_path, monkeypatch):
     monkeypatch.setattr(dbtRunner, "invoke", lambda *_: SimpleNamespace(success=True, exception=None))
     settings = SimpleNamespace(max_output_bytes=64)
     jobs = SimpleNamespace(db=None, phase=lambda *args, **kwargs: True)
-    executor = RuntimeExecutor(settings, jobs, None)
+    executor = BuildExecutor(settings, jobs, None)
     result = await invoke_job_for_test(executor,
         leased_job(job_id=PROJECT, lease_token=PROJECT, project_id=PROJECT),
         command(tmp_path), "BUILDING",

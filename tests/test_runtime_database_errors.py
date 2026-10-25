@@ -11,10 +11,10 @@ from sqlalchemy import event
 from sqlalchemy.exc import DBAPIError, IntegrityError, TimeoutError
 
 from dbt_metricflow_service.api.app import create_app
-from dbt_metricflow_service.runtime.worker import Worker
 from dbt_metricflow_service.storage.entities import ArtifactSet
 from tests.data_helpers import leased_job
 from tests.test_runtime_api import runtime_pair as runtime_pair
+from tests.worker_helpers import make_worker
 
 
 @pytest.mark.parametrize(
@@ -45,7 +45,7 @@ async def test_database_errors_return_503(runtime_pair, monkeypatch, error):
 @pytest.mark.parametrize("error", [DBAPIError(None, None, Exception("offline")), TimeoutError("busy")])
 async def test_worker_survives_database_error(runtime_pair, monkeypatch, error):
     runtimes, _ = runtime_pair
-    worker = Worker(runtimes[0])
+    worker = make_worker(runtimes[0])
     calls = 0
 
     def claim(*args, **kwargs):
@@ -64,13 +64,13 @@ async def test_worker_survives_database_error(runtime_pair, monkeypatch, error):
 @pytest.mark.parametrize("error", [DBAPIError(None, None, Exception("offline")), TimeoutError("busy")])
 async def test_heartbeat_failure_cancels_unconfirmed_execution(runtime_pair, monkeypatch, error):
     runtimes, _ = runtime_pair
-    worker = Worker(runtimes[0])
-    monkeypatch.setattr(worker.runtime, "settings", SimpleNamespace(heartbeat_seconds=0.01, lease_seconds=0.02))
+    worker = make_worker(runtimes[0])
+    monkeypatch.setattr(worker, "settings", SimpleNamespace(heartbeat_seconds=0.01, lease_seconds=0.02))
 
     def offline(*args):
         raise error
 
-    monkeypatch.setattr(worker.runtime.jobs, "heartbeat", offline)
+    monkeypatch.setattr(worker.jobs, "heartbeat", offline)
     execution = asyncio.create_task(asyncio.sleep(10))
     try:
         await asyncio.wait_for(worker._heartbeat(leased_job(), execution), 1)

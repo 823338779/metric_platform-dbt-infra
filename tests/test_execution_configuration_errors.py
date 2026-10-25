@@ -9,12 +9,12 @@ from unittest.mock import Mock
 import pytest
 
 from dbt_metricflow_service.application.errors import ServiceError
+from dbt_metricflow_service.execution.query import QueryExecutor
 from dbt_metricflow_service.platform.execution_profile import materialized_profile
-from dbt_metricflow_service.runtime.service import Runtime
-from dbt_metricflow_service.runtime.worker import Worker
 from tests.data_helpers import leased_job, stored_build
 from tests.test_execution_profiles import settings
 from tests.test_execution_snapshot_storage import snapshot
+from tests.worker_helpers import make_worker
 
 
 def unavailable_settings(tmp_path):
@@ -23,11 +23,11 @@ def unavailable_settings(tmp_path):
 
 
 def test_query_missing_credentials_is_retryable_service_failure(tmp_path, monkeypatch):
-    runtime = object.__new__(Runtime)
+    runtime = object.__new__(QueryExecutor)
     runtime.settings = unavailable_settings(tmp_path)
     runtime.artifacts = None
     runtime.jobs = SimpleNamespace()
-    monkeypatch.setattr("dbt_metricflow_service.runtime.service.materialized_workspace",
+    monkeypatch.setattr("dbt_metricflow_service.execution.query.materialized_workspace",
                         lambda *args: nullcontext(tmp_path))
     build = stored_build(run_id="run", output_set_id="output", config_snapshot=snapshot())
     with pytest.raises(ServiceError) as raised:
@@ -40,7 +40,7 @@ def test_query_missing_credentials_is_retryable_service_failure(tmp_path, monkey
 def test_worker_missing_credentials_records_specific_failure(tmp_path):
     config = unavailable_settings(tmp_path)
     jobs = SimpleNamespace(fail=Mock(), external_started=Mock(return_value=False))
-    worker = Worker(SimpleNamespace(settings=config, jobs=jobs, artifacts=None))
+    worker = make_worker(SimpleNamespace(settings=config, jobs=jobs, artifacts=None))
 
     async def execute(_):
         with materialized_profile(snapshot(), tmp_path, config):

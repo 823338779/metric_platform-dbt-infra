@@ -8,7 +8,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.exc import DBAPIError
 
-from dbt_metricflow_service.runtime.workspace import materialized_workspace
+from dbt_metricflow_service.execution.workspace import materialized_workspace
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.entities import ArtifactSet
 from dbt_metricflow_service.storage.postgres import Database

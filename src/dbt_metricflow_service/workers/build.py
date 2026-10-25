@@ -6,13 +6,19 @@ import asyncio
 import logging
 import time
 from typing import TYPE_CHECKING, Final, cast
+from uuid import UUID
 
 from sqlalchemy.exc import DBAPIError as DatabaseError
 from sqlalchemy.exc import TimeoutError as PoolTimeout
 
 from dbt_metricflow_service import constants as strings
+from dbt_metricflow_service.constants import COMMAND_FAILED as ERROR_COMMAND_FAILED
+from dbt_metricflow_service.execution.build import BuildExecutor
+from dbt_metricflow_service.execution.errors import ExecutionError
 from dbt_metricflow_service.platform.execution_profile import ExecutionConfigurationError
-from dbt_metricflow_service.runtime.dbt_executor import ERROR_COMMAND_FAILED, ExecutionError, RuntimeExecutor
+from dbt_metricflow_service.settings import Settings
+from dbt_metricflow_service.storage.artifacts import ArtifactStore
+from dbt_metricflow_service.storage.jobs import JobStore
 from dbt_metricflow_service.storage.records import JobErrorDetail, LeasedJob, StoredBuild
 
 TARGET_RELEASE_DEFERRED: Final[str] = "target release deferred to persisted attempt evidence"
@@ -20,8 +26,7 @@ TARGET_RELEASE_DEFERRED: Final[str] = "target release deferred to persisted atte
 
 if TYPE_CHECKING:
     from dbt_metricflow_service.application.deployments import DeploymentService
-    from dbt_metricflow_service.runtime.dbt_executor import ExecutionResult
-    from dbt_metricflow_service.runtime.service import Runtime
+    from dbt_metricflow_service.execution.models import ExecutionResult
 
 
 logger = logging.getLogger(__name__)
@@ -36,16 +41,22 @@ EXTERNAL_OUTCOME_UNKNOWN = strings.EXTERNAL_OUTCOME_UNKNOWN_ALIAS
 class Worker:
     """每个槽位仅持有一个 attempt；故障后由共享恢复扫描处理过期租约。"""
 
-    def __init__(self, runtime: Runtime, *, deployments: DeploymentService | None = None) -> None:
-        # 引用运行时依赖；内存仅记录本机进程，不承载公开任务状态。
-        self.runtime = runtime
+    def __init__(
+        self, settings: Settings, jobs: JobStore, artifacts: ArtifactStore, *,
+        instance_id: UUID, toolchain: str, deployments: DeploymentService | None = None,
+    ) -> None:
+        self.settings = settings
+        self.jobs = jobs
+        self.artifacts = artifacts
+        self.instance_id = instance_id
+        self.toolchain = toolchain
         self.deployments = deployments
-        self.executor = RuntimeExecutor(runtime.settings, runtime.jobs, runtime.artifacts)
+        self.executor = BuildExecutor(settings, jobs, artifacts)
         self._tasks: list[asyncio.Task] = []
         self._stopping = False
 
     def start(self) -> None:
-        self._tasks = [asyncio.create_task(self._slot()) for _ in range(self.runtime.settings.worker_concurrency)]
+        self._tasks = [asyncio.create_task(self._slot()) for _ in range(self.settings.worker_concurrency)]
         self._tasks.append(asyncio.create_task(self._maintain()))
 
     async def close(self) -> None:
@@ -59,20 +70,20 @@ class Worker:
     async def _maintain(self) -> None:
         while not self._stopping:
             try:
-                await asyncio.to_thread(self.runtime.jobs.recover)
+                await asyncio.to_thread(self.jobs.recover)
                 if self.deployments is not None:
                     await asyncio.to_thread(self.deployments.reconcile_pending)
             except (DatabaseError, PoolTimeout, RuntimeError) as error:
                 logger.warning(FAILURE_LOG, type(error).__name__)
-            await asyncio.sleep(self.runtime.settings.heartbeat_seconds)
+            await asyncio.sleep(self.settings.heartbeat_seconds)
 
     async def _slot(self) -> None:
         while not self._stopping:
             try:
                 job = await asyncio.to_thread(
-                    self.runtime.jobs.claim, str(self.runtime.instance_id),
-                    toolchain_version=self.runtime.toolchain,
-                    config_versions=[self.runtime.settings.config_version],
+                    self.jobs.claim, str(self.instance_id),
+                    toolchain_version=self.toolchain,
+                    config_versions=[self.settings.config_version],
                 )
                 if job is not None:
                     await self._execute(job)
@@ -89,19 +100,19 @@ class Worker:
             result = await execution
             # 只封存产物并提交任务状态，不保存通用结果或成功诊断副本。
             await asyncio.to_thread(
-                self.runtime.jobs.finish, job.job_id, job.lease_token,
-                output_set_id=result.output_set_id, seal=self.runtime.artifacts.seal,
+                self.jobs.finish, job.job_id, job.lease_token,
+                output_set_id=result.output_set_id, seal=self.artifacts.seal,
             )
         except asyncio.CancelledError:
             execution.cancel()
             await asyncio.gather(execution, return_exceptions=True)
             # 尚未开始外部命令时可确认取消；外部写入仍保持未知及引用保护。
-            external = await asyncio.to_thread(self.runtime.jobs.external_started, job.attempt_id)
+            external = await asyncio.to_thread(self.jobs.external_started, job.attempt_id)
             cancelled = False
             if job.request_json.build_id:
                 from ..storage.builds import BuildStore
 
-                build = await asyncio.to_thread(BuildStore(self.runtime.db).get, job.request_json.build_id)
+                build = await asyncio.to_thread(BuildStore(self.jobs.db).get, job.request_json.build_id)
                 cancelled = cast(StoredBuild, build).cancel_requested
             code = strings.CANCELLED if cancelled and not external else INTERRUPTED
             await self._fail(job, code, detail=JobErrorDetail(external_outcome_unknown=external), stopped=not external)
@@ -109,7 +120,7 @@ class Worker:
                 raise
         except ExecutionConfigurationError as error:
             # 保留固定配置错误码，并依照已持久外部执行证据决定是否释放目标。
-            external = await asyncio.to_thread(self.runtime.jobs.external_started, job.attempt_id)
+            external = await asyncio.to_thread(self.jobs.external_started, job.attempt_id)
             await self._fail(
                 job, error.code, detail=JobErrorDetail(external_outcome_unknown=external), stopped=not external,
             )
@@ -120,7 +131,7 @@ class Worker:
             await self._fail(job, code, detail=detail, stopped=error.stopped)
         except Exception as error:
             # 不保存任意异常文本，其中可能含凭据或临时输入。
-            external = await asyncio.to_thread(self.runtime.jobs.external_started, job.attempt_id)
+            external = await asyncio.to_thread(self.jobs.external_started, job.attempt_id)
             await self._fail(job, WORKER_FAILED,
                              detail=JobErrorDetail(type=type(error).__name__, external_outcome_unknown=external),
                              stopped=not external)
@@ -129,7 +140,7 @@ class Worker:
             from ..storage.execution_targets import ExecutionTargetStore
             if job.physical_target_key:
                 try:
-                    await asyncio.to_thread(ExecutionTargetStore(self.runtime.db).release,
+                    await asyncio.to_thread(ExecutionTargetStore(self.jobs.db).release,
                                             job.job_id, job.lease_token, True)
                 except (DatabaseError, PoolTimeout, RuntimeError):
                     logger.warning(FAILURE_LOG, TARGET_RELEASE_DEFERRED)
@@ -139,7 +150,7 @@ class Worker:
     async def _fail(self, job: LeasedJob, code: str, *, detail: JobErrorDetail | None=None, stopped: bool=True) -> None:
         try:
             await asyncio.to_thread(
-                self.runtime.jobs.fail, job.job_id, job.lease_token, code, detail, stopped=stopped,
+                self.jobs.fail, job.job_id, job.lease_token, code, detail, stopped=stopped,
             )
         except (DatabaseError, PoolTimeout, RuntimeError):
             # 无法提交时不伪造终态，后续恢复扫描根据已持久阶段作出决定。
@@ -148,24 +159,24 @@ class Worker:
     async def _heartbeat(self, job: LeasedJob, execution: asyncio.Task[ExecutionResult]) -> None:
         last_confirmed = time.monotonic()
         while not execution.done():
-            await asyncio.sleep(self.runtime.settings.heartbeat_seconds)
+            await asyncio.sleep(self.settings.heartbeat_seconds)
             try:
                 # 请求取消只是意图；未知外部写入继续保留引用保护。
                 if job.request_json.build_id:
                     from ..storage.builds import BuildStore
 
-                    build = await asyncio.to_thread(BuildStore(self.runtime.db).get, job.request_json.build_id)
+                    build = await asyncio.to_thread(BuildStore(self.jobs.db).get, job.request_json.build_id)
                     if cast(StoredBuild, build).cancel_requested:
                         execution.cancel()
                         return
                 valid = await asyncio.to_thread(
-                    self.runtime.jobs.heartbeat, job.job_id, job.lease_token,
+                    self.jobs.heartbeat, job.job_id, job.lease_token,
                 )
                 if not valid:
                     execution.cancel()
                     return
                 last_confirmed = time.monotonic()
             except (DatabaseError, PoolTimeout, RuntimeError):
-                if time.monotonic() - last_confirmed >= self.runtime.settings.lease_seconds / 2:
+                if time.monotonic() - last_confirmed >= self.settings.lease_seconds / 2:
                     execution.cancel()
                     return

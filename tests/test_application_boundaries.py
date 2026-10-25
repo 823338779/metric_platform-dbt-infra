@@ -20,10 +20,12 @@ def imported_modules(path):
                 yield node.module or ""
 
 
-def test_application_dependency_graph_excludes_http_and_runtime():
+def test_application_dependency_graph_excludes_http_and_execution():
     queue = list((PACKAGE / "application").glob("*.py"))
     visited = set()
-    forbidden = ("fastapi", "dbt_metricflow_service.runtime", "subprocess", "dbt.cli")
+    forbidden = ("fastapi", "dbt_metricflow_service.bootstrap", "dbt_metricflow_service.workers",
+                 "dbt_metricflow_service.execution.build", "dbt_metricflow_service.execution.query",
+                 "subprocess", "dbt.cli")
     while queue:
         path = queue.pop()
         if path in visited:
@@ -48,8 +50,9 @@ def test_engine_entrypoints_are_owned_by_clients():
                for module in imports):
             assert path.is_relative_to(clients), path
         if path.is_relative_to(PACKAGE / "delegates"):
-            assert not any(module.startswith(("fastapi", "dbt_metricflow_service.runtime"))
-                           for module in imports), path
+            assert not any(module.startswith((
+                "fastapi", "dbt_metricflow_service.bootstrap", "dbt_metricflow_service.workers",
+            )) for module in imports), path
 
 
 def test_http_routes_have_no_sql_and_models_have_no_io():
@@ -69,3 +72,18 @@ def test_legacy_route_factories_are_removed():
     assert not (PACKAGE / "api/runtime.py").exists()
     assert not (PACKAGE / "publications/api.py").exists()
     assert not (PACKAGE / "validation/api.py").exists()
+
+
+def test_execution_and_workers_do_not_depend_on_bootstrap():
+    for directory in ("execution", "workers"):
+        for path in (PACKAGE / directory).glob("*.py"):
+            assert "dbt_metricflow_service.bootstrap" not in set(imported_modules(path)), path
+
+
+def test_shared_execution_context_does_not_depend_on_orchestrators():
+    for name in ("dbt", "embedded", "environment", "workspace", "threads", "log_writer", "errors"):
+        imports = set(imported_modules(PACKAGE / "execution" / (name + ".py")))
+        assert not imports & {
+            "dbt_metricflow_service.execution.build", "dbt_metricflow_service.execution.query",
+            "dbt_metricflow_service.workers.build", "dbt_metricflow_service.bootstrap",
+        }

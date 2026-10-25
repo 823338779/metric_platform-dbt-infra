@@ -9,7 +9,7 @@ from tests.test_publication_storage import store as store
 
 
 async def test_worker_completes_with_artifact_identity_without_result_payload():
-    from dbt_metricflow_service.runtime.worker import Worker
+    from tests.worker_helpers import make_worker
 
     completed = []
     output = str(uuid4())
@@ -30,7 +30,7 @@ async def test_worker_completes_with_artifact_identity_without_result_payload():
             return SimpleNamespace(output_set_id=output)
 
     seal = object()
-    worker = Worker(
+    worker = make_worker(
         SimpleNamespace(
             jobs=Jobs(),
             artifacts=SimpleNamespace(seal=seal),
@@ -46,8 +46,8 @@ async def test_worker_completes_with_artifact_identity_without_result_payload():
 async def test_runtime_reconciles_explicit_deployments(store, tmp_path):
     from dbt_metricflow_service.application.catalog import CatalogService
     from dbt_metricflow_service.application.deployments import DeploymentService
+    from dbt_metricflow_service.bootstrap import Runtime
     from dbt_metricflow_service.models.deployments import DeploymentKey, DeploymentRequest
-    from dbt_metricflow_service.runtime.service import Runtime
     from dbt_metricflow_service.storage.deployments import DeploymentStore
     from tests.test_catalog_queries import ready_build
 

@@ -9,10 +9,10 @@ from dbt.events.types import JinjaLogInfo
 from dbt_common.events.base_types import msg_from_base_event
 
 from dbt_metricflow_service.delegates.clients.dbt_client import DbtClient
+from dbt_metricflow_service.execution.build import BuildExecutor, execute_build
 from dbt_metricflow_service.execution.embedded import ENGINE_LOCK
-from dbt_metricflow_service.platform.build import execute_build
+from dbt_metricflow_service.execution.errors import ExecutionError
 from dbt_metricflow_service.platform.manifest_capture import ManifestCapture
-from dbt_metricflow_service.runtime.dbt_executor import ExecutionError, RuntimeExecutor
 from dbt_metricflow_service.storage.execution_logs import ExecutionLogStore
 from tests.data_helpers import leased_job
 from tests.test_manifest_capture import manifest_object
@@ -25,7 +25,7 @@ async def test_build_calls_client_and_only_persists_success(tmp_path, monkeypatc
     def phase(*args, **kwargs):
         phases.append(kwargs)
         return outcome != "lease_lost"
-    executor = RuntimeExecutor(SimpleNamespace(
+    executor = BuildExecutor(SimpleNamespace(
         profiles_dir=tmp_path, max_output_bytes=1024, max_artifact_file_bytes=1000000,
     ), SimpleNamespace(db=None, phase=phase), object())
     job = leased_job(project_id="test", schema_name="main", profile_binding_id="test")
@@ -67,7 +67,7 @@ async def test_build_calls_client_and_only_persists_success(tmp_path, monkeypatc
 async def test_cancelled_build_flushes_final_event_without_persisting(tmp_path, monkeypatch, late_error):
     started, release = threading.Event(), threading.Event()
     events = []
-    executor = RuntimeExecutor(SimpleNamespace(
+    executor = BuildExecutor(SimpleNamespace(
         profiles_dir=tmp_path, max_output_bytes=1024, max_artifact_file_bytes=1000000,
     ), SimpleNamespace(db=None, phase=lambda *args, **kwargs: True), object())
     def build(self, *args, **kwargs):

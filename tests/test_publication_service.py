@@ -6,7 +6,7 @@ import pytest
 
 from dbt_metricflow_service.application.builds import BuildService
 from dbt_metricflow_service.application.errors import ServiceError
-from dbt_metricflow_service.runtime.dbt_executor import RuntimeExecutor
+from dbt_metricflow_service.execution.build import BuildExecutor
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.builds import BuildStore
@@ -38,7 +38,7 @@ async def test_submit_fixes_input_and_reserves_run_atomically(store, repository,
     assert job.status == "RUNNING" and job.input_set_id is None
     artifacts = ArtifactStore(store.db)
     settings = Settings(tmp_path, 1024, temp_root=tmp_path / "runtime")
-    fixed = await RuntimeExecutor(settings, jobs, artifacts)._prepare_build_source(job)
+    fixed = await BuildExecutor(settings, jobs, artifacts)._prepare_build_source(job)
     assert fixed.request_json.project_digest == digest(repository, body.commit_sha)
     assert fixed.request_json.build_id == str(first.build_id)
     assert artifacts.read_file(fixed.input_set_id, "models/a.sql") == b"select 1 as value\n"

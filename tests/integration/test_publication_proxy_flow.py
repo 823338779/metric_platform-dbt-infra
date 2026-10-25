@@ -15,6 +15,9 @@ from dbt_metricflow_service.application.builds import BuildService
 from dbt_metricflow_service.application.catalog import CatalogService
 from dbt_metricflow_service.application.deployments import DeploymentService
 from dbt_metricflow_service.application.queries import QueryService
+from dbt_metricflow_service.bootstrap import Runtime
+from dbt_metricflow_service.execution.build import BuildExecutor
+from dbt_metricflow_service.execution.errors import ExecutionError
 from dbt_metricflow_service.models.configuration import ExecutionCredential, ExecutionInstance
 from dbt_metricflow_service.models.deployments import DeploymentKey
 from dbt_metricflow_service.models.execution import ExecutionSnapshot
@@ -22,8 +25,6 @@ from dbt_metricflow_service.models.execution import SnapshotBuildRequest as Buil
 from dbt_metricflow_service.models.native import NativeProject
 from dbt_metricflow_service.models.queries import AvailableDimensionsRequest, QueryRequest
 from dbt_metricflow_service.platform.source import is_ancestor, remote_head
-from dbt_metricflow_service.runtime.dbt_executor import ExecutionError, RuntimeExecutor
-from dbt_metricflow_service.runtime.service import Runtime
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.builds import BuildStore
 from dbt_metricflow_service.storage.deployments import DeploymentStore
@@ -95,7 +96,7 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
     store = BuildStore(runtime.db)
     builds = BuildService(store, runtime.toolchain)
     catalogs = CatalogService(store, runtime.artifacts)
-    queries = QueryService(builds, runtime.execute_query, runtime.available_dimensions)
+    queries = QueryService(builds, runtime.queries.execute_query, runtime.queries.available_dimensions)
     deployments = DeploymentService(
         DeploymentStore(runtime.db),
         lambda repository, branch: remote_head(repository, branch, settings.temp_root),
@@ -108,7 +109,7 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
     async def execute():
         job = runtime.jobs.claim(str(uuid4()), toolchain_version=runtime.toolchain)
         assert job
-        result = await RuntimeExecutor(settings, runtime.jobs, runtime.artifacts).execute(job)
+        result = await BuildExecutor(settings, runtime.jobs, runtime.artifacts).execute(job)
         assert runtime.jobs.finish(job.job_id, job.lease_token, output_set_id=result.output_set_id)
         return result
 
@@ -226,7 +227,7 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
         )
         job = runtime.jobs.claim(str(uuid4()), toolchain_version=runtime.toolchain)
         with pytest.raises((ValueError, ExecutionError)):
-            await RuntimeExecutor(settings, runtime.jobs, runtime.artifacts).execute(job)
+            await BuildExecutor(settings, runtime.jobs, runtime.artifacts).execute(job)
         runtime.jobs.fail(job.job_id, job.lease_token, "INVALID_DEFINITION")
         assert deployments.reconcile(target, rejected.initial_deployment.generation).deployment_status == "FAILED"
         assert deployments.current(target).active_build_id == second.build_id
