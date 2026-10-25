@@ -73,14 +73,15 @@ async def _settle(task: asyncio.Task[T]) -> T:
 
 async def run_serialized(
     invoke: Callable[[], T],
-    before_start: Callable[[], Awaitable[None]],
+    before_start: Callable[[], Awaitable[None]] | None = None,
 ) -> T:
     """获得串行槽位后校验租约，返回调用结果；取消也须等线程退出。"""
     # 等待锁时保持可取消，不占用线程池或阻塞服务心跳。
     while not ENGINE_LOCK.acquire(blocking=False):
         await asyncio.sleep(LOCK_POLL_SECONDS)
     try:
-        await before_start()
+        if before_start is not None:
+            await before_start()
         task = asyncio.create_task(asyncio.to_thread(invoke))
         try:
             return await asyncio.shield(task)

@@ -14,8 +14,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from dbt_metricflow_service import constants as strings
+from dbt_metricflow_service.models.contracts import JsonObject
 from dbt_metricflow_service.models.execution import ExecutionSnapshot
-from dbt_metricflow_service.models.payloads import JsonObject
 from dbt_metricflow_service.storage.records import (
     EmptyConfig,
     JobErrorDetail,

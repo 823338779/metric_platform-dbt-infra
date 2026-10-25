@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 from typing import Final, Literal
-from urllib.parse import urlsplit
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -13,10 +12,9 @@ from pydantic import Field, field_validator
 
 from dbt_metricflow_service import constants as strings
 
-from .builds import SHA_PATTERN, BuildView, Contract, DeploymentPolicy, Origin, validate_branch
+from .contracts import Contract
 
 INVALID_BUSINESS_TIMEZONE_MESSAGE: Final[str] = 'businessTimezone must be an IANA timezone'
-INVALID_REPOSITORY_URL_MESSAGE: Final[str] = 'repository must be a remote URL without embedded credentials'
 
 IDENTIFIER_PATTERN = r"^[a-z][a-z0-9_]{0,62}$"
 SNAPSHOT_TARGET = "execution"
@@ -51,33 +49,6 @@ class ExecutionSnapshot(Contract):
         except (ZoneInfoNotFoundError, ValueError) as error:
             raise ValueError(INVALID_BUSINESS_TIMEZONE_MESSAGE) from error
         return value
-
-
-class SnapshotBuildRequest(Contract):
-    repository: str = Field(min_length=1, max_length=2048, description="本次源码仓库地址")
-    branch_name: str = Field(description="本次明确指定的 Git 短分支名")
-    commit_sha: str | None = Field(default=None, pattern=SHA_PATTERN, description="可选固定提交")
-    execution: ExecutionSnapshot = Field(description="受理时固定的完整执行配置")
-    deployment_policy: DeploymentPolicy = Field(default=DeploymentPolicy.NONE, description="成功部署意图")
-    idempotency_key: str = Field(min_length=1, max_length=256, description="一次提交的稳定请求键")
-    origin: Origin | None = Field(default=None, description="调用方追溯标签")
-
-    _branch = field_validator(strings.BRANCH_NAME_FIELD)(validate_branch)
-
-    @field_validator(strings.REPOSITORY_FIELD)
-    @classmethod
-    def valid_repository(cls, value: str) -> str:
-        parsed = urlsplit(value)
-        if (parsed.scheme not in {strings.HTTP_SCHEME, strings.HTTPS_SCHEME, strings.SSH_SCHEME} or not parsed.hostname
-                or parsed.password or parsed.query or parsed.fragment
-                or any(char.isspace() for char in value)
-                or parsed.scheme in {strings.HTTP_SCHEME, strings.HTTPS_SCHEME} and parsed.username):
-            raise ValueError(INVALID_REPOSITORY_URL_MESSAGE)
-        return value
-
-
-class SnapshotBuildView(BuildView):
-    execution: ExecutionSnapshot = Field(description="受理时固定的完整执行快照")
 
 
 def physical_target_key(snapshot: ExecutionSnapshot) -> str:

@@ -3,18 +3,23 @@
 from __future__ import annotations
 
 from datetime import UTC
+from functools import partial
 from typing import Final
 from uuid import UUID
 
 from dbt_metricflow_service import constants as strings
+from dbt_metricflow_service.platform.execution_profile import ExecutionConfigurationError, validate_execution_target
+from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.builds import BuildStore
 from dbt_metricflow_service.storage.records import StoredBuild, StoredDeploymentAttempt
 
-from ..models.builds import BuildStatus, ErrorView, ExecutionLogPage, ExecutionLogView, Page
-from ..models.execution import SnapshotBuildRequest, SnapshotBuildView
-from ..storage.deployments import DeploymentStore, attempt_view
+from ..models.builds import BuildRequest, BuildStatus, BuildView, ExecutionLogPage, ExecutionLogView
+from ..models.contracts import Page
+from ..models.service import ErrorView
+from ..storage.deployments import DeploymentStore
 from ..storage.execution_logs import ExecutionLogStore
 from ..storage.jobs import StoreConflict
+from .deployments import attempt_view
 from .errors import ServiceError
 
 INCOMPLETE_EXECUTION_MESSAGE: Final = "engine execution did not complete"
@@ -22,24 +27,27 @@ MISSING_BUILD_MESSAGE: Final = strings.BUILD_NOT_FOUND_MESSAGE
 
 
 class BuildService:
-    def __init__(self, store: BuildStore, toolchain: str, config_version: str | None=None) -> None:
+    def __init__(self, store: BuildStore, toolchain: str, settings: Settings) -> None:
         # 具体 Store 和固定执行参数足够，不传入整个 Runtime。
         self.store = store
         self.toolchain = toolchain
         # 实例只报告其可执行的版本；存量配置快照本身仍然保留。
-        self.config_version = config_version
+        self.settings = settings
 
-    def submit_snapshot(self, request: SnapshotBuildRequest, caller: str) -> SnapshotBuildView:
+    def submit(self, request: BuildRequest, caller: str) -> BuildView:
         try:
-            row = self.store.accept_snapshot(
-                request, caller, self.toolchain, self.config_version or strings.DEFAULT_CONFIG_VERSION
+            row = self.store.accept(
+                request, caller, self.toolchain, self.settings.config_version,
+                validate_new=partial(validate_execution_target, settings=self.settings),
             )
+        except ExecutionConfigurationError as error:
+            raise ServiceError(error.code, "execution target is not verified") from error
         except StoreConflict as error:
             code = str(error) if str(error).startswith(strings.EXECUTION_) else strings.IDEMPOTENCY_CONFLICT
             raise ServiceError(code, str(error), 409) from error
-        return self.snapshot_view(row.build_id)
+        return self.get(row.build_id)
 
-    def snapshot_view(self, build_id: UUID | str) -> SnapshotBuildView:
+    def get(self, build_id: UUID | str) -> BuildView:
         row = self.load(build_id)
         initial = DeploymentStore(self.store.db).initial(row.build_id)
         return self.view(row, initial)
@@ -48,14 +56,14 @@ class BuildService:
     def list_by_environment(
         self, environment_id: UUID, repository: str | None = None, branch_name: str | None = None,
         status: BuildStatus | None = None, cursor: str | None = None, limit: int = 50,
-    ) -> Page[SnapshotBuildView]:
+    ) -> Page[BuildView]:
         try:
             rows, following = self.store.list(repository, branch_name, cursor, limit,
                                                environment_id=str(environment_id), status=status)
         except ValueError as error:
             raise ServiceError(strings.INVALID_CURSOR, str(error)) from error
         initials = DeploymentStore(self.store.db).initials([row.build_id for row in rows])
-        return Page[SnapshotBuildView](items=[self.view(row, initials.get(row.build_id))
+        return Page[BuildView](items=[self.view(row, initials.get(row.build_id))
                                               for row in rows], next_cursor=following)
 
     def load(self, build_id: UUID | str) -> StoredBuild:
@@ -80,16 +88,15 @@ class BuildService:
 
     def view(
         self, row: StoredBuild, initial: StoredDeploymentAttempt | None,
-    ) -> SnapshotBuildView:
+    ) -> BuildView:
         # 响应组装不隐含数据库读取。
         catalog = row.build_status == BuildStatus.SUCCEEDED and bool(row.output_set_id)
-        return SnapshotBuildView(
+        return BuildView(
             build_id=row.build_id,
             repository=row.repository,
             branch_name=row.branch_name,
             requested_commit_sha=row.requested_commit_sha,
             commit_sha=row.commit_sha,
-            config_version=row.config_version,
             toolchain_version=row.toolchain_version,
             build_status=row.build_status,
             phase=row.phase,

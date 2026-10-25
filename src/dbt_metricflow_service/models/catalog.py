@@ -4,8 +4,7 @@ from uuid import UUID
 
 from pydantic import Field
 
-from .artifacts import Contract
-from .payloads import JsonObject
+from .contracts import Contract, JsonObject
 
 
 class ResourceSourceView(Contract):

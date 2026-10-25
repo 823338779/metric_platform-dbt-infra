@@ -9,9 +9,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from dbt_metricflow_service import constants as strings
 
 from ..execution.models import JobStatus
-from ..models.builds import Contract, DeploymentPolicy, Origin
-from ..models.execution import ExecutionSnapshot, SnapshotBuildRequest
-from ..models.payloads import ValidationSummary
+from ..models.builds import BuildRequest, DeploymentPolicy, Origin
+from ..models.contracts import Contract
+from ..models.execution import ExecutionSnapshot
 
 
 class StoredRecord(BaseModel):
@@ -37,6 +37,18 @@ class JobRequest(Contract):
     build_id: str | None = None
     binding: ExecutionSnapshot | None = None
     project_digest: str | None = None
+
+
+class ValidationCheck(Contract):
+    name: str
+    status: str
+    message: str | None
+
+
+class ValidationSummary(Contract):
+    phase: str
+    checks: list[ValidationCheck]
+    truncated: bool
 
 
 class JobErrorDetail(StoredRecord):
@@ -145,7 +157,7 @@ class StoredBuild(StoredRecord):
     caller: str  # 可信调用来源。
     idempotency_key: str  # 构建受理幂等键。
     request_digest: str  # 原请求的规范化摘要。
-    request_json: SnapshotBuildRequest  # 已校验请求。
+    request_json: BuildRequest  # 已校验请求。
     config_snapshot: ExecutionSnapshot  # 固定执行配置，不含凭据。
     requested_commit_sha: str | None  # 请求显式指定的源码版本。
     commit_sha: str | None  # 实际解析并固定的源码版本。

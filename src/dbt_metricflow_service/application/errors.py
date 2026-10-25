@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..models.builds import ErrorView
+from ..models.service import ErrorView
 
 
 class ServiceError(Exception):

@@ -1,24 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime
-from enum import StrEnum
-from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from dbt_metricflow_service import constants as strings
 
-from ..models.artifacts import Contract
-from ..models.payloads import ResultColumn
-
-
-class QueryMode(StrEnum):
-    """MetricFlow 平台查询模式。"""
-
-    QUERY = strings.QUERY
-    EXPLAIN = strings.EXPLAIN
-    PREVIEW = strings.PREVIEW
-    DIMENSION_VALUES = strings.DIMENSION_VALUES
+from ..models.contracts import Contract
+from ..models.queries import QueryMode, ResultColumn
 
 
 class QueryFilter(BaseModel):
@@ -30,12 +19,11 @@ class QueryFilter(BaseModel):
     value: JsonValue
 
 
-class PlatformQueryRequest(BaseModel):
-    """固定 run 的类型化查询；禁止传入 SQL、remote 或 profile。"""
+class CompiledQuery(BaseModel):
+    """已解析选项与时间的引擎查询，不携带持久任务身份。"""
 
     model_config = ConfigDict(extra=strings.EXTRA_FORBID, populate_by_name=True)
 
-    run_id: UUID = Field(alias=strings.RUN_ID_ALIAS)
     mode: QueryMode
     metrics: list[str] = Field(default_factory=list)
     group_by: list[str] = Field(default_factory=list, alias=strings.GROUP_BY_ALIAS)
@@ -44,12 +32,6 @@ class PlatformQueryRequest(BaseModel):
     end_time: datetime | None = Field(default=None, alias=strings.END_TIME_ALIAS)
     order_by: list[str] = Field(default_factory=list, alias=strings.ORDER_BY_ALIAS)
     limit: int = Field(default=1000, ge=1, le=10_000)
-    selector: str | None = None
-    dimension: str | None = None
-
-
-class NativeMetric(Contract):
-    name: str
 
 
 class NativeDimension(Contract):
@@ -57,7 +39,6 @@ class NativeDimension(Contract):
     name: str | None = None
     semantic_model_name: str | None = None
     type: str = strings.UNKNOWN_VALUE_TYPE
-    value_type: str = strings.UNKNOWN_VALUE_TYPE
     operators: list[str] | None = None
     grain_tokens: dict[str, str] = Field(default_factory=dict)
 
@@ -71,7 +52,6 @@ class DimensionQueryResult(Contract):
     """所选指标的可组合维度、时间粒度和过滤能力；不包含数据行。"""
 
     dimensions: list[NativeDimension] = Field(default_factory=list)
-    metrics: list[NativeMetric] = Field(default_factory=list)
     time_dimensions: list[NativeTimeDimension] = Field(default_factory=list)
     allowed_filters: list[str] = Field(default_factory=list)
 

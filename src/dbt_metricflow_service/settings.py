@@ -96,7 +96,7 @@ class Settings:
     # 部署镜像可显式指定工具链标识，默认由安装版本及服务代码计算。
     toolchain_version: str | None = None
     # 单结果、单文件和单产物集的原始字节上限。
-    max_result_bytes: int = 16 * 1024 * 1024
+    max_result_bytes: int = 8 * 1024 * 1024
     max_artifact_file_bytes: int = 64 * 1024 * 1024
     max_artifact_bytes: int = 256 * 1024 * 1024
     # HTTP 服务监听地址与端口，不影响管理命令的数据库连接。
@@ -197,7 +197,7 @@ class Settings:
                 strings.SERVICE_CONFIG_VERSION, config.SERVICE_CONFIG_VERSION, strings.DEFAULT_CONFIG_VERSION
             ),
             toolchain_version=value(strings.SERVICE_TOOLCHAIN_VERSION, config.SERVICE_TOOLCHAIN_VERSION) or None,
-            max_result_bytes=int(value(strings.MAX_RESULT_BYTES, config.MAX_RESULT_BYTES, str(16 * 1024 * 1024))),
+            max_result_bytes=int(value(strings.MAX_RESULT_BYTES, config.MAX_RESULT_BYTES, str(8 * 1024 * 1024))),
             max_artifact_file_bytes=int(
                 value(
                     strings.MAX_ARTIFACT_FILE_BYTES,

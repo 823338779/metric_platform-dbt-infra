@@ -5,22 +5,20 @@ from __future__ import annotations
 import hmac
 from collections.abc import Awaitable, Callable
 
-from fastapi import Header, HTTPException
+from fastapi import Header
 
 from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.settings import Settings
 
-from ..models.service import CredentialError
+from ..application.errors import ServiceError
 
 
-def mutation_guard(settings: Settings) -> Callable[..., Awaitable[str]]:
-    async def require_service(authorization: str | None = Header(default=None)) -> str:
-        token = getattr(settings, strings.SERVICE_TOKEN_FIELD, None)
+def mutation_guard(settings: Settings) -> Callable[..., Awaitable[None]]:
+    async def require_service(authorization: str | None = Header(default=None)) -> None:
+        token = settings.service_token
         if not token:
-            raise HTTPException(503, detail=CredentialError(code=strings.AUTH_MUTATIONS_DISABLED).model_dump())
+            raise ServiceError(strings.AUTH_MUTATIONS_DISABLED, "service credentials are not configured", 503)
         if authorization is None or not hmac.compare_digest(
                 authorization.encode(), (strings.AUTH_BEARER_PREFIX + token).encode()):
-            raise HTTPException(401, detail=CredentialError(code=strings.AUTH_CREDENTIAL_REQUIRED).model_dump())
-        # 幂等来源来自部署凭据，不信任客户端自报的业务身份。
-        return strings.AUTH_SERVICE_IDENTITY
+            raise ServiceError(strings.AUTH_CREDENTIAL_REQUIRED, "service credentials are required", 401)
     return require_service

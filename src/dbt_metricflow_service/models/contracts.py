@@ -1,9 +1,9 @@
 """Shared strict JSON contract and Git branch validation."""
 
 import re
-from typing import Final
+from typing import Final, Generic, TypeAlias, TypeVar
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 from pydantic.alias_generators import to_camel
 
 from dbt_metricflow_service import constants as strings
@@ -21,6 +21,15 @@ class Contract(BaseModel):
     """公开 JSON 统一 camelCase，拒绝未声明的历史别名。"""
 
     model_config = ConfigDict(extra=strings.EXTRA_FORBID, populate_by_name=True, alias_generator=to_camel)
+
+
+JsonObject: TypeAlias = dict[str, JsonValue]
+T = TypeVar("T")
+
+
+class Page(Contract, Generic[T]):
+    items: list[T] = Field(description="本页有界结果")
+    next_cursor: str | None = Field(default=None, description="绑定筛选条件的后续游标")
 
 
 def validate_branch(value: str | None) -> str | None:

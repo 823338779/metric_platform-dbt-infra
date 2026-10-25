@@ -14,8 +14,7 @@ from starlette.requests import Request
 from dbt_metricflow_service import constants as strings
 
 from ..application.errors import ServiceError
-from ..models.builds import ErrorView
-from ..models.service import ErrorResponse
+from ..models.service import ErrorResponse, ErrorView
 
 REQUEST_CONTRACT_MISMATCH: Final[str] = "request does not match the engine contract"
 REQUESTED_OPERATION_UNAVAILABLE: Final[str] = "requested operation is unavailable"

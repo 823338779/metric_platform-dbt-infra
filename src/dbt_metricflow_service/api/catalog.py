@@ -2,22 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from uuid import UUID
 
 from fastapi import APIRouter
 
 from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.application.catalog import CatalogService
-from dbt_metricflow_service.storage.records import StoredBuild
 
 from ..models.catalog import ResourceView
-from ..models.payloads import JsonObject
+from ..models.contracts import JsonObject
 
 
-def router(
-    service: CatalogService, execute_lineage: Callable[[StoredBuild, str], list[JsonObject]],
-) -> APIRouter:
+def router(service: CatalogService) -> APIRouter:
     routes = APIRouter(prefix=strings.ROUTE_BUILDS)
 
     @routes.get(strings.ROUTE_BUILD_ID_CATALOG, response_model=JsonObject)
@@ -26,8 +22,7 @@ def router(
 
     @routes.get(strings.ROUTE_BUILD_ID_LINEAGE, response_model=list[JsonObject])
     def lineage(build_id: UUID, selector: str) -> list[JsonObject]:
-        build, _ = service.read(build_id)
-        return execute_lineage(build, selector)
+        return service.lineage(build_id, selector)
 
     @routes.get(strings.ROUTE_BUILD_ID_RESOURCES_RESOURCE_ID, response_model=ResourceView)
     def resource(build_id: UUID, resource_id: str) -> ResourceView:

@@ -8,21 +8,25 @@ from typing import Final
 
 from dbt_metricflow.cli.cli_configuration import CLIConfiguration
 from metricflow.engine.metricflow_engine import MetricFlowEngine, MetricFlowQueryRequest, MetricFlowQueryType
-from metricflow_semantics.errors.error_classes import InformativeUserError
+from metricflow_semantic_interfaces.type_enums.time_granularity import TimeGranularity
+from metricflow_semantics.errors.error_classes import InformativeUserError, InvalidQueryException
 from metricflow_semantics.naming.linkable_spec_name import StructuredLinkableSpecName
+from pydantic import JsonValue
 
 from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.adapters.starrocks import STARROCKS_ADAPTER, StarRocksSqlClient
-from dbt_metricflow_service.delegates.clients import InvalidDimensionsRequest
-from dbt_metricflow_service.delegates.clients.dbt_client import DbtClient
-from dbt_metricflow_service.delegates.metricflow.queries import available_dimensions, serialize_rows
-from dbt_metricflow_service.models.payloads import JsonValue
-from dbt_metricflow_service.platform.models import (
+from dbt_metricflow_service.engines import InvalidDimensionsRequest
+from dbt_metricflow_service.engines.dbt import DbtClient
+from dbt_metricflow_service.engines.models import (
+    CompiledQuery,
     DataQueryResult,
     DimensionQueryResult,
-    PlatformQueryRequest,
+    NativeDimension,
+    NativeTimeDimension,
     QueryMode,
 )
+
+from .results import serialize_rows
 
 FILTER_VALUE_UNSUPPORTED_MESSAGE: Final[str] = '筛选值类型不支持'
 IN_FILTER_LIMIT_MESSAGE: Final[str] = 'IN 筛选值超限'
@@ -44,7 +48,7 @@ def _literal(value: JsonValue | Decimal | date | datetime) -> str:
     raise ValueError(FILTER_VALUE_UNSUPPORTED_MESSAGE)
 
 
-def _where_constraints(request: PlatformQueryRequest) -> list[str]:
+def _where_constraints(request: CompiledQuery) -> list[str]:
     constraints = []
     for item in request.filters:
         if item.operator == strings.IN:
@@ -91,12 +95,11 @@ class MetricFlowClient:
         except ValueError as error:
             raise InvalidDimensionsRequest(INVALID_METRICS_DIMENSIONS_MESSAGE) from error
 
-    def query(self, request: PlatformQueryRequest) -> DataQueryResult:
+    def query(self, request: CompiledQuery) -> DataQueryResult:
         engine = self._engine
-        group_by = [request.dimension] if request.mode is QueryMode.DIMENSION_VALUES else request.group_by
         mf_request = MetricFlowQueryRequest.create(
             metric_names=request.metrics,
-            group_by_names=group_by,
+            group_by_names=request.group_by,
             limit=request.limit + 1,
             time_constraint_start=request.start_time,
             time_constraint_end=request.end_time,
@@ -117,3 +120,61 @@ class MetricFlowClient:
         if result.result_df is None:
             raise ValueError(METRICFLOW_RESULT_MISSING_MESSAGE)
         return serialize_rows(result.result_df, limit=request.limit)
+
+
+METRIC_SELECTION_INVALID_MESSAGE: Final[str] = '指标不存在或为空'
+
+ALLOWED_OPERATORS = frozenset({"=", "!=", ">", ">=", "<", "<=", strings.IN})
+TIME_TYPE = strings.TIME_DIMENSION_TYPE
+METRIC_TIME = strings.METRIC_TIME
+PATH_SEPARATOR = "__"
+
+
+def _verified_grains(engine: MetricFlowEngine, metrics: tuple[str, ...], base: str) -> dict[str, str]:
+    # 对当前指标集合逐一 explain，不能把某个日期字段的能力套到其他 join 路径。
+    tokens = {}
+    for granularity in TimeGranularity:
+        token = PATH_SEPARATOR.join((base, granularity.value))
+        request = MetricFlowQueryRequest.create(metric_names=list(metrics), group_by_names=[token])
+        try:
+            engine.explain(request)
+        except (InvalidQueryException, ValueError):
+            continue
+        tokens[granularity.value] = token
+    return tokens
+
+
+def available_dimensions(engine: MetricFlowEngine, metrics: tuple[str, ...]) -> DimensionQueryResult:
+    """按 MetricFlow 原生语义返回多指标可组合维度与经 explain 核实的时间 token。"""
+
+    available = {metric.name for metric in engine.list_metrics(include_dimensions=False)}
+    if not metrics or not set(metrics) <= available:
+        raise ValueError(METRIC_SELECTION_INVALID_MESSAGE)
+    dimensions = [NativeDimension(
+        token=dimension.dunder_name, name=dimension.name,
+        semantic_model_name=(
+            dimension.semantic_model_reference.semantic_model_name
+            if dimension.semantic_model_reference is not None else None
+        ),
+        type=getattr(dimension.type, strings.VALUE_FIELD, str(dimension.type)),
+    ) for dimension in engine.list_dimensions(metric_names=list(metrics))]
+    verified = {METRIC_TIME: _verified_grains(engine, metrics, METRIC_TIME)}
+    for dimension in dimensions:
+        if dimension.type != TIME_TYPE:
+            continue
+        base = dimension.token
+        prefix, _, suffix = base.rpartition(PATH_SEPARATOR)
+        # 原生 metric_time 带默认粒度；字段自身名为 day 时不能误删字段名。
+        if suffix != dimension.name and suffix in {grain.value for grain in TimeGranularity}:
+            base = prefix
+        if base not in verified:
+            verified[base] = _verified_grains(engine, metrics, base)
+        dimension.grain_tokens = verified[base]
+    time_dimensions = [NativeTimeDimension(token=token, granularity=grain)
+                       for grain, token in verified[METRIC_TIME].items()]
+    return DimensionQueryResult(
+        dimensions=dimensions,
+        time_dimensions=time_dimensions, allowed_filters=sorted(ALLOWED_OPERATORS),
+    )
+
+

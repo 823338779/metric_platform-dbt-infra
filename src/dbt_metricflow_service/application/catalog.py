@@ -2,21 +2,23 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Final
 from uuid import UUID
 
 from dbt_common.exceptions import DbtInternalError
 
 from dbt_metricflow_service import constants as strings
-from dbt_metricflow_service.delegates.clients.dbt_client import DbtClient
+from dbt_metricflow_service.engines.dbt import DbtClient
 from dbt_metricflow_service.models.catalog import ResourceSourceView, ResourceView
-from dbt_metricflow_service.models.payloads import JsonObject
+from dbt_metricflow_service.models.contracts import JsonObject
 from dbt_metricflow_service.platform.manifest_capture import ManifestCapture
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.builds import BuildStore
 from dbt_metricflow_service.storage.records import StoredBuild
 
 from .errors import ServiceError
+from .results import check_result_size
 
 INCOMPLETE_CATALOG_MESSAGE: Final = "complete catalog is not available"
 RESOURCE_BUILD_CONFLICT_MESSAGE: Final = "resource does not belong to this build"
@@ -26,9 +28,20 @@ UNREADABLE_CATALOG_MESSAGE: Final = "sealed manifest cannot be read"
 
 
 class CatalogService:
-    def __init__(self, builds: BuildStore, artifacts: ArtifactStore) -> None:
+    def __init__(
+        self, builds: BuildStore, artifacts: ArtifactStore,
+        execute_lineage: Callable[[StoredBuild, str, bytes], list[JsonObject]], max_result_bytes: int,
+    ) -> None:
         self.builds = builds
         self.artifacts = artifacts
+        self.execute_lineage = execute_lineage
+        self.max_result_bytes = max_result_bytes
+
+    def lineage(self, build_id: UUID | str, selector: str) -> list[JsonObject]:
+        build, manifest = self.read(build_id)
+        result = self.execute_lineage(build, selector, manifest)
+        check_result_size(result, self.max_result_bytes, build.build_id)
+        return result
 
     def read(self, build_id: UUID | str) -> tuple[StoredBuild, bytes]:
         build = self.builds.get(str(build_id))

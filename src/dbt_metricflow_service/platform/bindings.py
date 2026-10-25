@@ -14,7 +14,7 @@ from typing import Final
 import yaml
 
 from dbt_metricflow_service import constants as strings
-from dbt_metricflow_service.models.payloads import JsonObject
+from dbt_metricflow_service.models.contracts import JsonObject
 
 from ..models.native import NativePackages, NativeProject
 

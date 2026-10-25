@@ -64,6 +64,6 @@ class JobRecord(BaseModel):
 class ExecutionResult:
     """执行完成的产物身份；只有 worker 的带租约事务能封存产物。"""
     # 当前 attempt 产生的 STAGING 集合，交给发布事务封存。
-    output_set_id: str | None = None
+    output_set_id: str
 
 

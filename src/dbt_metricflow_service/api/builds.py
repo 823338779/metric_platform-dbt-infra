@@ -1,7 +1,6 @@
 """外部执行快照的构建门面；服务不提供环境注册接口。"""
 
 from collections.abc import Awaitable, Callable
-from typing import Final
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
@@ -9,39 +8,29 @@ from fastapi import APIRouter, Depends, Query
 from dbt_metricflow_service import constants as strings
 
 from ..application.builds import BuildService
-from ..application.errors import ServiceError
-from ..models.builds import BuildStatus, ExecutionLogPage, Page
-from ..models.execution import SnapshotBuildRequest, SnapshotBuildView
-from ..platform.execution_profile import validate_execution_target
-from ..settings import Settings
-
-EXECUTION_TARGET_UNVERIFIED_MESSAGE: Final[str] = "execution target is not verified"
-
+from ..models.builds import BuildRequest, BuildStatus, BuildView, ExecutionLogPage
+from ..models.contracts import Page
 
 PREFIX = ""
 
 
-def router(service: BuildService, guard: Callable[..., Awaitable[str]], settings: Settings) -> APIRouter:
+def router(service: BuildService, guard: Callable[..., Awaitable[None]]) -> APIRouter:
     routes = APIRouter(prefix=PREFIX)
     dependency = Depends(guard)
 
-    @routes.post(strings.ROUTE_BUILDS, response_model=SnapshotBuildView, status_code=202)
-    def submit(request: SnapshotBuildRequest, caller: str = dependency) -> SnapshotBuildView:
-        try:
-            validate_execution_target(request.execution, settings)
-        except ValueError as error:
-            raise ServiceError(str(error), EXECUTION_TARGET_UNVERIFIED_MESSAGE) from error
-        return service.submit_snapshot(request, caller)
+    @routes.post(strings.ROUTE_BUILDS, response_model=BuildView, status_code=202)
+    def submit(request: BuildRequest, _authenticated: None = dependency) -> BuildView:
+        return service.submit(request, strings.AUTH_SERVICE_IDENTITY)
 
-    @routes.get(strings.ROUTE_BUILDS, response_model=Page[SnapshotBuildView])
+    @routes.get(strings.ROUTE_BUILDS, response_model=Page[BuildView])
     def history(environmentId: UUID, repository: str | None = None, branchName: str | None = None,
                 buildStatus: BuildStatus | None = None, cursor: str | None = None,
-                limit: int = Query(default=50, ge=1, le=200)) -> Page[SnapshotBuildView]:
+                limit: int = Query(default=50, ge=1, le=200)) -> Page[BuildView]:
         return service.list_by_environment(environmentId, repository, branchName, buildStatus, cursor, limit)
 
-    @routes.get(strings.ROUTE_BUILDS_BUILD_ID, response_model=SnapshotBuildView)
-    def get(build_id: UUID) -> SnapshotBuildView:
-        return service.snapshot_view(build_id)
+    @routes.get(strings.ROUTE_BUILDS_BUILD_ID, response_model=BuildView)
+    def get(build_id: UUID) -> BuildView:
+        return service.get(build_id)
 
     @routes.get(strings.ROUTE_BUILDS_BUILD_ID_EXECUTION_LOGS, response_model=ExecutionLogPage)
     def execution_logs(

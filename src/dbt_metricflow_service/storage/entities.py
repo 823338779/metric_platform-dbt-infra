@@ -8,7 +8,7 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from dbt_metricflow_service import constants as strings
-from dbt_metricflow_service.models.payloads import JsonObject
+from dbt_metricflow_service.models.contracts import JsonObject
 
 # 复用真正重复的列类型，字段仍显式声明名称、默认值和业务含义。
 StringUUID = Annotated[str, mapped_column(UUID(as_uuid=False))]

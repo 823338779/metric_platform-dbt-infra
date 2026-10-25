@@ -9,7 +9,7 @@ from typing import Final, cast
 import yaml
 
 from dbt_metricflow_service import constants as strings
-from dbt_metricflow_service.delegates.clients.dbt_client import DbtClient
+from dbt_metricflow_service.engines.dbt import DbtClient
 from dbt_metricflow_service.models.native import NativeProject
 from dbt_metricflow_service.platform.manifest_capture import ManifestCapture
 from dbt_metricflow_service.settings import Settings
@@ -137,10 +137,9 @@ def _normalize_artifact_target(project: Path) -> None:
 
 
 async def execute_build(
-    executor: BuildExecutor, job: LeasedJob, project: Path, *, profiles: Path | None = None,
+    executor: BuildExecutor, job: LeasedJob, project: Path, *, profiles: Path,
 ) -> ExecutionResult:
     settings = executor.settings
-    profiles = profiles or settings.profiles_dir
     environment = build_engine_environment(
         project, profiles, cast(str, job.schema_name), cast(str, job.profile_binding_id),
     )

@@ -1,78 +1,71 @@
-"""固定构建的实时查询；请求和结果仅在当前调用中传递。"""
-
+"""固定构建的实时查询用例及按模式定义的公开响应。"""
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Final, cast
 from uuid import UUID
 
-from dbt_metricflow_service import constants as strings
-from dbt_metricflow_service.application.builds import BuildService
-from dbt_metricflow_service.models.payloads import AvailableDimensions, DimensionOption
-from dbt_metricflow_service.models.queries import (
+from .. import constants as strings
+from ..engines.models import DataQueryResult, DimensionQueryResult
+from ..models.queries import (
     AvailableDimensionsRequest,
     AvailableDimensionsView,
+    ExplainResult,
+    MetricQueryResult,
+    PreviewRequest,
+    PreviewResult,
+    QueryMode,
     QueryRequest,
     QueryResult,
 )
-from dbt_metricflow_service.platform.models import DataQueryResult, DimensionQueryResult, PlatformQueryRequest
-from dbt_metricflow_service.storage.records import StoredBuild
-
-from ..platform.dimensions import DimensionBinding, map_available_dimensions
-from ..platform.query_time import canonical_query, normalize_query_time, query_time_metadata
+from ..storage.records import StoredBuild
+from .builds import BuildService
 from .errors import ServiceError
-from .query_plan import compile_query
-
-QUERY_RESPONSE_LIMIT_MESSAGE: Final = "query response exceeds the size limit"
-
-MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+from .query_plan import normalize_query, resolve_dimensions, time_range
+from .results import check_result_size
 
 
 class QueryService:
     def __init__(
         self, builds: BuildService,
-        execute: Callable[[StoredBuild, PlatformQueryRequest], DataQueryResult],
+        execute: Callable[[StoredBuild, QueryRequest], DataQueryResult],
         discover_dimensions: Callable[[StoredBuild, tuple[str, ...]], DimensionQueryResult],
+        max_result_bytes: int,
     ) -> None:
         self.builds = builds
         self.execute = execute
         self.discover_dimensions = discover_dimensions
+        self.max_result_bytes = max_result_bytes
 
     def available_dimensions(
-        self, build_id: UUID | str, request: AvailableDimensionsRequest, caller: str,
+        self, build_id: UUID | str, request: AvailableDimensionsRequest,
     ) -> AvailableDimensionsView:
         build = self.builds.load(build_id)
-        selected = sorted(set(request.metrics))
-        result, _ = self._available_dimensions(build, selected)
-        return AvailableDimensionsView(
-            build_id=result.build_id, metrics=result.metrics, dimensions=result.dimensions
-        )
+        metrics = sorted(set(request.metrics))
+        native = self.discover_dimensions(build, tuple(metrics))
+        dimensions = resolve_dimensions(build.build_id, metrics, native)
+        result = AvailableDimensionsView(build_id=build.build_id, metrics=metrics,
+                                         dimensions=[entry.option for entry in dimensions.values()])
+        check_result_size(result, self.max_result_bytes, build.build_id)
+        return result
 
-    def _available_dimensions(
-        self, build: StoredBuild, selected: list[str],
-    ) -> tuple[AvailableDimensions, dict[str, DimensionBinding]]:
-        native = self.discover_dimensions(build, tuple(selected))
-        return map_available_dimensions(build.build_id, selected, native)
-
-    def submit(self, build_id: UUID | str, request: QueryRequest, caller: str) -> QueryResult:
+    def submit(self, build_id: UUID | str, request: QueryRequest) -> QueryResult:
         build = self.builds.load(build_id)
         timezone = build.config_snapshot.business_timezone
-        request = normalize_query_time(request, timezone)
-        body = canonical_query(request)
-        dimensions: list[DimensionOption] = []
-        mapping: dict[str, DimensionBinding] = {}
-        if request.group_by or request.filters or request.dimension_option_id:
-            available, mapping = self._available_dimensions(build, body.metrics)
-            dimensions = available.dimensions
-        engine = compile_query(request, cast(str, build.run_id), dimensions, mapping)
-        payload = self.execute(build, engine)
-        metadata = query_time_metadata(body, timezone)
-        result = QueryResult(
-            build_id=build.build_id, mode=request.mode, commit_sha=build.commit_sha,
-            business_timezone=metadata.business_timezone, normalized_time_range=metadata.normalized_time_range,
-            boundary_policy=metadata.boundary_policy, sql=payload.sql, columns=payload.columns,
-            rows=payload.rows, result_truncated=payload.truncated,
-        )
-        if len(result.model_dump_json(by_alias=True).encode()) > MAX_RESPONSE_BYTES:
-            raise ServiceError(strings.RESULT_TOO_LARGE, QUERY_RESPONSE_LIMIT_MESSAGE, build_id=build.build_id)
+        if not isinstance(request, PreviewRequest):
+            request = normalize_query(request, timezone)
+        payload = self.execute(build, request)
+        result: QueryResult
+        if isinstance(request, PreviewRequest):
+            result = PreviewResult(build_id=build.build_id, commit_sha=build.commit_sha,
+                                   columns=payload.columns, rows=payload.rows, result_truncated=payload.truncated)
+        elif request.mode == QueryMode.EXPLAIN:
+            if payload.sql is None:
+                raise ServiceError(strings.RESULT_INVALID, "explain returned no SQL", 503, build_id=build.build_id)
+            result = ExplainResult(build_id=build.build_id, commit_sha=build.commit_sha, sql=payload.sql,
+                                   business_timezone=timezone, normalized_time_range=time_range(request))
+        else:
+            result = MetricQueryResult(build_id=build.build_id, commit_sha=build.commit_sha, mode=request.mode,
+                                       business_timezone=timezone, normalized_time_range=time_range(request),
+                                       columns=payload.columns, rows=payload.rows, result_truncated=payload.truncated)
+        check_result_size(result, self.max_result_bytes, build.build_id)
         return result

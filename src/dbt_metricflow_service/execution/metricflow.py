@@ -12,8 +12,8 @@ from uuid import uuid4
 from metricflow_semantics.errors.error_classes import DimensionValueMappingError
 
 from dbt_metricflow_service import constants as strings
-from dbt_metricflow_service.delegates.clients import InvalidDimensionsRequest
-from dbt_metricflow_service.models.artifacts import Contract
+from dbt_metricflow_service.engines import InvalidDimensionsRequest
+from dbt_metricflow_service.models.contracts import Contract
 
 from .embedded import PROFILES_ENV, PROJECT_ENV, create_output, engine_environment, run_serialized
 from .models import JobRecord, JobStatus

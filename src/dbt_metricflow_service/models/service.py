@@ -1,12 +1,21 @@
 """Service health, version and error response contracts."""
 
 from typing import Literal
+from uuid import UUID
 
 from pydantic import Field
 
 from dbt_metricflow_service import constants as strings
 
-from .builds import Contract, ErrorView
+from .contracts import Contract
+
+
+class ErrorView(Contract):
+    code: str = Field(description="稳定错误码")
+    message: str = Field(description="不含凭据或本地路径的诊断")
+    retryable: bool = Field(default=False, description="能否以同请求重试")
+    phase: str | None = Field(default=None, description="失败执行阶段")
+    build_id: UUID | None = Field(default=None, description="已有构建身份")
 
 
 class HealthView(Contract):
@@ -24,7 +33,3 @@ class VersionsView(Contract):
 
 class ErrorResponse(Contract):
     error: ErrorView
-
-
-class CredentialError(Contract):
-    code: Literal["mutations_disabled", "service_credential_required"]

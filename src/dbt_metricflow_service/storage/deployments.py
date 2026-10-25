@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
 from dbt_metricflow_service import constants as strings
-from dbt_metricflow_service.models.deployments import DeploymentAttemptView, DeploymentKey
+from dbt_metricflow_service.models.deployments import DeploymentKey
 from dbt_metricflow_service.storage.postgres import Database
 from dbt_metricflow_service.storage.records import StoredBuild, StoredDeploymentAttempt, StoredDeploymentTarget
 
@@ -135,8 +135,9 @@ class DeploymentStore:
             target.observed_head_sha = head
             target.head_observed_at = func.clock_timestamp()
             target.source_state = state
+            # 每次有效观察都有新版本，旧 Git 读取不能覆盖新观察或用于结算。
+            target.version += 1
             if state == MISSING:
-                target.version += int(target.active_build_id is not None)
                 target.active_build_id = None
             session.flush()
             if state == MISSING:
@@ -160,6 +161,11 @@ class DeploymentStore:
                 return entity_record(attempt, StoredDeploymentAttempt)
             if target.desired_generation != generation:
                 status, reason = STALE, NEWER_INTENT
+            if status == DEPLOYED or reason == strings.SOURCE_HEAD_CHANGED:
+                if (target.version != expected_version or target.observed_head_sha != head
+                        or target.source_state in {strings.UNKNOWN, MISSING}):
+                    # 观察过期不终结部署意图，下一轮用最新观察重新协调。
+                    return entity_record(attempt, StoredDeploymentAttempt)
             if status == DEPLOYED:
                 build = session.scalar(
                     select(Build)
@@ -167,10 +173,9 @@ class DeploymentStore:
                     .where(Build.build_id == attempt.build_id)
                     .with_for_update(of=(RuntimeJob, Build))
                 )
-                # 锁定构建与执行记录；head 只比较事务前已完成的观察值。
+                # 同一事实事务中核对当前观察，并锁定构建与执行记录。
                 if (
-                    target.version != expected_version
-                    or build.build_status != SUCCEEDED
+                    build.build_status != SUCCEEDED
                     or not build.output_set_id
                     or build.commit_sha != head
                 ):
@@ -270,13 +275,3 @@ class DeploymentStore:
 
 def natural(key: DeploymentKey) -> tuple[str, str, str]:
     return key.repository, key.environment, key.branch_name
-
-
-def attempt_view(row: StoredDeploymentAttempt) -> DeploymentAttemptView:
-    # 显式白名单防止内部幂等来源和请求摘要泄漏到 API。
-    from ..models.deployments import DeploymentAttemptView
-    return DeploymentAttemptView(
-        repository=row.repository, environment=row.environment, branch_name=row.branch_name,
-        generation=row.generation, build_id=UUID(row.build_id), deployment_status=row.deployment_status,
-        reason=row.reason, created_at=row.created_at, deployed_at=row.deployed_at,
-    )

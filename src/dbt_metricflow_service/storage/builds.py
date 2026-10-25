@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from datetime import datetime
 from typing import Final
 from uuid import UUID, uuid4
@@ -12,7 +13,8 @@ from pydantic import JsonValue
 from sqlalchemy import func, or_, select, tuple_, update
 
 from dbt_metricflow_service import constants as strings
-from dbt_metricflow_service.models.execution import SNAPSHOT_TARGET, SnapshotBuildRequest, physical_target_key
+from dbt_metricflow_service.models.builds import BuildRequest
+from dbt_metricflow_service.models.execution import SNAPSHOT_TARGET, ExecutionSnapshot, physical_target_key
 from dbt_metricflow_service.storage.postgres import Database
 from dbt_metricflow_service.storage.records import JobRequest, StoredBuild
 
@@ -26,7 +28,6 @@ EXPIRED_EXECUTION_LEASE_MESSAGE: Final = "execution lease is no longer valid"
 IDEMPOTENCY_INPUT_CONFLICT_MESSAGE: Final = "idempotency key already binds another input"
 IMMUTABLE_COMMIT_MESSAGE: Final = "commitSha is immutable after resolution"
 INVALID_CURSOR_MESSAGE: Final = strings.INVALID_CURSOR_MESSAGE
-MISSING_ENVIRONMENT_MESSAGE: Final = "environmentId is required"
 
 JSON_MODE = strings.JSON_MODE
 PROJECT_PREFIX = strings.ENGINE_IDEMPOTENCY_PREFIX
@@ -54,8 +55,9 @@ class BuildStore:
                 return None
             return entity_record(row, StoredBuild)
 
-    def accept_snapshot(
-        self, request: SnapshotBuildRequest, caller: str, toolchain: str, runtime_config_version: str,
+    def accept(
+        self, request: BuildRequest, caller: str, toolchain: str, runtime_config_version: str,
+        *, validate_new: Callable[[ExecutionSnapshot], None],
     ) -> StoredBuild:
         from .deployments import DeploymentStore
 
@@ -76,6 +78,7 @@ class BuildStore:
                 if prior.request_digest != fingerprint:
                     raise StoreConflict(IDEMPOTENCY_INPUT_CONFLICT_MESSAGE)
                 return entity_record(prior, StoredBuild)
+            validate_new(request.execution)
             snapshot = request.execution
             config = snapshot.model_dump(mode=JSON_MODE, by_alias=True)
             environment = str(snapshot.environment_id)
@@ -151,17 +154,13 @@ class BuildStore:
 
     def list(
         self, repository: str | None, branch_name: str | None = None, cursor: str | None = None, limit: int = 50,
-        *, environment_id: str | None = None, status: str | None = None,
+        *, environment_id: str, status: str | None = None,
     ) -> tuple[list[StoredBuild], str | None]:
-        if environment_id is None:
-            raise ValueError(MISSING_ENVIRONMENT_MESSAGE)
         scope = [environment_id, repository, branch_name, status]
         after = read_cursor(scope, cursor, limit, version=HISTORY_CURSOR_VERSION)
-        statement = BUILD_VIEW
+        statement = BUILD_VIEW.where(Build.environment_id == environment_id)
         if repository is not None:
             statement = statement.where(Build.repository == repository)
-        if environment_id is not None:
-            statement = statement.where(Build.environment_id == environment_id)
         if status is not None:
             statement = statement.where(Build.build_status == status)
         if branch_name is not None:

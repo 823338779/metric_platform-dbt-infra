@@ -9,8 +9,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from dbt_metricflow_service import constants as strings
 
-from ..models.builds import ErrorView
-from ..models.service import ErrorResponse
+from ..models.service import ErrorResponse, ErrorView
 
 REQUEST_BODY_TOO_LARGE: Final[str] = "request body exceeds limit"
 

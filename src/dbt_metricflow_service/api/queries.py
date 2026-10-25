@@ -13,20 +13,20 @@ from dbt_metricflow_service.application.queries import QueryService
 from ..models.queries import AvailableDimensionsRequest, AvailableDimensionsView, QueryRequest, QueryResult
 
 
-def router(service: QueryService, guard: Callable[..., Awaitable[str]]) -> APIRouter:
+def router(service: QueryService, guard: Callable[..., Awaitable[None]]) -> APIRouter:
     dependency = Depends(guard)
     routes = APIRouter(prefix=strings.ROUTE_QUERY)
 
     @routes.post(strings.ROUTE_AVAILABLE_DIMENSIONS, response_model=AvailableDimensionsView)
     def available_dimensions(
-        request: AvailableDimensionsRequest, build_id: UUID, caller: str=dependency,
+        request: AvailableDimensionsRequest, build_id: UUID, _authenticated: None=dependency,
     ) -> AvailableDimensionsView:
-        return service.available_dimensions(build_id, request, caller)
+        return service.available_dimensions(build_id, request)
 
     @routes.post("", response_model=QueryResult)
     def submit(
-        request: QueryRequest, build_id: UUID, caller: str=dependency,
+        request: QueryRequest, build_id: UUID, _authenticated: None=dependency,
     ) -> QueryResult:
-        return service.submit(build_id, request, caller)
+        return service.submit(build_id, request)
 
     return routes

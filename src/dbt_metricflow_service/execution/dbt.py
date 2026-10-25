@@ -5,7 +5,6 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from uuid import uuid4
 
 from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.storage.records import JobErrorDetail
@@ -13,12 +12,11 @@ from dbt_metricflow_service.storage.records import JobErrorDetail
 from .embedded import create_output, engine_environment
 from .errors import ExecutionError
 from .logs import EngineLog
-from .models import JobRecord, JobStatus
 
 if TYPE_CHECKING:
     from dbt_common.events.base_types import EventMsg
 
-    from dbt_metricflow_service.delegates.clients.dbt_client import DbtResult
+    from dbt_metricflow_service.engines.dbt import DbtResult
 
 
 ERROR_LEVEL = "error"
@@ -51,11 +49,9 @@ class DbtExecution:
             f"{self.error_type}: {error}", event_name=INVOCATION_ERROR_EVENT))
 
     @property
-    def record(self) -> JobRecord:
-        return JobRecord(
-            id=uuid4(), project=self.project,
-            status=JobStatus.SUCCEEDED if self.exit_code == 0 else JobStatus.FAILED,
-            submitted_at=self.started, started_at=self.started, finished_at=datetime.now(UTC),
+    def error_detail(self) -> JobErrorDetail:
+        return JobErrorDetail(
+            project=self.project, started_at=self.started, finished_at=datetime.now(UTC),
             exit_code=self.exit_code, stdout=self.output.decode(), stderr=self.error_type,
             output_truncated=self.output.truncated,
         )
@@ -84,7 +80,7 @@ def dbt_execution(
             execution.error_type = type(error).__name__
         execution.output.finish()
         raise ExecutionError(
-            strings.COMMAND_FAILED, JobErrorDetail.model_validate(execution.record, from_attributes=True),
+            strings.COMMAND_FAILED, execution.error_detail,
             stopped=isinstance(error, ExecutionError) and error.stopped,
         ) from None
     finally:

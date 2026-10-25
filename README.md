@@ -10,22 +10,26 @@
 | `api` | 唯一 HTTP 装配、鉴权、参数和错误转换 |
 | `application` | builds、deployments、catalog、queries 四个具体用例服务；不持有 Runtime |
 | `storage` | PostgreSQL 短事务、任务/产物存储、构建日志和新库初始化 |
-| `runtime` | 同进程 worker、租约恢复、完成事务、执行工作目录 |
-| `platform` | 固定 Git 读取、完整工程构建、原生目录与查询适配 |
+| `workers` | 任务领取、心跳、租约恢复和终态提交 |
+| `engines` | dbt / MetricFlow SDK、原生维度发现与共用结果序列化 |
+| `platform` | 固定 Git 源码、执行 profile 和 Manifest 捕获 |
 | `execution` / `adapters` | 进程内引擎调用、串行与取消控制、脱敏及底层引擎适配 |
 
-内部维度发现和数据查询使用独立入口：`Runtime.available_dimensions(build, metrics)` 返回
-`DimensionQueryResult`，`Runtime.execute_query(build, request)` 接收 `PlatformQueryRequest` 并返回
-`DataQueryResult`。两个入口直接调用各自的平台函数；共享的 `_query_context` 仅管理构建保护、
-工作区、profile 和引擎环境。上下文在 `run_serialized` 的执行线程内打开，取消仍须等底层
-执行结束再释放锁和资源。构建验收单独调用 `probe_query_capability`。HTTP 请求和响应保持不变。
+`QueryExecutor.execute_query(build, request)` 在一次请求级上下文中完成维度发现、选项编译和查询，
+返回 `DataQueryResult`；独立的可用维度接口调用 `available_dimensions(build, metrics)`。
+`application/query_plan.py` 集中选项身份、时间归一化与编译规则；公开契约在 `models/queries.py`，
+引擎内部参数在 `engines/models.py`。串行执行线程拥有工作目录、profile 和 SDK 的整个生命周期，
+取消仍须等底层执行结束再释放锁和资源。
+
+接口精简没有旧协议适配层。字段删除、四模式请求/响应和调用方迁移见
+[接口迁移说明](docs/api-simplification-migration.md)。
 
 无额外 Repository/Port/Facade 镜像层。持久化通过 SQLAlchemy ORM 实现，封存产物与物理引用保护由具体 Store 和数据库约束维护。
 
 构建响应读取持久快照，不返回 `queryAvailable` 或 `queryUnavailableReason`。查询不按构建状态、产物引用或工具链版本预判可用性，读取产物及调用引擎时返回实际错误。
 构建、部署历史由 Store 在数据库中筛选并按游标读取，构建列表批量加载初始部署。
 查询用例负责受理编排，`application/query_plan.py` 负责资源及选项到引擎请求的纯转换；
-时间只归一化一次，幂等摘要与执行元数据复用同一请求。部署协调器由启动入口显式传入 worker。
+时间与指标集合只归一化一次。部署协调器由启动入口显式传入 worker。
 构建、部署历史使用 v2 游标，按创建时间和唯一键在数据库中排序；升级前的 v1 历史游标返回
 `INVALID_CURSOR`，调用方应省略游标从首页重新读取。目录游标不变。
 
@@ -107,7 +111,7 @@ dbt 命令通过 `dbtRunner.invoke()` 直接执行，MetricFlow 查询调用 Pyt
 | `SERVICE_TOOLCHAIN_VERSION` | 工具链标识；默认按依赖版本及源码计算 |
 | `WORKER_CONCURRENCY` | 执行槽位，默认 2 |
 | `JOB_LEASE_SECONDS` / `JOB_HEARTBEAT_SECONDS` | 默认 90 / 15 秒 |
-| `MAX_OUTPUT_BYTES` / `MAX_RESULT_BYTES` | 默认 1 MiB 诊断 / 16 MiB 保存结果 |
+| `MAX_OUTPUT_BYTES` / `MAX_RESULT_BYTES` | 默认 1 MiB 诊断 / 8 MiB 公开查询、维度及血缘响应 |
 | `MAX_ARTIFACT_FILE_BYTES` / `MAX_ARTIFACT_BYTES` | 默认 64 MiB 单文件 / 256 MiB 集合 |
 | `SERVICE_HOST` / `SERVICE_PORT` | HTTP 地址、端口 |
 
@@ -129,9 +133,9 @@ dbt 命令通过 `dbtRunner.invoke()` 直接执行，MetricFlow 查询调用 Pyt
 环境由 environmentId 标识，不限制分支名称；branchName 必填，commitSha 可选且必须为完整 SHA。
 分支输入在 worker 首次解析后固定 SHA，重试不会跟随最新 head。schema 必须显式提供；构建使用固定 schema 和原表名，后续构建可能覆盖同名表，因此固定 buildId 不表示历史物理数据快照。
 
-同仓库、可信调用方、操作类型下同幂等键恢复原身份；输入不同返回 409。新键同 SHA 产生新构建。构建成功与部署成功独立，`initialDeployment` 描述随构建附带的意图。
+同仓库、可信调用方下同幂等键恢复原身份；输入不同返回 409。恢复先于当前实例配置校验，只有新受理请求才校验当前实例；鉴权始终执行。新键同 SHA 产生新构建。构建成功与部署成功独立，`initialDeployment` 描述随构建附带的意图。
 
-`ON_SUCCESS` 受理时即分配 generation；较新意图即使失败，也不会恢复较旧待处理意图。部署意图仅由 `POST /builds` 的 `deploymentPolicy=ON_SUCCESS` 创建；需要再次部署时提交新构建。目标自然键是 repository/environmentId/branchName。切换前重新核对远端 head、构建可用性和目标版本；真实 ref 消失停用指针，网络失败只标记 UNKNOWN。
+`ON_SUCCESS` 受理时即分配 generation；较新意图即使失败，也不会恢复较旧待处理意图。部署意图仅由 `POST /builds` 的 `deploymentPolicy=ON_SUCCESS` 创建；需要再次部署时提交新构建。目标自然键是 repository/environmentId/branchName。每次有效远端观察递增目标 version，切换事务同时核对观察版本、head、状态与构建可用性；过期观察保持意图待协调，真实 ref 消失停用指针，网络失败只标记 UNKNOWN。
 
 构建还原完整工程并生成临时 profile，只执行一次 `dbt build`，直接持久化该次调用返回的内存 Manifest。解析、编译、宏、schema/alias、物化、hook 和模型测试均遵循 dbt 原生行为；服务不再注入宏或预先校验模板、SQL、目标及结果，不运行独立的 parse、compile、source freshness、docs generate 或 MetricFlow 查询探测。成功仅表示 dbt build 成功。
 
@@ -160,7 +164,7 @@ uv run --frozen dbt-service-admin build --file build-request.json
 | `GET /builds/{buildId}/resources/{resourceId}` | 一次返回原生节点 resource 与源码文件 source，不提供 view 入参或独立 /source 路由 |
 | `GET /builds/{buildId}/lineage?selector=...` | 用 dbt 原生 selector 查询血缘，返回 `dbt ls --output json` 的节点数组 |
 | `POST /query/available-dimensions?build_id={build_id}` | build_id 为独立 URL 参数，请求体指定 metrics，200 同步返回可用的 dimensions 列表，包含时间粒度和允许的过滤操作 |
-| `POST /query?build_id={build_id}` | build_id 为独立 URL 参数，同步执行 QUERY、EXPLAIN、PREVIEW、DIMENSION_VALUES，直接返回本次结果，最多 8 MiB |
+| `POST /query?build_id={build_id}` | build_id 为独立 URL 参数，同步执行 QUERY、EXPLAIN、PREVIEW、DIMENSION_VALUES，直接返回本次结果，上限由 MAX_RESULT_BYTES 控制，默认 8 MiB |
 
 目录、可用维度、查询始终使用选定 buildId；不重新解析当前部署。新构建不使旧构建目录和查询失效。QUERY/EXPLAIN 使用 metrics；分组/过滤/维度取值使用该构建及指标集合生成的 optionId。PREVIEW 使用 selector。请求体 `limit` 表示本次返回行数上限，默认 1000、最大 10000；查询请求不接受 `offset` 或 `idempotencyKey`。每次请求重新调用引擎，返回 QueryResult，不提供历史结果或分页读取。数值精度和 null 保留，时间按固定构建时区归一化。
 
@@ -185,8 +189,8 @@ uv run --frozen dbt-service-admin init-db
 服务调用采用三层流程：**业务入口 → 上下文信息组装 → 对应 client 方法**。
 
 - 业务入口：`application` 接收构建、目录、查询请求，处理业务状态和 API 契约。
-- 上下文组装：目录读取固定构建的 Manifest 原文；`Runtime._query_context` 准备 Manifest、临时项目、profile 和受保护的执行环境；构建流程准备源项目、目标和日志回调。
-- 工具入口：`delegates/clients/dbt_client.py` 的 `DbtClient` 提供 `build`、`catalog`、`resource`、`lineage`、`source_path`、`preview` 和语义 Manifest 转换；`metric_flow_client.py` 的 `MetricFlowClient` 提供 `available_dimensions` 与 `query`（包括 Explain、维度值）。底层 SDK 初始化和请求转换在 client 内完成。 `MetricFlowClient.query` 直接提交原生请求，不预先发现维度或校验查询字段；参数是否合法由 MetricFlow 判断，服务仅转换引擎错误类型。
+- 上下文组装：目录读取固定构建的 Manifest 原文；`QueryExecutor._engine_context` 准备 Manifest、临时项目、profile 和受保护的执行环境；构建流程准备源项目、目标和日志回调。
+- 工具入口：`engines/dbt.py` 的 `DbtClient` 提供 `build`、`catalog`、`resource`、`lineage`、`source_path`、`preview` 和语义 Manifest 转换；`engines/metricflow.py` 的 `MetricFlowClient` 提供 `available_dimensions` 与 `query`（包括 Explain、维度值）。底层 SDK 初始化和请求转换在 client 内完成。 `MetricFlowClient.query` 直接提交原生请求，不预先发现维度或校验查询字段；参数是否合法由 MetricFlow 判断，服务仅转换引擎错误类型。
 
 ```python
 dbt = DbtClient(manifest_bytes)
@@ -231,27 +235,24 @@ gc 只回收无引用产物，没有历史自动 TTL。构建日志不自动裁�
 
 自有 Python 代码的函数参数和返回值须完整标注，现有 Ruff 命令会检查缺失标注。
 依赖优先使用具体类型，回调使用 `Callable`，可空值显式使用 `| None`；分页与线程辅助函数保留泛型参数。
-固定的构建、部署和任务记录在 `storage/records.py` 使用 `TypedDict` 描述，序列化选项和摘要在
-`models/payloads.py` 描述。`DatabaseRow` 仅用于动态 SQL 投影及历史记录，`JsonObject` 用于原生引擎扩展
-和模型序列化边界；不要用它们替代已有的固定字段类型。`cast` 仅表达 SQL 形状、外键或已完成校验所保证的
-不变量，不执行运行时校验；外部载荷继续交给 Pydantic 校验。`TYPE_CHECKING` 可避免执行层的类型引用形成
-循环导入，HTTP 签名涉及的类型必须在运行时可解析。测试 fixture 沿用现有标注要求。
+固定的构建、部署和任务记录在 `storage/records.py` 使用 Pydantic 模型；公开请求响应位于
+`models/`，只有一份 `Contract`、`Page` 和 `JsonObject`（`models/contracts.py`）。`JsonObject`
+只用于开放的原生协议和序列化边界。`cast` 表达已有不变量，不代替外部载荷校验。
 
-必须使用可丢弃的独立测试库。无需 Agent 或指标平台：
+当前测试使用 pytest；设置专用测试连接时，每个数据库测试创建随机独立 schema，结束后删除该 schema。
+不要将业务数据库作为测试目标。
 
 ```powershell
-$env:SERVICE_TEST_DATABASE_URL = "postgresql://user:password@localhost/dbt_service_test"
+$env:DBT_SERVICE_TEST_DSN = "postgresql://user:password@localhost/dbt_service_test"
 uv run --frozen pytest -q
 uv run --frozen ruff check src tests
 ```
 
-真实引擎验收设置 `PLATFORM_TEST_POSTGRES=1` 和 `PLATFORM_TEST_PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE`，执行：
-
-```powershell
-uv run --frozen pytest -q tests/integration/test_publication_proxy_flow.py
-```
-
-测试覆盖单次 dbt 构建、部署、四种查询、自定义宏与 dbt 失败日志，创建独立测试 schema；该证据不代表 StarRocks 已做真实集成验证。
+不设置 `DBT_SERVICE_TEST_DSN` 时仅跳过 PostgreSQL/真实 SDK 集成，其余契约与单元测试照常运行。
+`tests/test_postgres_integration.py` 覆盖并发幂等与部署观察交错；`tests/test_sdk_integration.py`
+使用 PostgreSQL 元数据和临时 DuckDB 仓库，覆盖真实构建、租约封存、部署、四种查询及全部 14 个 HTTP 操作。
+`tests/test_api_contracts.py` 使用依赖替身独立检查所有入口和 OpenAPI。
+当前验收不代表已完成真实 StarRocks 或 PostgreSQL 目标仓库的 SQL 集成验证。
 
 ## 外部执行快照与环境隔离
 
@@ -279,13 +280,8 @@ StarRocks 的 profile.catalog 指定 catalog，profile.schema 指定 database；
 
 物理归属从不可变构建事实核验，已使用的目标不能交给另一环境。构建按请求声明的物理目标串行调度；工程宏额外选择的其他 schema 不单独纳入该锁；租约过期或外部停止情况未知时保留写入保护，直到现有 reconcile 流程确认停止。
 
-真实隔离验收需设置 `ENVIRONMENT_ISOLATION_E2E=1`、`SERVICE_TEST_DATABASE_URL`（专用服务测试库）、`ENVIRONMENT_TEST_REPOSITORY`、`DBT_ENV_SECRET_ISOLATION_USER`、`DBT_ENV_SECRET_ISOLATION_PASSWORD`；可选 `ENVIRONMENT_TEST_HOST/PORT/BRANCH`。使用已有真实仓库和只读原始数据，测试创建唯一 `env_e2e_*` schema，保留构建事实便于审计：
-
-```powershell
-uv run --frozen pytest -q -s tests/integration/test_execution_environment_isolation.py
-```
-
-测试核对两个 schema 的实际表内容、相同源码 SHA、固定 build 查询、环境 A 重建后环境 B 不变，以及旧配置快照不变。清理这些专用 schema 和测试数据库应在确认不再需要验收记录后单独执行。
+目标实例与 schema 的归属验证仍由持久构建事实和物理目标锁承担；本次未修改数据库 schema、
+目标隔离及未知写入保护。既有历史环境隔离验收脚本不在当前 checkout 中，不列作本次验证证据。
 
 已移除构建清理任务和 `CLEANING/CLEANED` 生命周期，不再通过清理任务关闭历史查询，也不删除共享数据库对象。临时目录仍在执行结束后自动清理。存量数据库需停止服务后，在目标服务 schema 的事务内执行 `src/dbt_metricflow_service/storage/remove_run_cleanup.sql`；保留历史记录，未完成的旧清理任务标记为失败。
 
@@ -302,4 +298,4 @@ uv run --frozen pytest -q -s tests/integration/test_execution_environment_isolat
 - `execution/dbt.py`、`logs.py`、`log_writer.py`：dbt 诊断上下文、事件结构和日志批量写入。
 - `execution/errors.py`、`models.py`、`toolchain.py`：共用执行错误、结果类型和工具链标识。
 
-HTTP 查询入口注入 `runtime.queries` 的方法；执行与 worker 模块不反向依赖 `bootstrap`，共用上下文不依赖构建或查询编排。
+HTTP 查询入口注入 `runtime.queries` 的方法；执行与 worker 模块不反向依赖 `bootstrap`，纯查询编译由执行器在请求上下文内调用，SDK 与工作目录不传出到 HTTP 层。

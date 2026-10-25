@@ -17,10 +17,11 @@ from dbt.contracts.graph.semantic_manifest import SemanticManifest
 from dbt.exceptions import InvalidSelectorError
 
 from dbt_metricflow_service import constants as strings
-from dbt_metricflow_service.delegates.clients import InvalidDimensionsRequest
-from dbt_metricflow_service.delegates.metricflow.queries import _json_cell
-from dbt_metricflow_service.models.payloads import JsonObject, ResultColumn
-from dbt_metricflow_service.platform.models import DataQueryResult
+from dbt_metricflow_service.engines import InvalidDimensionsRequest
+from dbt_metricflow_service.engines.models import DataQueryResult
+from dbt_metricflow_service.engines.results import json_cell
+from dbt_metricflow_service.models.contracts import JsonObject
+from dbt_metricflow_service.models.queries import ResultColumn
 
 if TYPE_CHECKING:
     from dbt_common.events.base_types import EventMsg
@@ -116,5 +117,5 @@ class DbtClient:
             ResultColumn(name=name, type=type(table[0][index]).__name__ if table.rows else strings.UNKNOWN_VALUE_TYPE)
             for index, name in enumerate(table.column_names)
         ]
-        rows = [[_json_cell(cell) for cell in row] for row in table.rows[:limit]]
+        rows = [[json_cell(cell) for cell in row] for row in table.rows[:limit]]
         return DataQueryResult(columns=columns, rows=rows, truncated=len(table.rows) > limit)

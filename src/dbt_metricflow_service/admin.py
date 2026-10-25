@@ -7,11 +7,13 @@ from pathlib import Path
 from typing import Final
 from uuid import UUID
 
+from pydantic import JsonValue
+
 from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.bootstrap import current_toolchain
 from dbt_metricflow_service.execution.artifacts import _is_link
 from dbt_metricflow_service.models.configuration import ConfigurationModel
-from dbt_metricflow_service.models.payloads import JsonObject, JsonValue
+from dbt_metricflow_service.models.contracts import JsonObject
 from dbt_metricflow_service.platform.bindings import PROJECT_NAME_PATTERN
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
@@ -121,15 +123,13 @@ def main(argv: list[str] | None = None) -> None:
             db.check()
             if args.command == BUILD:
                 from dbt_metricflow_service.application.builds import BuildService
-                from dbt_metricflow_service.models.execution import SnapshotBuildRequest
-                from dbt_metricflow_service.platform.execution_profile import validate_execution_target
+                from dbt_metricflow_service.models.builds import BuildRequest
                 from dbt_metricflow_service.storage.builds import BuildStore
 
                 service = BuildService(BuildStore(db), settings.toolchain_version or current_toolchain(),
-                                       settings.config_version)
-                request = SnapshotBuildRequest.model_validate(_json(args.file, settings.max_artifact_file_bytes))
-                validate_execution_target(request.execution, settings)
-                result = service.submit_snapshot(request, strings.ADMIN_IDENTITY)
+                                       settings)
+                request = BuildRequest.model_validate(_json(args.file, settings.max_artifact_file_bytes))
+                result = service.submit(request, strings.ADMIN_IDENTITY)
             elif args.command == RECONCILE:
                 result = ReconciliationResult(confirmed=reconcile_attempt(
                     db, args.attempt_id, confirm_external_stopped=args.confirm_external_stopped,

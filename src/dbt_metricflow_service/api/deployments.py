@@ -7,14 +7,12 @@ from fastapi import APIRouter, Query
 from dbt_metricflow_service import constants as strings
 
 from ..application.deployments import DeploymentService
-from ..application.errors import ServiceError
-from ..models.builds import Page
+from ..models.contracts import Page
 from ..models.deployments import (
     DeploymentAttemptView,
     DeploymentKey,
     DeploymentTargetView,
 )
-from ..storage.deployments import attempt_view
 
 
 def router(service: DeploymentService) -> APIRouter:
@@ -28,10 +26,6 @@ def router(service: DeploymentService) -> APIRouter:
     def history(repository: str, environmentId: UUID, branchName: str | None = None,
                 cursor: str | None = None, limit: int = Query(default=50, ge=1, le=200)
                 ) -> Page[DeploymentAttemptView]:
-        try:
-            rows, following = service.store.list(repository, str(environmentId), branchName, cursor, limit)
-        except ValueError as error:
-            raise ServiceError(strings.INVALID_CURSOR, str(error)) from error
-        return Page[DeploymentAttemptView](items=[attempt_view(row) for row in rows], next_cursor=following)
+        return service.list(repository, str(environmentId), branchName, cursor, limit)
 
     return routes

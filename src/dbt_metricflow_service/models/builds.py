@@ -4,17 +4,20 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Generic, TypeVar
+from typing import Final
+from urllib.parse import urlsplit
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from dbt_metricflow_service import constants as strings
 
-from .contracts import SHA_PATTERN, Contract, validate_branch  # noqa: F401
+from .contracts import SHA_PATTERN, Contract, validate_branch
 from .deployments import DeploymentAttemptView
+from .execution import ExecutionSnapshot
+from .service import ErrorView
 
-T = TypeVar("T")
+INVALID_REPOSITORY_URL_MESSAGE: Final[str] = 'repository must be a remote URL without embedded credentials'
 
 
 class DeploymentPolicy(StrEnum):
@@ -38,21 +41,36 @@ class Origin(Contract):
     operation_id: str | None = Field(default=None, max_length=256, description="调用方原样提供的关联标签")
 
 
-class ErrorView(Contract):
-    code: str = Field(description="稳定错误码")
-    message: str = Field(description="不含凭据或本地路径的诊断")
-    retryable: bool = Field(default=False, description="能否以同请求重试")
-    phase: str | None = Field(default=None, description="失败执行阶段")
-    build_id: UUID | None = Field(default=None, description="已有构建身份")
+class BuildRequest(Contract):
+    repository: str = Field(min_length=1, max_length=2048, description="本次源码仓库地址")
+    branch_name: str = Field(description="本次明确指定的 Git 短分支名")
+    commit_sha: str | None = Field(default=None, pattern=SHA_PATTERN, description="可选固定提交")
+    execution: ExecutionSnapshot = Field(description="受理时固定的完整执行配置")
+    deployment_policy: DeploymentPolicy = Field(default=DeploymentPolicy.NONE, description="成功部署意图")
+    idempotency_key: str = Field(min_length=1, max_length=256, description="一次提交的稳定请求键")
+    origin: Origin | None = Field(default=None, description="调用方追溯标签")
+
+    _branch = field_validator(strings.BRANCH_NAME_FIELD)(validate_branch)
+
+    @field_validator(strings.REPOSITORY_FIELD)
+    @classmethod
+    def valid_repository(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if (parsed.scheme not in {strings.HTTP_SCHEME, strings.HTTPS_SCHEME, strings.SSH_SCHEME} or not parsed.hostname
+                or parsed.password or parsed.query or parsed.fragment
+                or any(char.isspace() for char in value)
+                or parsed.scheme in {strings.HTTP_SCHEME, strings.HTTPS_SCHEME} and parsed.username):
+            raise ValueError(INVALID_REPOSITORY_URL_MESSAGE)
+        return value
 
 
 class BuildView(Contract):
+    execution: ExecutionSnapshot = Field(description="受理时固定的完整执行快照")
     build_id: UUID = Field(description="一次构建身份，与提交 SHA 无关")
     repository: str = Field(description="规范仓库地址")
     branch_name: str | None = Field(description="请求来源分支")
     requested_commit_sha: str | None = Field(description="受理时显式指定的 SHA")
     commit_sha: str | None = Field(description="首次解析后固定的实际 SHA")
-    config_version: str = Field(description="固定配置版本")
     toolchain_version: str = Field(description="固定工具链版本")
     build_status: BuildStatus = Field(description="构建状态，不代表部署状态")
     phase: str = Field(description="当前执行阶段")
@@ -62,11 +80,6 @@ class BuildView(Contract):
     catalog_available: bool = Field(default=False, description="完整封存目录是否可读")
     error: ErrorView | None = Field(default=None, description="脱敏错误摘要")
     initial_deployment: DeploymentAttemptView | None = Field(default=None, description="受理时附带的部署意图")
-
-
-class Page(Contract, Generic[T]):
-    items: list[T] = Field(description="本页有界结果")
-    next_cursor: str | None = Field(default=None, description="绑定筛选条件的后续游标")
 
 
 class ExecutionLogView(Contract):
