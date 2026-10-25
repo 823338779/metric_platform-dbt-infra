@@ -83,7 +83,6 @@ class Settings:
     max_output_bytes: int
     # 启用 PostgreSQL 运行时的连接信息；repr 不包含凭据。
     database_url: str | None = field(default=None, repr=False)
-    service_token: str | None = field(default=None, repr=False)
     # 可丢弃的实例本地工作目录，不作为持久产物定位符。
     temp_root: Path = Path(strings.RUNTIME_TEMP_DIRECTORY)
     # 本机同时执行的任务数。
@@ -182,7 +181,6 @@ class Settings:
             profiles_dir=path(strings.DBT_PROFILES_DIR, config.DBT_PROFILES_DIR, DEFAULT_PROFILES_DIR),
             max_output_bytes=int(value(MAX_OUTPUT_BYTES_ENV, config.MAX_OUTPUT_BYTES, str(DEFAULT_MAX_OUTPUT_BYTES))),
             database_url=value(strings.SERVICE_DATABASE_URL, config.SERVICE_DATABASE_URL) or None,
-            service_token=value(strings.SERVICE_TOKEN, config.SERVICE_TOKEN) or None,
             temp_root=path(strings.SERVICE_TEMP_ROOT, config.SERVICE_TEMP_ROOT, strings.RUNTIME_TEMP_DIRECTORY),
             worker_concurrency=int(
                 value(strings.WORKER_CONCURRENCY, config.WORKER_CONCURRENCY, strings.DEFAULT_WORKER_CONCURRENCY)

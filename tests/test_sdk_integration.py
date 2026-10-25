@@ -74,10 +74,9 @@ def test_real_build_and_all_http_operations(database, settings, build_request, t
     monkeypatch.setattr("dbt_metricflow_service.api.app.Runtime", lambda _: runtime)
     monkeypatch.setattr("dbt_metricflow_service.api.app.remote_head", lambda *args, **kwargs: "b" * 40)
     client = TestClient(create_app(settings))
-    headers = {"Authorization": "Bearer test-token"}
     body = build_request.model_dump(mode="json", by_alias=True)
     body["deploymentPolicy"] = "ON_SUCCESS"
-    accepted = client.post("/builds", json=body, headers=headers)
+    accepted = client.post("/builds", json=body)
     assert accepted.status_code == 202, accepted.text
     build_id = accepted.json()["buildId"]
     assert "configVersion" not in accepted.json()
@@ -94,6 +93,7 @@ def test_real_build_and_all_http_operations(database, settings, build_request, t
     leased = LeasedJob(**jobs.get(leased.job_id).model_dump(),
                        attempt_id=leased.attempt_id, lease_token=leased.lease_token)
     result = asyncio.run(BuildExecutor(settings, jobs, artifacts).execute(leased))
+    assert not (settings.temp_root / str(leased.job_id)).exists()
     # A stale lease cannot publish; the proper lease seals and publishes the same output.
     assert not jobs.finish(leased.job_id, uuid4(), output_set_id=result.output_set_id, seal=artifacts.seal)
     assert jobs.finish(leased.job_id, leased.lease_token, output_set_id=result.output_set_id, seal=artifacts.seal)
@@ -117,7 +117,7 @@ def test_real_build_and_all_http_operations(database, settings, build_request, t
     assert lineage.status_code == 200, lineage.text
     assert any(row["unique_id"] == "model.api_review.orders" for row in lineage.json())
     dimensions = client.post("/query/available-dimensions", params={"build_id": build_id},
-                             json={"metrics": ["revenue"]}, headers=headers)
+                             json={"metrics": ["revenue"]})
     assert dimensions.status_code == 200, dimensions.text
     status = next(row for row in dimensions.json()["dimensions"] if row["name"] == "status")
     assert "valueType" not in status
@@ -128,7 +128,7 @@ def test_real_build_and_all_http_operations(database, settings, build_request, t
         ("DIMENSION_VALUES", {"metrics": ["revenue"], "dimensionOptionId": status["optionId"]}),
     ]:
         response = client.post("/query", params={"build_id": build_id},
-                               json={"mode": mode, "limit": 1, **fields}, headers=headers)
+                               json={"mode": mode, "limit": 1, **fields})
         assert response.status_code == 200, (mode, response.text)
         payload = response.json()
         assert payload["mode"] == mode and "boundaryPolicy" not in payload
@@ -140,7 +140,7 @@ def test_real_build_and_all_http_operations(database, settings, build_request, t
             assert "sql" not in payload
         if mode == "PREVIEW":
             assert "normalizedTimeRange" not in payload
-    filtered = client.post("/query", params={"build_id": build_id}, headers=headers, json={
+    filtered = client.post("/query", params={"build_id": build_id}, json={
         "mode": "QUERY", "metrics": ["revenue"],
         "filters": [{"optionId": status["optionId"], "operator": "IN", "value": ["paid"]}],
     })

@@ -61,7 +61,6 @@ class ServiceConfiguration(ConfigurationModel):
     MAX_RESULT_BYTES: ConfigurationScalar = None
     MAX_ARTIFACT_FILE_BYTES: ConfigurationScalar = None
     MAX_ARTIFACT_BYTES: ConfigurationScalar = None
-    SERVICE_TOKEN: ConfigurationScalar = None
     DBT_PROFILES: DbtProfiles | None = None
     EXECUTION_INSTANCES: dict[str, ExecutionInstance] = Field(default_factory=dict)
     EXECUTION_CREDENTIALS: dict[str, ExecutionCredential] = Field(default_factory=dict, repr=False)

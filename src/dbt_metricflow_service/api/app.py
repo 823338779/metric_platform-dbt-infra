@@ -22,7 +22,6 @@ from ..platform.source import is_ancestor, remote_head
 from ..storage.builds import BuildStore
 from ..storage.deployments import DeploymentStore
 from . import builds, catalog, deployments, queries, system
-from .auth import mutation_guard
 from .errors import register_exception_handlers
 from .limits import RequestBodyLimitMiddleware
 
@@ -58,9 +57,8 @@ def create_app(settings: Settings) -> FastAPI:
     app.state.settings = settings
     app.add_middleware(RequestBodyLimitMiddleware)
     register_exception_handlers(app)
-    guard = mutation_guard(settings)
-    for routes in (builds.router(build_service, guard), deployments.router(deployment_service),
-                   catalog.router(catalog_service), queries.router(query_service, guard),
+    for routes in (builds.router(build_service), deployments.router(deployment_service),
+                   catalog.router(catalog_service), queries.router(query_service),
                    system.router(settings, runtime.db)):
         app.include_router(routes)
 

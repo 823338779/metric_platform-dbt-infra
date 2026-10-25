@@ -11,7 +11,7 @@
 | 维度选项 | 删除 valueType | 不依赖未可靠推导的值类型；dimensionType、granularities、operators 保留 |
 | 查询响应 | 删除 boundaryPolicy | 时间边界继续由 MetricFlow 根据粒度解释，normalizedTimeRange 只表示业务时区归一化的输入 |
 | 查询响应 | 按 mode 区分字段 | 不再假设四种模式都有 sql、rows、columns 和时间字段 |
-| 认证错误 | 返回 service_credential_required 或 mutations_disabled | 不再把这两种情况当通用 HTTP_ERROR；状态码仍为 401/503 |
+| API 认证 | 已移除令牌和身份校验 | 无需配置 SERVICE_TOKEN 或传递 Authorization 请求头 |
 | 结果上限 | MAX_RESULT_BYTES 统一限制最终公开 JSON，默认 8 MiB | 查询、可用维度和血缘使用同一配置；UTF-8 字节计数，超限返回 RESULT_TOO_LARGE/422 |
 
 buildId、commitSha、mode 仍保留在查询结果中。资源详情仍是 buildId/resourceId/resource/source；

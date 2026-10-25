@@ -12,7 +12,6 @@ from dbt_metricflow_service.storage.records import StoredBuild
 
 BUILD_ID = "00000000-0000-0000-0000-000000000002"
 ENVIRONMENT = "00000000-0000-0000-0000-000000000001"
-HEADERS = {"Authorization": "Bearer test-token"}
 
 
 @pytest.fixture
@@ -75,7 +74,7 @@ def test_all_http_operations(api, build_request, monkeypatch, method, path, body
     client, _, _ = api
     monkeypatch.setattr("shutil.which", lambda *args: None)
     payload = build_request.model_dump(mode="json", by_alias=True) if body == "build" else body
-    response = client.request(method, path, json=payload, headers=HEADERS)
+    response = client.request(method, path, json=payload)
     assert response.status_code == status, response.text
     if key:
         assert key in response.json()
@@ -109,7 +108,7 @@ def test_missing_build_errors(api, path):
 ])
 def test_invalid_queries_do_not_start_engine(api, body):
     client, _, queries = api
-    response = client.post(f"/query?build_id={BUILD_ID}", json=body, headers=HEADERS)
+    response = client.post(f"/query?build_id={BUILD_ID}", json=body)
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "INVALID_REQUEST"
     queries.execute_query.assert_not_called()

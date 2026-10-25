@@ -16,7 +16,7 @@ from dbt_metricflow_service.storage.postgres import Database
 def settings(tmp_path):
     return Settings(
         profiles_dir=tmp_path, temp_root=tmp_path, max_output_bytes=1024,
-        database_url="postgresql://unused.invalid/test", service_token="test-token",
+        database_url="postgresql://unused.invalid/test",
         execution_instances={"local": {"type": "duckdb", "path": str(tmp_path / "warehouse.duckdb")}},
     )
 

@@ -3,30 +3,10 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
-from fastapi import Depends, FastAPI
-from fastapi.testclient import TestClient
 
-from dbt_metricflow_service.api.auth import mutation_guard
-from dbt_metricflow_service.api.errors import register_exception_handlers
 from dbt_metricflow_service.application.catalog import CatalogService
 from dbt_metricflow_service.execution.dbt import dbt_execution
 from dbt_metricflow_service.execution.errors import ExecutionError
-
-
-def test_authentication_preserves_public_error_code(settings):
-    app = FastAPI()
-    register_exception_handlers(app)
-    guard = mutation_guard(settings)
-    dependency = Depends(guard)
-
-    @app.post("/protected")
-    def protected(auth=dependency):
-        return {"ok": True}
-
-    response = TestClient(app).post("/protected")
-    assert response.status_code == 401
-    assert response.json()["error"]["code"] == "service_credential_required"
-    assert TestClient(app).post("/protected", headers={"Authorization": "Bearer test-token"}).status_code == 200
 
 
 def test_lineage_passes_one_manifest_read_to_executor():

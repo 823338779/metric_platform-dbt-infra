@@ -7,7 +7,7 @@
 | package | 职责 |
 | --- | --- |
 | `models` | 完整执行快照请求响应与封存资源模型；无 I/O |
-| `api` | 唯一 HTTP 装配、鉴权、参数和错误转换 |
+| `api` | 唯一 HTTP 装配、参数和错误转换 |
 | `application` | builds、deployments、catalog、queries 四个具体用例服务；不持有 Runtime |
 | `storage` | PostgreSQL 短事务、任务/产物存储、构建日志和新库初始化 |
 | `workers` | 任务领取、心跳、租约恢复和终态提交 |
@@ -88,7 +88,6 @@ MetricFlow 在完成原始值的筛选、分组、计算、排序和 LIMIT 后�
 ```powershell
 uv sync --frozen --all-groups
 $env:SERVICE_DATABASE_URL = "postgresql://user:password@localhost/dbt_service"
-$env:SERVICE_TOKEN = "由部署环境提供的服务凭据"
 uv run --frozen dbt-service-admin init-db
 uv run --frozen dbt-metricflow-service
 ```
@@ -104,7 +103,6 @@ dbt 命令通过 `dbtRunner.invoke()` 直接执行，MetricFlow 查询调用 Pyt
 | 配置 | 用途 |
 | --- | --- |
 | `SERVICE_DATABASE_URL` | PostgreSQL 元数据库；必需 |
-| `SERVICE_TOKEN` | 所有 POST 的 Bearer 凭据，未配置则禁用写入口 |
 | `EXECUTION_INSTANCES` / `EXECUTION_CREDENTIALS` | 可信物理实例清单和凭据环境变量引用 |
 | `SERVICE_TEMP_ROOT` | 可丢弃执行目录 |
 | `SERVICE_CONFIG_VERSION` | 本 worker 可执行的配置版本，默认 1 |
@@ -133,7 +131,7 @@ dbt 命令通过 `dbtRunner.invoke()` 直接执行，MetricFlow 查询调用 Pyt
 环境由 environmentId 标识，不限制分支名称；branchName 必填，commitSha 可选且必须为完整 SHA。
 分支输入在 worker 首次解析后固定 SHA，重试不会跟随最新 head。schema 必须显式提供；构建使用固定 schema 和原表名，后续构建可能覆盖同名表，因此固定 buildId 不表示历史物理数据快照。
 
-同仓库、可信调用方下同幂等键恢复原身份；输入不同返回 409。恢复先于当前实例配置校验，只有新受理请求才校验当前实例；鉴权始终执行。新键同 SHA 产生新构建。构建成功与部署成功独立，`initialDeployment` 描述随构建附带的意图。
+同仓库、可信调用方下同幂等键恢复原身份；输入不同返回 409。恢复先于当前实例配置校验，只有新受理请求才校验当前实例。服务 API 不要求令牌或身份校验，无需传递 Authorization 请求头。新键同 SHA 产生新构建。构建成功与部署成功独立，`initialDeployment` 描述随构建附带的意图。
 
 `ON_SUCCESS` 受理时即分配 generation；较新意图即使失败，也不会恢复较旧待处理意图。部署意图仅由 `POST /builds` 的 `deploymentPolicy=ON_SUCCESS` 创建；需要再次部署时提交新构建。目标自然键是 repository/environmentId/branchName。每次有效远端观察递增目标 version，切换事务同时核对观察版本、head、状态与构建可用性；过期观察保持意图待协调，真实 ref 消失停用指针，网络失败只标记 UNKNOWN。
 
@@ -283,7 +281,7 @@ StarRocks 的 profile.catalog 指定 catalog，profile.schema 指定 database；
 目标实例与 schema 的归属验证仍由持久构建事实和物理目标锁承担；本次未修改数据库 schema、
 目标隔离及未知写入保护。既有历史环境隔离验收脚本不在当前 checkout 中，不列作本次验证证据。
 
-已移除构建清理任务和 `CLEANING/CLEANED` 生命周期，不再通过清理任务关闭历史查询，也不删除共享数据库对象。临时目录仍在执行结束后自动清理。存量数据库需停止服务后，在目标服务 schema 的事务内执行 `src/dbt_metricflow_service/storage/remove_run_cleanup.sql`；保留历史记录，未完成的旧清理任务标记为失败。
+已移除构建清理任务和 `CLEANING/CLEANED` 生命周期，不再通过清理任务关闭历史查询，也不删除共享数据库对象。构建成功、失败或取消时，等待执行线程退出及日志收尾后，删除本次 attempt 的源码、项目、profile、target 和日志等临时文件，并删除已空的任务目录；共享临时根目录和其他执行中的目录保留。成功构建的产物在清理前持久化，历史查询与日志读取不依赖本地临时目录。存量数据库需停止服务后，在目标服务 schema 的事务内执行 `src/dbt_metricflow_service/storage/remove_run_cleanup.sql`；保留历史记录，未完成的旧清理任务标记为失败。
 
 任务 `kind` 字段已移除，执行器直接构建；产物集合的 `SOURCE/EXECUTION` 类型保留。已有数据库停服后在目标服务 schema 的事务内执行 `remove_job_kind.sql`；若仍存在旧清理生命周期字段，先执行 `remove_run_cleanup.sql`。迁移保留任务和 attempt 历史，将未完成的旧清理任务标记失败，避免当作构建领取。
 

@@ -1,9 +1,8 @@
 """外部执行快照的构建门面；服务不提供环境注册接口。"""
 
-from collections.abc import Awaitable, Callable
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Query
 
 from dbt_metricflow_service import constants as strings
 
@@ -14,12 +13,11 @@ from ..models.contracts import Page
 PREFIX = ""
 
 
-def router(service: BuildService, guard: Callable[..., Awaitable[None]]) -> APIRouter:
+def router(service: BuildService) -> APIRouter:
     routes = APIRouter(prefix=PREFIX)
-    dependency = Depends(guard)
 
     @routes.post(strings.ROUTE_BUILDS, response_model=BuildView, status_code=202)
-    def submit(request: BuildRequest, _authenticated: None = dependency) -> BuildView:
+    def submit(request: BuildRequest) -> BuildView:
         return service.submit(request, strings.AUTH_SERVICE_IDENTITY)
 
     @routes.get(strings.ROUTE_BUILDS, response_model=Page[BuildView])
