@@ -6,7 +6,7 @@ SERVICE_HOST: "0.0.0.0"
 SERVICE_PORT: 8000
 
 # PostgreSQL 元数据库连接；使用独立的当前版本 schema，环境变量可覆盖。
-SERVICE_DATABASE_URL: "postgresql:///?user=data_agent&password=data_agent_local_dev&connect_timeout=5&dbname=dbt_service&host=localhost&port=5432&options=-c%20search_path%3Dservice_20261014"
+SERVICE_DATABASE_URL: "postgresql:///?user=data_agent&password=data_agent_local_dev&connect_timeout=5&dbname=dbt_service&host=localhost&port=5432&options=-c%20search_path%3Dpublic"
 
 # 可信物理实例清单；请求中的 instanceId、类型、主机和端口必须与之匹配。
 EXECUTION_INSTANCES:
