@@ -5,3 +5,4 @@
 3. dbt现在做出的semantic_manifest.json会让metricFlow消费，但是它们是两个独立的环节。所以现在需要做的事情是，让dbt构建时候的产物都要持久化到数据库，metricFlow不能通过磁盘读取。
 4. 【高优】dbt在parse的时候会解析宏，但是这里很多宏的定义比如dbt、dbt-starrocks的那些宏定义每次都是一样的，可以全局复用的。
 5. 【高优】dbt的日志可以加拦截器，持久化在磁盘中。
+6. 【高优】不要在dbt-service中配置静态的starrocks链接信息，而是要让外部动态传入
