@@ -14,6 +14,7 @@ from dbt_metricflow_service.models.payloads import JsonObject
 StringUUID = Annotated[str, mapped_column(UUID(as_uuid=False))]
 BigInt = Annotated[int, mapped_column(BigInteger)]
 JsonDocument = Annotated[JsonObject, mapped_column(JSONB(none_as_null=True))]
+EXECUTION_LOG_TABLE = "runtime_execution_log"
 
 
 class Base(DeclarativeBase):
@@ -118,6 +119,33 @@ class RuntimeAttempt(Base):
         server_default=text(strings.SQL_CLOCK_TIMESTAMP), comment="执行开始时间"
     )
     finished_at: Mapped[datetime | None] = mapped_column(comment="执行终结或被判定失联的时间")
+
+
+class RuntimeExecutionLog(Base):
+    """runtime_execution_log 保存脱敏后的 dbt 详细事件，与阶段记录独立。"""
+
+    __tablename__ = EXECUTION_LOG_TABLE
+
+    log_id: Mapped[BigInt] = mapped_column(
+        primary_key=True, server_default=text("nextval('runtime_execution_log_log_id_seq'::regclass)"),
+        comment="日志递增标识；同一次命令按采集顺序写入",
+    )
+    build_id: Mapped[StringUUID | None] = mapped_column(comment="关联构建，非构建任务为空")
+    job_id: Mapped[StringUUID] = mapped_column(comment="所属持久任务")
+    attempt_id: Mapped[StringUUID] = mapped_column(comment="所属执行尝试，区分重试")
+    phase: Mapped[str] = mapped_column(comment="采集时的任务阶段")
+    command: Mapped[str] = mapped_column(comment="dbt 子命令，不保存命令参数")
+    event_time: Mapped[datetime] = mapped_column(comment="事件原始 UTC 时间")
+    level: Mapped[str] = mapped_column(comment="事件级别，包含 debug")
+    event_name: Mapped[str] = mapped_column(comment="dbt 事件名或 Python logger 名称")
+    event_code: Mapped[str] = mapped_column(comment="dbt 事件代码，普通日志为空字符串")
+    invocation_id: Mapped[str] = mapped_column(comment="dbt 调用标识，普通日志为空字符串")
+    node_id: Mapped[str] = mapped_column(comment="节点 unique_id，命令级事件为空字符串")
+    thread_name: Mapped[str] = mapped_column(comment="事件产生线程")
+    message: Mapped[str] = mapped_column(comment="脱敏后的完整消息，不受 stdout 尾部上限限制")
+    created_at: Mapped[datetime] = mapped_column(
+        server_default=text(strings.SQL_CLOCK_TIMESTAMP), comment="数据库记录写入时间",
+    )
 
 
 class ArtifactSet(Base):
@@ -249,27 +277,3 @@ class DeploymentAttempt(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=text(strings.SQL_CLOCK_TIMESTAMP), comment="受理时间")
     deployed_at: Mapped[datetime | None] = mapped_column(comment="实际切换时间")
     last_checked_at: Mapped[datetime | None] = mapped_column(comment="内部公平调度的最近扫描时间，不生成业务变化")
-
-
-class ChangeCounter(Base):
-    """engine_change_counter 的持久字段；对外由 Store 返回记录快照。"""
-
-    __tablename__ = strings.ENGINE_CHANGE_COUNTER_TABLE
-
-    singleton: Mapped[bool] = mapped_column(
-        primary_key=True, server_default=text(strings.SQL_TRUE), comment="构建日志计数器唯一行"
-    )
-    value: Mapped[BigInt] = mapped_column(comment="最后同事务分配的变化序号")
-
-
-class Change(Base):
-    """engine_change 的持久字段；对外由 Store 返回记录快照。"""
-
-    __tablename__ = strings.ENGINE_CHANGE_TABLE
-
-    sequence: Mapped[BigInt] = mapped_column(primary_key=True, comment="提交顺序可重放变化序号")
-    repository: Mapped[str] = mapped_column(comment="受控规范仓库地址")
-    object_type: Mapped[str] = mapped_column(comment="引擎事实类型")
-    object_id: Mapped[str] = mapped_column(comment="变化对象自然身份")
-    object_version: Mapped[BigInt] = mapped_column(comment="变化对应对象版本")
-    summary: Mapped[JsonDocument] = mapped_column(comment="构建阶段、状态与错误码，不含执行秘密")

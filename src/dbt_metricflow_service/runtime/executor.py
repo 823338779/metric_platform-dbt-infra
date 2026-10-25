@@ -5,6 +5,7 @@ import json
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Final, ParamSpec, TypeVar, cast
 
@@ -17,9 +18,11 @@ from dbt_metricflow_service.execution.models import (
     JobStatus,
 )
 from dbt_metricflow_service.platform.models import ProbeResult
+from dbt_metricflow_service.runtime.execution_logs import ExecutionLogWriter
 from dbt_metricflow_service.runtime.workspace import attempt_workspace
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
+from dbt_metricflow_service.storage.execution_logs import ExecutionLogStore
 from dbt_metricflow_service.storage.jobs import JobStore
 from dbt_metricflow_service.storage.records import ArtifactMetadata, JobErrorDetail, LeasedJob, StoredJob
 
@@ -203,10 +206,16 @@ class RuntimeExecutor:
 
     async def _dbt(self, job: LeasedJob, spec: CommandSpec, phase: str) -> JobRecord:
         # dbt 使用命令执行记录；不携带 MetricFlow 的请求、结果或业务错误码。
-        record = await run_dbt(
-            job.project_id, spec, self.settings.command_timeout_seconds,
-            self.settings.max_output_bytes, lambda: self._authorize(job, phase, external=spec.write_operation),
-        )
+        writer = ExecutionLogWriter(partial(ExecutionLogStore(self.jobs.db).append, job, phase, spec.argv[1]))
+        try:
+            record = await run_dbt(
+                job.project_id, spec, self.settings.command_timeout_seconds,
+                self.settings.max_output_bytes, lambda: self._authorize(job, phase, external=spec.write_operation),
+                log_sink=writer.emit,
+            )
+        finally:
+            # run_dbt 在取消和超时时也等待引擎退出，此后才允许关闭日志队列。
+            await _thread(writer.close)
         # parse/debug 正常退出无需写入核对，写命令失联不能据退出码释放保护。
         self._check_record(record, may_write=spec.write_operation)
         return record

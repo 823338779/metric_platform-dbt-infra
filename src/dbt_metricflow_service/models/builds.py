@@ -72,7 +72,26 @@ class Page(Contract, Generic[T]):
     next_cursor: str | None = Field(default=None, description="绑定筛选条件的后续游标")
 
 
-class LogPage(Contract):
-    items: list[str] = Field(description="有界、脱敏日志片段")
-    next_cursor: str | None = Field(default=None, description="后续日志位置")
-    truncated: bool = Field(default=False, description="源日志是否已截断")
+class ExecutionLogView(Contract):
+    """前端展示的一条 dbt 详细日志；消息必须作为文本渲染。"""
+
+    log_id: str = Field(description="日志唯一标识，以十进制字符串返回，避免 JavaScript 整数精度丢失")
+    job_id: UUID = Field(description="所属任务标识")
+    attempt_id: UUID = Field(description="执行尝试标识，可用于区分重试")
+    phase: str = Field(description="产生该日志的构建阶段")
+    command: str = Field(description="dbt 子命令")
+    event_time: datetime = Field(description="事件产生时间，UTC")
+    level: str = Field(description="原始日志级别，例如 debug、info、warn、warning、error")
+    event_name: str = Field(description="dbt 事件名或 Python logger 名称")
+    event_code: str = Field(description="dbt 事件代码，无此信息时为空字符串")
+    invocation_id: str = Field(description="dbt 调用标识，无此信息时为空字符串")
+    node_id: str = Field(description="模型等节点的 unique_id，无此信息时为空字符串")
+    thread_name: str = Field(description="产生事件的线程名称")
+    message: str = Field(description="脱敏后的完整消息，可包含换行和 ANSI 转义序列，不是 HTML")
+    created_at: datetime = Field(description="日志写入数据库的时间，UTC")
+
+
+class ExecutionLogPage(Contract):
+    items: list[ExecutionLogView] = Field(description="按日志标识升序返回的本页记录")
+    next_cursor: str = Field(description="绑定构建的续读游标；空页及末页也返回，可继续轮询")
+    has_more: bool = Field(description="查询时是否已有下一页，不代表构建是否结束或日志是否完整")

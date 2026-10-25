@@ -92,7 +92,7 @@ def test_gc_only_swallows_foreign_key_violation(runtime_pair):
         if statement.startswith("SELECT") and "EXISTS" in statement and "runtime_project" in statement:
             return "SELECT false", ()
         if unique_violation and statement.startswith("DELETE FROM runtime_artifact_set"):
-            return "INSERT INTO engine_change_counter(singleton,value) VALUES (true,0)", ()
+            return "INSERT INTO runtime_project(project_id) VALUES (%s)", (project,)
         return statement, parameters
 
     event.listen(runtime.db.engine, "before_cursor_execute", inject_failure, retval=True)

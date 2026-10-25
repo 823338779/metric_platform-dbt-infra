@@ -121,7 +121,7 @@ async def test_dbt_completed_failure_is_distinct_from_interrupted_write(tmp_path
     monkeypatch.setattr(dbtRunner, "invoke", lambda *_: SimpleNamespace(success=False, exception=exception))
     executor = RuntimeExecutor(
         SimpleNamespace(command_timeout_seconds=5, max_output_bytes=1024),
-        SimpleNamespace(phase=lambda *args, **kwargs: True), None,
+        SimpleNamespace(db=None, phase=lambda *args, **kwargs: True), None,
     )
     job = leased_job(job_id=PROJECT, lease_token=PROJECT, project_id=PROJECT)
     with pytest.raises(ExecutionError) as error:
@@ -140,7 +140,7 @@ async def test_timed_out_dbt_write_keeps_unknown_outcome(tmp_path, monkeypatch):
     monkeypatch.setattr(dbtRunner, "invoke", invoke)
     executor = RuntimeExecutor(
         SimpleNamespace(command_timeout_seconds=0.001, max_output_bytes=1024),
-        SimpleNamespace(phase=lambda *args, **kwargs: True), None,
+        SimpleNamespace(db=None, phase=lambda *args, **kwargs: True), None,
     )
     job = leased_job(job_id=PROJECT, lease_token=PROJECT, project_id=PROJECT)
     with pytest.raises(ExecutionError) as error:
@@ -234,7 +234,7 @@ async def test_executor_calls_dbt_without_subprocess(tmp_path, monkeypatch):
     monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden)
     monkeypatch.setattr(dbtRunner, "invoke", lambda *_: SimpleNamespace(success=True, exception=None))
     settings = SimpleNamespace(command_timeout_seconds=5, max_output_bytes=64)
-    jobs = SimpleNamespace(phase=lambda *args, **kwargs: True)
+    jobs = SimpleNamespace(db=None, phase=lambda *args, **kwargs: True)
     executor = RuntimeExecutor(settings, jobs, None)
     result = await executor._dbt(
         leased_job(job_id=PROJECT, lease_token=PROJECT, kind="BUILD_RUN", project_id=PROJECT),

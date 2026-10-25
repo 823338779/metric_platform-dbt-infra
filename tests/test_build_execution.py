@@ -66,14 +66,13 @@ def test_unknown_write_is_not_reexecuted(store):
     assert jobs.get(run_id).attempt_no == 1
 
 
-def test_logs_cursor_follows_persisted_progress(store):
-    from tests.test_build_acceptance import CALLER, request, service
-
+def test_cancelled_execution_state_is_available_in_build_detail(store):
     app = service(store)
     build = app.submit_snapshot(request(), CALLER)
-    first = app.logs(build.build_id)
-    assert first.items
+    assert app.snapshot_view(build.build_id).build_status == "QUEUED"
     app.cancel_snapshot(build.build_id, CALLER)
-    second = app.logs(build.build_id, first.next_cursor)
-    assert any("CANCELLED" in line for line in second.items)
-    assert not app.logs(build.build_id, second.next_cursor).items
+    detail = app.snapshot_view(build.build_id)
+    assert detail.build_status == "CANCELLED"
+    assert detail.error.code == "CANCELLED"
+    job = JobStore(store.db).get(app.store.get(build.build_id).run_id)
+    assert job.error_code == "CANCELLED"

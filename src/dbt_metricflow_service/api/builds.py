@@ -11,7 +11,7 @@ from dbt_metricflow_service import constants as strings
 
 from ..application.builds import BuildService
 from ..application.errors import ServiceError
-from ..models.builds import BuildStatus, LogPage, Page
+from ..models.builds import BuildStatus, ExecutionLogPage, Page
 from ..models.execution import SnapshotBuildRequest, SnapshotBuildView
 from ..platform.execution_profile import validate_execution_target
 from ..settings import Settings
@@ -44,9 +44,13 @@ def router(service: BuildService, guard: Callable[..., Awaitable[str]], settings
     def get(build_id: UUID) -> SnapshotBuildView:
         return service.snapshot_view(build_id)
 
-    @routes.get(strings.ROUTE_BUILDS_BUILD_ID_LOGS, response_model=LogPage)
-    def logs(build_id: UUID, cursor: str | None = None) -> LogPage:
-        return service.logs(build_id, cursor)
+    @routes.get(strings.ROUTE_BUILDS_BUILD_ID_EXECUTION_LOGS, response_model=ExecutionLogPage)
+    def execution_logs(
+        build_id: UUID, cursor: str | None = Query(default=None, max_length=4096),
+        limit: int = Query(default=100, ge=1, le=200),
+    ) -> ExecutionLogPage:
+        """读取持久化 dbt 详细日志；空页仍返回游标，供前端增量轮询。"""
+        return service.execution_logs(build_id, cursor, limit)
 
     @routes.post(strings.ROUTE_BUILDS_BUILD_ID_CANCEL, response_model=SnapshotBuildView, status_code=202)
     def cancel(build_id: UUID, caller: str = dependency) -> JSONResponse:

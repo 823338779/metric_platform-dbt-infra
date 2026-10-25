@@ -7,17 +7,16 @@ from contextlib import AbstractContextManager, contextmanager
 
 from psycopg2.extensions import connection as PsycopgConnection
 from psycopg2.extensions import new_array_type, new_type, parse_dsn, register_type
-from sqlalchemy import Connection, create_engine, event, select
+from sqlalchemy import Connection, create_engine, event, func, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import ConnectionPoolEntry
 
 from dbt_metricflow_service import constants as strings
 
-from .entities import ChangeCounter
-
 CONNECTION_OPTIONS = "-c statement_timeout=10000 -c lock_timeout=5000"
-# ORM 与管理事务共用同一个事实锁表达式，保持触发器的全局加锁顺序。
-FACT_LOCK = select(ChangeCounter.value).where(ChangeCounter.singleton.is_(True)).with_for_update()
+# 保持同一 schema 内事实事务的原有串行约束，不再依赖阶段日志计数器表。
+# PostgreSQL advisory lock 属于当前数据库，schema 名使不同服务 schema 相互隔离。
+FACT_LOCK = select(func.pg_advisory_xact_lock(func.hashtextextended(func.current_schema(), 609302027)))
 
 
 class Database:
@@ -46,14 +45,14 @@ class Database:
 
     @contextmanager
     def fact_session(self) -> Iterator[Session]:
-        # ORM 事实写入也先锁变化计数器，保持与数据库触发器相同的锁顺序。
+        # ORM 事实写入先取得独立事务锁，随后再取得业务行锁。
         with self.session() as session:
             session.execute(FACT_LOCK)
             yield session
 
     @contextmanager
     def fact_transaction(self) -> Iterator[Connection]:
-        # 事实事务先锁变化序号，再锁业务行，避免触发器与目标/任务锁顺序反转。
+        # 与 ORM 使用相同事实锁；提交或回滚时由数据库自动释放。
         # 只包含短数据库操作；Git、引擎执行和产物传输均在事务之外。
         with self.transaction() as connection:
             connection.execute(FACT_LOCK)

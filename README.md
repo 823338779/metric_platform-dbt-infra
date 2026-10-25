@@ -149,7 +149,7 @@ uv run --frozen dbt-service-admin build --file build-request.json
 | 路径 | 行为 |
 | --- | --- |
 | `GET /builds`、`GET /builds/{buildId}` | environmentId 必填，repository/branchName/buildStatus 可选；固定身份读取 |
-| `GET /builds/{buildId}/logs` | 可续读的持久阶段/错误码日志，不回显原始 CLI |
+| `GET /builds/{buildId}/execution-logs` | 按构建增量读取结构化 dbt 详细日志，支持 cursor、limit；[前端对接说明](docs/build-execution-logs-api.md) |
 | `POST /builds/{buildId}/cancel` | 取消构建 |
 | `GET /deployments/current`、`GET /deployments` | 自然键当前观察、意图历史 |
 | `GET /builds/{buildId}/catalog` | 目录搜索、kind 筛选、游标分页 |
@@ -219,7 +219,7 @@ uv run --frozen pytest -q tests/integration/test_publication_proxy_flow.py
 
 环境由指标平台等调用方管理。本服务不提供环境配置 CRUD 或环境注册表；每次 `POST /builds` 必须携带 repository、branchName、idempotencyKey 和完整 execution 快照。execution 包含 environmentId、configVersion、connection、credentialRef、catalog、schema、threads、businessTimezone。branchName 与环境无绑定，main 和 feature 分支使用相同规则。configVersion 是外部版本，worker 匹配仍使用 SERVICE_CONFIG_VERSION。
 
-`GET /builds` 必须携带 environmentId；可选 repository、branchName、buildStatus、cursor、limit。详情、日志和取消位于 `/builds/{buildId}`、`/logs`、`/cancel`。`/deployments` 与 `/current` 以 repository/environmentId/branchName 定位部署。目录与查询使用固定 buildId，内部按该 build 的快照创建临时 profile。
+`GET /builds` 必须携带 environmentId；可选 repository、branchName、buildStatus、cursor、limit。详情、详细日志和取消位于 `/builds/{buildId}`、`/execution-logs`、`/cancel`。阶段、状态、错误码从构建详情读取，旧 `/logs` 接口已删除。`/deployments` 与 `/current` 以 repository/environmentId/branchName 定位部署。目录与查询使用固定 buildId，内部按该 build 的快照创建临时 profile。
 
 部署配置示例（可在服务 YAML 中写映射，也可用同名环境变量写 JSON）：
 

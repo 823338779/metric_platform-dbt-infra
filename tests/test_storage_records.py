@@ -19,8 +19,6 @@ from dbt_metricflow_service.storage.paging import read_cursor, write_cursor
 from dbt_metricflow_service.storage.records import (
     ArtifactMetadata,
     ArtifactValidation,
-    BuildChangeSummary,
-    BuildLogRecord,
     JobErrorDetail,
     JobRequest,
     StoredArtifactFile,
@@ -67,17 +65,17 @@ def test_sql_projection_returns_a_declared_record():
     try:
         with engine.connect() as connection:
             record = row_record(connection.execute(text(
-                "SELECT 'VALIDATING' AS phase, 'RUNNING' AS build_status, NULL AS error_code"
-            )), BuildChangeSummary)
-            assert record.phase == "VALIDATING"
-            assert record.build_status == "RUNNING"
+                "SELECT 'diagnostic' AS message, 'RuntimeError' AS type"
+            )), JobErrorDetail)
+            assert record.message == "diagnostic"
+            assert record.type == "RuntimeError"
             assert row_record(connection.execute(text(
-                "SELECT 'VALIDATING' AS phase, 'RUNNING' AS build_status, NULL AS error_code WHERE 0"
-            )), BuildChangeSummary) is None
+                "SELECT 'diagnostic' AS message, 'RuntimeError' AS type WHERE 0"
+            )), JobErrorDetail) is None
             with pytest.raises(ValidationError, match="extra_forbidden"):
                 row_record(connection.execute(text(
-                    "SELECT 'VALIDATING' AS phase, 'RUNNING' AS build_status, NULL AS error_code, 1 AS unknown"
-                )), BuildChangeSummary)
+                    "SELECT 'diagnostic' AS message, 'RuntimeError' AS type, 1 AS unknown"
+                )), JobErrorDetail)
     finally:
         engine.dispose()
 
@@ -144,9 +142,7 @@ def test_postgres_build_job_and_artifact_records(tmp_path):
         assert job.request_json.build_id == build.build_id
         assert job.request_json.execution.connection.host == "localhost"
         assert jobs.heartbeat(job.job_id, job.lease_token)
-        logs, _ = builds.logs(build.build_id, None)
-        assert logs and all(isinstance(record, BuildLogRecord) for record in logs)
-        assert logs[-1].summary.build_status == "RUNNING"
+        assert builds.get(build.build_id).build_status == "RUNNING"
         assert jobs.fail(job.job_id, job.lease_token, "TEST_FINISHED", JobErrorDetail(message="done"))
         assert jobs.get(job.job_id).error_detail.message == "done"
         (tmp_path / "dbt_project.yml").write_text("name: example\nversion: '1.0'\n", encoding="utf-8")

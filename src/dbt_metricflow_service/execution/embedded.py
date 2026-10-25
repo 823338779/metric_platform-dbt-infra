@@ -8,11 +8,16 @@ import os
 import threading
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import replace
+from datetime import UTC, datetime
 from typing import TypeVar, cast
 
 from dbt_metricflow_service import constants as strings
 
+from .logs import EngineLog
 from .output import REDACTION_MARKER, SECRET_ENVIRONMENT_PREFIX, _RedactingTailBuffer
+
+LOG_SINK_FAILED = "Engine log capture failed: %s"
 
 # 共享线程调度只保留调用方的返回类型，不解释引擎请求或结果。
 T = TypeVar("T")
@@ -43,13 +48,16 @@ ENGINE_LOGGERS = (
 class _EngineLogHandler(logging.Handler):
     """将引擎的普通 Python 日志和异常也送入受限脱敏缓冲区。"""
 
-    def __init__(self, capture: Callable[[str], None]) -> None:
+    def __init__(self, capture: Callable[[EngineLog], None]) -> None:
         super().__init__()
         # 与 dbt 事件共用同一输出边界，不向宿主 root logger 传播原文。
         self.capture = capture
 
     def emit(self, record: logging.LogRecord) -> None:
-        self.capture(self.format(record))
+        self.capture(EngineLog(
+            event_time=datetime.fromtimestamp(record.created, UTC), level=record.levelname.lower(),
+            message=self.format(record), event_name=record.name, thread_name=record.threadName or "",
+        ))
 
 
 async def _settle(task: asyncio.Task[T]) -> T:
@@ -94,7 +102,8 @@ def create_output(max_output_bytes: int) -> _RedactingTailBuffer:
 @contextmanager
 def engine_environment(
     environment: Mapping[str, str], output: _RedactingTailBuffer,
-) -> Iterator[Callable[[str], None]]:
+    log_sink: Callable[[EngineLog], None] | None = None,
+) -> Iterator[Callable[[EngineLog], None]]:
     """隔离引擎全局状态并提供脱敏日志入口；调用方必须已经持有串行锁。"""
     from dbt.adapters.factory import reset_adapters
     from dbt.flags import get_flags, set_flags
@@ -105,16 +114,35 @@ def engine_environment(
     original_flags = get_flags()
     original_events = get_event_manager()
     event_lock = threading.Lock()
+    secrets = {value for name, value in os.environ.items() if name.startswith(SECRET_ENVIRONMENT_PREFIX) and value}
+    sink_failed = False
 
-    def capture_text(message: str) -> None:
+    def capture_text(entry: EngineLog) -> None:
+        nonlocal sink_failed
         # SDK 读取 dotenv 后可能新增秘密；整条事件先遮盖，再按字节截断。
-        for secret in sorted(
-            (value for name, value in os.environ.items() if name.startswith(SECRET_ENVIRONMENT_PREFIX) and value),
-            key=len, reverse=True,
-        ):
-            message = message.replace(secret, REDACTION_MARKER)
         with event_lock:
-            output.feed((message + NEWLINE).encode(UTF8))
+            secrets.update(value for name, value in os.environ.items()
+                           if name.startswith(SECRET_ENVIRONMENT_PREFIX) and value)
+
+            def redact(value: str) -> str:
+                for secret in sorted(secrets, key=len, reverse=True):
+                    value = value.replace(secret, REDACTION_MARKER)
+                return value
+
+            safe = replace(
+                entry, message=redact(entry.message), level=redact(entry.level),
+                event_name=redact(entry.event_name), event_code=redact(entry.event_code),
+                invocation_id=redact(entry.invocation_id), node_id=redact(entry.node_id),
+                thread_name=redact(entry.thread_name),
+            )
+            output.feed((safe.message + NEWLINE).encode(UTF8))
+            if log_sink is not None and not sink_failed:
+                try:
+                    log_sink(safe)
+                except Exception as error:
+                    # 日志接收失败不影响引擎结果，也不暴露数据库或异常原文。
+                    sink_failed = True
+                    logging.getLogger(__name__).warning(LOG_SINK_FAILED, type(error).__name__)
 
     handler = _EngineLogHandler(capture_text)
     logger_states: list[tuple[logging.Logger, list[logging.Handler], int, bool]] = []

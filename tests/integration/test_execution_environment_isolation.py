@@ -60,7 +60,7 @@ def test_real_environment_isolation(tmp_path):
                 value = client.get("/builds/" + build_id).json()
                 if value["buildStatus"] not in ("QUEUED", "RUNNING"):
                     assert value["buildStatus"] == expected, (
-                        value, client.get(f"/builds/{build_id}/logs").json())
+                        value, client.get(f"/builds/{build_id}/execution-logs").json())
                     return value
                 time.sleep(0.5)
             pytest.fail("build timeout: " + build_id)

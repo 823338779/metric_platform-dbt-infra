@@ -14,9 +14,9 @@ from sqlalchemy import func, or_, select, tuple_, update
 from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.models.execution import SNAPSHOT_TARGET, SnapshotBuildRequest, physical_target_key
 from dbt_metricflow_service.storage.postgres import Database
-from dbt_metricflow_service.storage.records import BuildLogRecord, JobRequest, StoredBuild
+from dbt_metricflow_service.storage.records import JobRequest, StoredBuild
 
-from .entities import Build, Change, RuntimeJob, RuntimeProject
+from .entities import Build, RuntimeJob, RuntimeProject
 from .jobs import JobStore, StoreConflict
 from .paging import HISTORY_CURSOR_VERSION, read_cursor, write_cursor
 from .rows import entity_record
@@ -25,7 +25,6 @@ CURSOR_TIMESTAMP_OFFSET_MESSAGE: Final = "cursor timestamp requires an offset"
 EXPIRED_EXECUTION_LEASE_MESSAGE: Final = "execution lease is no longer valid"
 IDEMPOTENCY_INPUT_CONFLICT_MESSAGE: Final = "idempotency key already binds another input"
 IMMUTABLE_COMMIT_MESSAGE: Final = "commitSha is immutable after resolution"
-INVALID_BUILD_LOG_CURSOR_MESSAGE: Final = "invalid build log cursor"
 INVALID_CURSOR_MESSAGE: Final = strings.INVALID_CURSOR_MESSAGE
 MISSING_ENVIRONMENT_MESSAGE: Final = "environmentId is required"
 TERMINAL_BUILD_MESSAGE: Final = "terminal build cannot be cancelled"
@@ -37,7 +36,6 @@ QUEUED = strings.QUEUED
 FAILED = strings.FAILED
 CANCELLED = strings.CANCELLED
 JSONB_CONCAT = "||"
-BUILD_TABLE_NAME = strings.ENGINE_BUILD_TABLE
 
 # 共享读取表达式保留关联任务的生命周期。
 BUILD_VIEW = select(Build, RuntimeJob.run_lifecycle).join(RuntimeJob, RuntimeJob.job_id == Build.run_id)
@@ -164,30 +162,6 @@ class BuildStore:
                     operation=strings.BUILD,
                 )
             return row
-
-    def logs(self, build_id: str, cursor: str | None) -> tuple[list[BuildLogRecord], str]:
-        # 游标绑定构建，不依赖实例内存中的日志缓冲区。
-        after = 0
-        if cursor is not None:
-            prefix, separator, sequence = cursor.partition(":")
-            if prefix != build_id or not separator or not sequence.isascii() or not sequence.isdecimal():
-                raise ValueError(INVALID_BUILD_LOG_CURSOR_MESSAGE)
-            after = int(sequence)
-            if after > 9223372036854775807:
-                raise ValueError(INVALID_BUILD_LOG_CURSOR_MESSAGE)
-        with self.db.session() as session:
-            statement = (
-                select(Change.sequence, Change.summary)
-                .where(
-                    Change.object_type == BUILD_TABLE_NAME,
-                    Change.object_id == build_id,
-                    Change.sequence > after,
-                )
-                .order_by(Change.sequence)
-                .limit(100)
-            )
-            rows = [BuildLogRecord.model_validate(row) for row in session.execute(statement).mappings()]
-        return rows, build_id + ":" + str(rows[-1].sequence if rows else after)
 
     def list(
         self, repository: str | None, branch_name: str | None = None, cursor: str | None = None, limit: int = 50,

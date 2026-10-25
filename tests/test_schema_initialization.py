@@ -18,6 +18,9 @@ def test_initialize_complete_schema_and_repeat_without_changes():
         with db.transaction() as connection:
             schema = connection.exec_driver_sql("SELECT current_schema()").scalar_one()
             assert set(inspect(connection).get_table_names(schema=schema)) == set(Base.metadata.tables)
+            assert not {"engine_change", "engine_change_counter"} & set(
+                inspect(connection).get_table_names(schema=schema)
+            )
             # 初始化后的真实数据和二进制内容不能被重复初始化改写。
             identifier = str(uuid4())
             connection.exec_driver_sql("INSERT INTO runtime_project(project_id) VALUES('initialized')")
@@ -86,14 +89,14 @@ def test_check_requires_initialized_schema():
         db.check()
 
 
-@pytest.mark.parametrize("missing_table", [None, "engine_change"])
+@pytest.mark.parametrize("missing_table", [None, "runtime_execution_log"])
 def test_partial_schema_is_rejected_without_repair(missing_table):
     with isolated_database() as db:
         if missing_table:
             db.initialize()
         with db.transaction() as connection:
             if missing_table:
-                connection.exec_driver_sql("DROP TABLE engine_change")
+                connection.exec_driver_sql("DROP TABLE runtime_execution_log")
             else:
                 connection.exec_driver_sql("CREATE TABLE runtime_project(project_id text PRIMARY KEY)")
             connection.exec_driver_sql("INSERT INTO runtime_project(project_id) VALUES('preserved')")

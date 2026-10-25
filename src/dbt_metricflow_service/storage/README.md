@@ -5,18 +5,19 @@
 | 模块 | 职责 |
 | --- | --- |
 | `entities.py` | 显式表映射与共享列类型；不负责创建或升级表 |
-| `postgres.py` | 连接池、Session 事务及变化计数器锁 |
+| `postgres.py` | 连接池、Session 事务及 schema 级事实事务锁 |
 | `records.py`、`rows.py` | 对外记录类型，以及实体到记录的转换 |
 | `jobs.py` | 任务受理、执行租约、完成与回收 |
-| `builds.py`、`deployments.py` | 构建、构建日志与部署意图 |
+| `builds.py`、`deployments.py` | 构建事实与部署意图 |
+| `execution_logs.py` | 独立的 dbt 详细运行日志，后台分批追加 |
 | `artifacts.py` | 产物内容、封存、读取与引用保护 |
 | `schema.py`、`schema.sql` | 新库建表及启动前的表完整性检查 |
 
 普通读取直接使用 `Session.get/scalar/scalars`，新增实体使用 `add/flush`。需要数据库原子判断的租约、版本、抢占和批量写入使用显式条件 DML；这些条件不藏进通用 Repository。
 
-每个独立操作进入 `Database.session()`；写入构建或部署事实时使用 `fact_session()`，先取得变化计数器锁。跨 Store 的原子操作传递同一个 Session，不在内部再开启事务。`transaction()` 保留给管理命令和新库初始化的 Connection 调用。
+每个独立操作进入 `Database.session()`；写入构建或部署事实时使用 `fact_session()`，先取得当前数据库及 schema 范围的事务 advisory lock，保留既有事实写入的串行约束。跨 Store 的原子操作传递同一个 Session，不在内部再开启事务。`transaction()` 保留给管理命令和新库初始化的 Connection 调用。
 
-`engine_change` 和计数器仅用于构建日志的持久化与游标续读，不再提供对外变化流。新库不记录部署目标和部署尝试的变化；构建触发器只保存阶段、状态和错误码。保留统一加锁顺序，避免构建日志触发器与业务行锁反转。
+阶段、状态和错误码直接保存在 `runtime_job`，`engine_sync_job` 继续同步 `engine_build` 供构建详情查询。已删除 `engine_change`、`engine_change_counter` 及生成阶段变化历史的触发器，不再将执行状态复制为日志。`runtime_attempt` 继续记录重试、租约及实际执行状态；dbt 事件中的 phase 仅作为该条真实日志的上下文。
 
 Session 关闭 autoflush，涉及锁顺序或外键依赖时显式 flush。数据库触发器更新了已加载实体后，需要刷新或使用带 `populate_existing` 的返回查询，避免把旧 identity map 当成当前事实。实体转换在 Session 内完成。
 
@@ -27,3 +28,39 @@ Session 关闭 autoflush，涉及锁顺序或外键依赖时显式 flush。数�
 初始化使用 `dbt-service-admin init-db`：在选定 schema 中一次创建完整当前结构。并发初始化由事务锁串行化，失败时整体回滚；已有全部业务表则直接返回，只有部分业务表时拒绝自动修补。服务启动只读检查这些表是否齐全，不维护结构版本、迁移链或历史数据兼容逻辑。
 
 固定请求、执行配置、产物元数据、验证证据、诊断与日志投影均使用明确字段的模型，并通过属性访问。JSONB 列仍使用数据库 JSON 映射，在存储边界序列化/验证；dbt 工程 YAML、适配器会话标识映射及数据库驱动配置属于可扩展外部协议边界。动态路径索引和按构建身份索引的字典保留原用途。
+
+## dbt 详细运行日志
+
+`runtime_execution_log` 保存 service 执行入口发起的 dbt 命令事件，包括 parse、build 等命令的 DEBUG/INFO/WARN/ERROR 事件，以及当前已接管引擎命名空间的 Python 日志。单独运行 `dbtRunner()` 的脚本和第三方直接写 stdout/文件不会自动接入。
+
+每条记录包含 `build_id`、`job_id`、`attempt_id`、`phase`、`command`、`event_time`、`level`、`event_name`、`event_code`、`invocation_id`、`node_id`、`thread_name`、`message` 和数据库写入时间 `created_at`。`log_id` 是数据库递增标识。无节点的事件、普通 Python 日志不具备的 dbt 元数据使用空字符串。原始 protobuf 载荷不整包保存；消息及文本元数据统一遮盖 `DBT_ENV_SECRET_*` 的值，再送入队列。
+
+日志独立于 stdout 尾部缓冲区，不受 `max_output_bytes` 截断。每个 dbt 调用有最多 2048 条的队列，最多 100 条一批，约 0.5 秒提交一次；执行成功、失败或取消时等待引擎结束后排空队列。日志事务使用独立的构建级日志锁，不获取业务事实事务锁。
+
+队列满时丢弃新增记录，写库失败时回滚当前批次并停止该命令后续写入，关闭时告警报告未保存数量；异常仅记录类型，不输出数据库连接信息或 SQL 参数。此策略优先保证 dbt 继续执行，不提供无损审计保证。进程被强制终止时尚未提交的日志可能丢失。表记录随关联构建、任务或 attempt 删除而级联清理，未设置额外的定时保留策略。
+
+查询示例（通过数据库客户端绑定 `:build_id` 和 `:after_log_id`）：
+
+```sql
+SELECT log_id, attempt_id, phase, command, event_time, level,
+       event_name, node_id, message
+FROM runtime_execution_log
+WHERE build_id = :build_id AND log_id > :after_log_id
+ORDER BY log_id
+LIMIT 100;
+```
+
+写入在分配序号前取得构建级日志事务锁，同一构建的多个 worker/attempt 按提交顺序续读不会跳过迟提交批次。不同构建仍可并发，不能将全局 `log_id` 当作跨构建提交水位。
+
+前端使用 `GET /builds/{buildId}/execution-logs` 读取结构化记录；该接口按构建绑定游标，支持空页继续轮询，单页最多 200 条。原 `/logs` 已删除，阶段、状态和错误摘要由 `GET /builds/{buildId}` 返回。详见 [前端接入说明](../../../docs/build-execution-logs-api.md)。
+
+新库的 `init-db` 会创建此表。已有当前结构的数据库，需要在服务停止期间显式执行同目录 `add_execution_log.sql` 一次，再启动新版服务。使用目标服务连接配置、确认 `search_path` 指向服务 schema，在一个事务中运行该脚本；不要对已有库重新执行整个 `schema.sql`。启动检查只校验结构，不自动执行升级。示例（把 `your_service_schema` 替换成实际服务 schema）：
+
+```sql
+BEGIN;
+SET LOCAL search_path TO your_service_schema;
+-- 在此执行 add_execution_log.sql 的内容。
+COMMIT;
+```
+
+从旧阶段日志版本升级时，停止所有旧服务和 worker，在确认目标 schema 后，于事务中执行 `remove_build_stage_logs.sql`。它会删除旧阶段变化历史和计数器，不删除构建、任务、attempt 或 dbt 详细日志；如需保留旧阶段历史，应先备份 `engine_change`。升级后再统一启动新版进程，避免旧计数器行锁与新版 advisory lock 混用。新库初始化不再创建这些旧对象。

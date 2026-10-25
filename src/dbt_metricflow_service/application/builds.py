@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC
 from typing import Final
 from uuid import UUID
 
@@ -9,9 +10,10 @@ from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.storage.builds import BuildStore
 from dbt_metricflow_service.storage.records import StoredBuild, StoredDeploymentAttempt
 
-from ..models.builds import BuildStatus, ErrorView, LogPage, Page
+from ..models.builds import BuildStatus, ErrorView, ExecutionLogPage, ExecutionLogView, Page
 from ..models.execution import SnapshotBuildRequest, SnapshotBuildView
 from ..storage.deployments import DeploymentStore, attempt_view
+from ..storage.execution_logs import ExecutionLogStore
 from ..storage.jobs import StoreConflict
 from .errors import ServiceError
 
@@ -75,23 +77,6 @@ class BuildService:
             raise ServiceError(strings.BUILD_NOT_FOUND, MISSING_BUILD_MESSAGE, 404)
         return row
 
-    def logs(self, build_id: UUID | str, cursor: str | None=None) -> LogPage:
-        self.load(build_id)
-        try:
-            rows, next_cursor = self.store.logs(str(build_id), cursor)
-        except ValueError as error:
-            raise ServiceError(strings.INVALID_CURSOR, str(error)) from error
-        # 持久阶段和错误码不含 CLI、凭据或本地路径；游标可继续轮询。
-        items = [
-            " | ".join(
-                str(value)
-                for value in (row.summary.phase, row.summary.build_status, row.summary.error_code)
-                if value
-            )
-            for row in rows
-        ]
-        return LogPage(items=items, next_cursor=next_cursor, truncated=False)
-
     def query_unavailable_reason(self, row: StoredBuild) -> str | None:
         if row.build_status != BuildStatus.SUCCEEDED:
             return NOT_SUCCEEDED
@@ -102,6 +87,20 @@ class BuildService:
         if row.toolchain_version != self.toolchain:
             return ENVIRONMENT_MISSING
         return None
+
+    def execution_logs(self, build_id: UUID | str, cursor: str | None = None, limit: int = 100) -> ExecutionLogPage:
+        build = self.load(build_id)
+        try:
+            rows, next_cursor, has_more = ExecutionLogStore(self.store.db).list(build.build_id, cursor, limit)
+        except ValueError as error:
+            raise ServiceError(strings.INVALID_CURSOR, str(error)) from error
+        return ExecutionLogPage(items=[ExecutionLogView(
+            log_id=str(row.log_id), job_id=row.job_id, attempt_id=row.attempt_id,
+            phase=row.phase, command=row.command, event_time=row.event_time.astimezone(UTC), level=row.level,
+            event_name=row.event_name, event_code=row.event_code, invocation_id=row.invocation_id,
+            node_id=row.node_id, thread_name=row.thread_name, message=row.message,
+            created_at=row.created_at.astimezone(UTC),
+        ) for row in rows], next_cursor=next_cursor, has_more=has_more)
 
     def view(
         self, row: StoredBuild, initial: StoredDeploymentAttempt | None,

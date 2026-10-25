@@ -1,19 +1,6 @@
 -- 当前服务的完整初始化结构，由 init-db 在调用方事务内安装。
 -- 不接管旧库；所有对象位于调用方选择的 schema。
 
-CREATE FUNCTION engine_record_change() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-DECLARE next_sequence bigint;
-BEGIN
- UPDATE engine_change_counter SET value=value+1 WHERE singleton RETURNING value INTO next_sequence;
- -- 仅保留构建日志续读所需的阶段、状态与错误码。
- INSERT INTO engine_change VALUES(
-  next_sequence,NEW.repository,TG_TABLE_NAME,NEW.build_id::text,NEW.version,
-  jsonb_build_object('phase',NEW.phase,'build_status',NEW.build_status,'error_code',NEW.error_code));
- RETURN NEW;
-END $$;
-
 CREATE FUNCTION engine_sync_job() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -139,37 +126,6 @@ COMMENT ON COLUMN engine_build.created_at IS '受理时间';
 COMMENT ON COLUMN engine_build.updated_at IS '最近事实变更时间';
 
 COMMENT ON COLUMN engine_build.finished_at IS '执行终态时间';
-
-CREATE TABLE engine_change (
-    sequence bigint NOT NULL,
-    repository text NOT NULL,
-    object_type text NOT NULL,
-    object_id text NOT NULL,
-    object_version bigint NOT NULL,
-    summary jsonb NOT NULL
-);
-
-COMMENT ON COLUMN engine_change.sequence IS '提交顺序可重放变化序号';
-
-COMMENT ON COLUMN engine_change.repository IS '受控规范仓库地址';
-
-COMMENT ON COLUMN engine_change.object_type IS '引擎事实类型';
-
-COMMENT ON COLUMN engine_change.object_id IS '变化对象自然身份';
-
-COMMENT ON COLUMN engine_change.object_version IS '变化对应对象版本';
-
-COMMENT ON COLUMN engine_change.summary IS '构建阶段、状态与错误码，不含执行秘密';
-
-CREATE TABLE engine_change_counter (
-    singleton boolean DEFAULT true NOT NULL,
-    value bigint NOT NULL,
-    CONSTRAINT engine_change_counter_singleton_check CHECK (singleton)
-);
-
-COMMENT ON COLUMN engine_change_counter.singleton IS '构建日志计数器唯一行';
-
-COMMENT ON COLUMN engine_change_counter.value IS '最后同事务分配的变化序号';
 
 CREATE TABLE engine_deployment_attempt (
     repository text NOT NULL,
@@ -505,12 +461,6 @@ ALTER TABLE ONLY engine_build
 ALTER TABLE ONLY engine_build
     ADD CONSTRAINT engine_build_run_id_key UNIQUE (run_id);
 
-ALTER TABLE ONLY engine_change_counter
-    ADD CONSTRAINT engine_change_counter_pkey PRIMARY KEY (singleton);
-
-ALTER TABLE ONLY engine_change
-    ADD CONSTRAINT engine_change_pkey PRIMARY KEY (sequence);
-
 ALTER TABLE ONLY engine_deployment_attempt
     ADD CONSTRAINT engine_deployment_attempt_pkey PRIMARY KEY (repository, environment, branch_name, generation);
 
@@ -552,7 +502,6 @@ CREATE INDEX runtime_job_parent ON runtime_job USING btree (parent_run_id, statu
 
 CREATE INDEX runtime_job_queue ON runtime_job USING btree (kind, available_at, created_at) WHERE (status = 'QUEUED'::text);
 
-CREATE TRIGGER engine_build_change AFTER INSERT OR UPDATE ON engine_build FOR EACH ROW EXECUTE FUNCTION engine_record_change();
 
 CREATE TRIGGER engine_job_change AFTER UPDATE OF status, phase, output_set_id, error_code, run_lifecycle ON runtime_job FOR EACH ROW EXECUTE FUNCTION engine_sync_job();
 
@@ -611,9 +560,6 @@ ALTER TABLE ONLY runtime_project
 ALTER TABLE ONLY runtime_project
     ADD CONSTRAINT runtime_project_source_fk FOREIGN KEY (source_set_id) REFERENCES runtime_artifact_set(set_id);
 
--- 变化序号与业务事实在同一事务中递增。
-INSERT INTO engine_change_counter(singleton, value) VALUES (true, 0);
-
 CREATE INDEX IF NOT EXISTS engine_build_environment_history ON engine_build(environment_id, created_at DESC, build_id DESC);
 CREATE INDEX IF NOT EXISTS engine_build_physical_target ON engine_build(physical_target_key);
 ALTER TABLE runtime_job ADD COLUMN IF NOT EXISTS physical_target_key text;
@@ -624,3 +570,24 @@ CREATE INDEX IF NOT EXISTS runtime_job_target_owner ON runtime_job(physical_targ
 
 
 ALTER TABLE engine_build ADD CONSTRAINT engine_build_environment_identity CHECK (environment = environment_id::text);
+
+CREATE TABLE runtime_execution_log (
+    log_id bigserial PRIMARY KEY,
+    build_id uuid REFERENCES engine_build(build_id) ON DELETE CASCADE,
+    job_id uuid NOT NULL REFERENCES runtime_job(job_id) ON DELETE CASCADE,
+    attempt_id uuid NOT NULL REFERENCES runtime_attempt(attempt_id) ON DELETE CASCADE,
+    phase text NOT NULL,
+    command text NOT NULL,
+    event_time timestamp with time zone NOT NULL,
+    level text NOT NULL,
+    event_name text NOT NULL,
+    event_code text NOT NULL,
+    invocation_id text NOT NULL,
+    node_id text NOT NULL,
+    thread_name text NOT NULL,
+    message text NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL
+);
+COMMENT ON TABLE runtime_execution_log IS '脱敏后的 dbt 内部运行事件；独立于构建阶段变化记录';
+CREATE INDEX runtime_execution_log_build_idx ON runtime_execution_log(build_id, log_id);
+CREATE INDEX runtime_execution_log_attempt_idx ON runtime_execution_log(job_id, attempt_id, log_id);

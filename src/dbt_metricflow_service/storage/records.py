@@ -84,15 +84,24 @@ class StoredProject(StoredRecord):
     revision: int
 
 
-class BuildChangeSummary(StoredRecord):
+class StoredExecutionLog(StoredRecord):
+    """脱离 Session 的执行日志快照；不暴露数据库实体。"""
+
+    log_id: int
+    build_id: str | None
+    job_id: str
+    attempt_id: str
     phase: str
-    build_status: str
-    error_code: str | None
-
-
-class BuildLogRecord(StoredRecord):
-    sequence: int
-    summary: BuildChangeSummary
+    command: str
+    event_time: datetime
+    level: str
+    event_name: str
+    event_code: str
+    invocation_id: str
+    node_id: str
+    thread_name: str
+    message: str
+    created_at: datetime
 
 
 class StoredArtifactSet(ArtifactMetadata):
