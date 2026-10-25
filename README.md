@@ -201,7 +201,7 @@ result = metricflow.query(request)
 
 历史 client 以传入的 Manifest 原文为依据，不重新从磁盘读取 Manifest 或 parse 业务 YAML。实际 SQL 执行仍需要项目配置和连接 profile；首次 `DbtClient().build(project, profiles)` 使用源工程产生新 Manifest。日志、取消和临时目录生命周期由上下文/执行层管理，client 在该作用域内使用。 临时项目、profile、target 的实际地址只用于当次执行；引擎日志在入库和生成诊断摘要前将这些地址替换为 `[runtime]`。历史读取仅依赖构建/产物身份与相对文件名。
 
-`ManifestCapture` 只负责捕获原生对象、调用原生序列化、保存和传递字节，不查找 Manifest 字段。 保存时启用 vendored dbt 的 `portable` 序列化上下文，由 dbt 去除 `root_path`、`compiled_path`、`build_path` 运行路径字段，内存对象保留当次执行所需的路径。历史请求由 `DbtClient` 把原文整体交给 dbt `WritableManifest` / `Manifest` SDK；节点通过 `Manifest.expect` 查询，目录与血缘由 `DbtClient` 注入历史 Manifest 后调用原生 `dbt ls --select=... --output json` 获取，服务不直接调用 dbt 图算法。源码文件路径来自 dbt 返回的节点结果。服务不再实现指标名称映射或读取 relation 后拼接预览 SQL。
+`ManifestCapture` 负责捕获原生对象、调用原生序列化、保存和传递字节。保存时由 dbt-service 在序列化后的 nodes、functions 和 disabled 节点上去除 `root_path`、`compiled_path`、`build_path` 运行路径字段，不修改 vendor；内存对象、源码相对路径和 meta/config 中的同名业务字段保持原样。这一步仅清理产物运行路径，不解释资源或依赖语义。历史请求由 `DbtClient` 把原文整体交给 dbt `WritableManifest` / `Manifest` SDK；节点通过 `Manifest.expect` 查询，目录与血缘由 `DbtClient` 注入历史 Manifest 后调用原生 `dbt ls --select=... --output json` 获取，服务不直接调用 dbt 图算法。源码文件路径来自 dbt 返回的节点结果。服务不再实现指标名称映射或读取 relation 后拼接预览 SQL。
 
 资源目录接口从数据库读取对应构建封存的 `target/manifest.json`，恢复为 dbt Manifest 并注入 `dbtRunner`，执行 `dbt ls --select=* --output json`。`GET /builds/{buildId}/catalog` 返回原生资源 JSON 数组，仅包含 `source`、`seed`、`snapshot`、`model`、`semantic_model`、`metric`、`saved_query`、`exposure` 业务资源类型；每项提供 `unique_id`、`name`、`resource_type`、`depends_on`、`config` 等 dbt ls 原生字段，不再返回完整 Manifest 或 `nodes` / `metrics` 等顶层映射。目录复用血缘查询的串行执行、临时工程/profile 和响应大小限制，不重新 parse 业务 YAML 或加载磁盘 Manifest。语义模型的维度和模型列声明通过资源详情接口的 `resource` 获取，不代表数据库实际列清单。构建不运行 docs generate，不依赖 `catalog.json`。
 

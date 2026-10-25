@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from itertools import chain
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
@@ -21,7 +22,7 @@ if TYPE_CHECKING:
 MANIFEST_UNAVAILABLE: Final[str] = "dbt manifest is unavailable"
 MANIFEST_TOO_LARGE: Final[str] = "manifest exceeds artifact file size limit"
 ARTIFACT_CONTEXT: Final[str] = "artifact"
-PORTABLE_CONTEXT: Final[str] = "portable"
+RUNTIME_PATH_FIELDS: Final = ("root_path", "compiled_path", "build_path")
 
 
 class ManifestCapture:
@@ -34,8 +35,16 @@ class ManifestCapture:
         # 每次命令使用独立实例；失败的捕获不保留旧快照。
         self._content, self._manifest = None, None
         payload = manifest.writable_manifest().to_dict(
-            omit_none=False, context={ARTIFACT_CONTEXT: True, PORTABLE_CONTEXT: True},
+            omit_none=False, context={ARTIFACT_CONTEXT: True},
         )
+        # 仅清理产物节点的运行路径，不递归删除 meta/config 中用户定义的同名字段。
+        resources = chain(
+            payload["nodes"].values(), payload["functions"].values(),
+            chain.from_iterable((payload.get("disabled") or {}).values()),
+        )
+        for resource in resources:
+            for field in RUNTIME_PATH_FIELDS:
+                resource.pop(field, None)
         content = json.dumps(payload, cls=JSONEncoder, ensure_ascii=False, separators=(",", ":")).encode(strings.UTF8)
         if len(content) > self.max_file_bytes:
             raise ValueError(MANIFEST_TOO_LARGE)
