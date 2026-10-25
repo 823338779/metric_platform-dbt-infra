@@ -17,7 +17,7 @@ def service(store):
     from dbt_metricflow_service.storage.builds import BuildStore
 
     builds = BuildStore(store.db)
-    return BuildService(builds, TOOLCHAIN, 600)
+    return BuildService(builds, TOOLCHAIN)
 
 
 def request(**changes):

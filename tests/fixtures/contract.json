@@ -47,8 +47,6 @@
         "finishedAt": null,
         "cancelRequested": false,
         "catalogAvailable": false,
-        "queryAvailable": false,
-        "queryUnavailableReason": null,
         "error": {
           "code": "INVALID_DEFINITION",
           "message": "模型定义无效",
@@ -253,17 +251,6 @@
           ]
         ],
         "resultTruncated": false
-      }
-    },
-    {
-      "name": "410",
-      "model": "ErrorView",
-      "value": {
-        "code": "PHYSICAL_OBJECTS_REMOVED",
-        "message": "引擎任务暂不可用",
-        "retryable": false,
-        "phase": null,
-        "buildId": "12345678-1234-4234-8234-123456789abc"
       }
     },
     {

@@ -1,6 +1,7 @@
 """空数据库初始化的完整性、幂等性与事务边界。"""
 
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -9,6 +10,41 @@ from sqlalchemy.exc import IntegrityError
 
 from dbt_metricflow_service.storage.entities import Base
 from tests.schema_helpers import isolated_database
+
+
+def test_remove_job_deadline_preserves_jobs_and_leases():
+    from dbt_metricflow_service.storage import schema
+
+    with isolated_database() as db:
+        db.initialize()
+        with db.transaction() as connection:
+            connection.exec_driver_sql(
+                "ALTER TABLE runtime_job ADD COLUMN deadline_at timestamptz NOT NULL DEFAULT clock_timestamp()"
+            )
+            connection.exec_driver_sql("INSERT INTO runtime_project(project_id) VALUES('deadline-migration')")
+            job_id, attempt_id = str(uuid4()), str(uuid4())
+            connection.exec_driver_sql(
+                "INSERT INTO runtime_job(job_id,project_id,request_fingerprint,config_version,toolchain_version) "
+                "VALUES(%s,'deadline-migration','request','1','test')", (job_id,),
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO runtime_attempt(attempt_id,job_id,attempt_no,worker_id,lease_token,lease_expires_at) "
+                "VALUES(%s,%s,1,%s,%s,clock_timestamp()+interval '90 seconds')",
+                (attempt_id, job_id, str(uuid4()), str(uuid4())),
+            )
+            before_job = dict(connection.exec_driver_sql("SELECT * FROM runtime_job").mappings().one())
+            before_attempt = dict(connection.exec_driver_sql("SELECT * FROM runtime_attempt").mappings().one())
+        with pytest.raises(RuntimeError, match="remove_job_deadline.sql"):
+            db.check()
+        migration = Path(schema.__file__).with_name("remove_job_deadline.sql").read_text(encoding="utf-8")
+        with db.transaction() as connection:
+            connection.exec_driver_sql(migration)
+            connection.exec_driver_sql(migration)
+        db.check()
+        before_job.pop("deadline_at")
+        with db.transaction() as connection:
+            assert dict(connection.exec_driver_sql("SELECT * FROM runtime_job").mappings().one()) == before_job
+            assert dict(connection.exec_driver_sql("SELECT * FROM runtime_attempt").mappings().one()) == before_attempt
 
 
 def test_initialize_complete_schema_and_repeat_without_changes():
@@ -52,8 +88,6 @@ def test_initialize_complete_schema_and_repeat_without_changes():
     "INSERT INTO runtime_artifact_set(set_id,project_id,kind) "
     "VALUES(gen_random_uuid(),'initialized','VALIDATION_INPUT')",
     "INSERT INTO runtime_project(project_id) VALUES('initialized')",
-    "INSERT INTO runtime_job(job_id,kind,project_id,request_fingerprint,config_version,toolchain_version,deadline_at) "
-    "VALUES(gen_random_uuid(),'METRIC_QUERY','initialized','request','1','default',clock_timestamp())",
 ])
 def test_initialized_schema_enforces_constraints(invalid_insert):
     with isolated_database() as db:
@@ -167,3 +201,87 @@ def test_initialization_failure_is_atomic():
             assert inspect(connection).get_table_names(schema=schema) == []
         db.initialize()
         db.check()
+
+
+def test_remove_cleanup_preserves_history_and_rejects_new_cleanup_jobs():
+    from dbt_metricflow_service.storage import schema
+    from dbt_metricflow_service.storage.jobs import JobStore
+
+    with isolated_database() as db:
+        db.initialize()
+        with db.transaction() as connection:
+            connection.exec_driver_sql("ALTER TABLE runtime_job ADD COLUMN run_lifecycle text")
+            connection.exec_driver_sql("ALTER TABLE runtime_job ADD COLUMN kind text NOT NULL DEFAULT 'BUILD_RUN'")
+            connection.exec_driver_sql("INSERT INTO runtime_project(project_id) VALUES('cleanup-migration')")
+            build_job, cleanup_job = str(uuid4()), str(uuid4())
+            for identifier, kind in [(build_job, 'BUILD_RUN'), (cleanup_job, 'RUN_CLEANUP')]:
+                connection.exec_driver_sql(
+                    "INSERT INTO runtime_job(job_id,kind,project_id,request_fingerprint,"
+                    "config_version,toolchain_version) "
+                    "VALUES(%s,%s,'cleanup-migration','request','1','test')", (identifier, kind),
+                )
+            connection.exec_driver_sql(
+                "UPDATE runtime_job SET run_lifecycle='CLEANING' WHERE job_id=%s", (build_job,),
+            )
+        with pytest.raises(RuntimeError, match="remove_run_cleanup.sql"):
+            db.check()
+        migration = Path(schema.__file__).with_name("remove_run_cleanup.sql").read_text(encoding="utf-8")
+        with db.transaction() as connection:
+            connection.exec_driver_sql(migration)
+            connection.exec_driver_sql(migration)
+        with pytest.raises(RuntimeError, match="remove_job_kind.sql"):
+            db.check()
+        jobs = JobStore(db)
+        assert jobs.get(build_job).status == "QUEUED"
+        assert jobs.get(cleanup_job).status == "FAILED"
+        assert jobs.get(cleanup_job).error_code == "CLEANUP_REMOVED"
+        with pytest.raises(IntegrityError), db.transaction() as connection:
+            connection.exec_driver_sql(
+                "INSERT INTO runtime_job(job_id,kind,project_id,request_fingerprint,config_version,toolchain_version) "
+                "VALUES(%s,'RUN_CLEANUP','cleanup-migration','request','1','test')", (str(uuid4()),),
+            )
+        migration = Path(schema.__file__).with_name("remove_job_kind.sql").read_text(encoding="utf-8")
+        with db.transaction() as connection:
+            connection.exec_driver_sql(migration)
+            connection.exec_driver_sql(migration)
+        db.check()
+        assert jobs.claim(str(uuid4()), toolchain_version="test").job_id == build_job
+
+
+@pytest.mark.parametrize("legacy_status", ["QUEUED", "RUNNING", "SUCCEEDED"])
+def test_remove_job_kind_retires_legacy_jobs_without_losing_attempts(legacy_status):
+    from dbt_metricflow_service.storage import schema
+    from dbt_metricflow_service.storage.jobs import JobStore
+    from dbt_metricflow_service.storage.records import JobRequest
+
+    with isolated_database() as db:
+        db.initialize()
+        jobs = JobStore(db)
+        jobs.register_project("kind-migration")
+        build = jobs.reserve("kind-migration", JobRequest(), idempotency_key="build")
+        legacy = jobs.reserve("kind-migration", JobRequest())
+        attempt_id = str(uuid4())
+        with db.transaction() as connection:
+            connection.exec_driver_sql("ALTER TABLE runtime_job ADD COLUMN kind text NOT NULL DEFAULT 'BUILD_RUN'")
+            connection.exec_driver_sql(
+                "UPDATE runtime_job SET kind='RUN_CLEANUP',status=%s WHERE job_id=%s",
+                (legacy_status, legacy.job_id),
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO runtime_attempt(attempt_id,job_id,attempt_no,worker_id,lease_token,lease_expires_at) "
+                "VALUES(%s,%s,1,%s,%s,clock_timestamp()+interval '90 seconds')",
+                (attempt_id, legacy.job_id, str(uuid4()), str(uuid4())),
+            )
+            before_attempt = dict(connection.exec_driver_sql("SELECT * FROM runtime_attempt").mappings().one())
+        with pytest.raises(RuntimeError, match="remove_job_kind.sql"):
+            db.check()
+        migration = Path(schema.__file__).with_name("remove_job_kind.sql").read_text(encoding="utf-8")
+        with db.transaction() as connection:
+            connection.exec_driver_sql(migration)
+            connection.exec_driver_sql(migration)
+            assert dict(connection.exec_driver_sql("SELECT * FROM runtime_attempt").mappings().one()) == before_attempt
+        db.check()
+        assert jobs.get(legacy.job_id).status == ("SUCCEEDED" if legacy_status == "SUCCEEDED" else "FAILED")
+        assert jobs.reserve("kind-migration", JobRequest(), idempotency_key="build").job_id == build.job_id
+        assert jobs.claim(str(uuid4())).job_id == build.job_id
+        assert jobs.claim(str(uuid4())) is None

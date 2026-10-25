@@ -27,16 +27,15 @@ from dbt_metricflow_service.platform.models import (
     PlatformQueryRequest,
     QueryMode,
 )
-from dbt_metricflow_service.runtime.executor import build_engine_environment
+from dbt_metricflow_service.runtime.dbt_executor import build_engine_environment
 from dbt_metricflow_service.runtime.workspace import materialized_workspace
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
-from dbt_metricflow_service.storage.jobs import CleanupBlocked, JobStore
+from dbt_metricflow_service.storage.jobs import JobStore
 from dbt_metricflow_service.storage.postgres import Database
 from dbt_metricflow_service.storage.records import StoredBuild
 
 EXECUTION_CONFIGURATION_UNAVAILABLE: Final[str] = "execution configuration unavailable"
-BUILD_CLEANUP_IN_PROGRESS: Final[str] = "build is being cleaned"
 QUERY_EXECUTION_FAILED: Final[str] = "query execution failed"
 INVALID_QUERY_RESULT: Final[str] = "query returned an invalid result"
 QUERY_RESULT_TOO_LARGE: Final[str] = "query result exceeds the size limit"
@@ -91,7 +90,8 @@ class Runtime:
         """查询所选指标的维度能力，返回专用元数据结果。"""
         def invoke() -> DimensionQueryResult | ServiceError:
             try:
-                with self._query_context(build) as (manifest, project, profiles):
+                with self._engine_context(build, build.config_snapshot.schema_name, SNAPSHOT_TARGET) as context:
+                    manifest, project, profiles = context
                     client = MetricFlowClient(manifest, project=project, profiles=profiles)
                     return client.available_dimensions(metrics=metrics)
             except ServiceError as error:
@@ -112,7 +112,8 @@ class Runtime:
         """执行数据请求，返回数据行或 SQL。"""
         def invoke() -> DataQueryResult | ServiceError:
             try:
-                with self._query_context(build) as (manifest, project, profiles):
+                with self._engine_context(build, build.config_snapshot.schema_name, SNAPSHOT_TARGET) as context:
+                    manifest, project, profiles = context
                     if request.mode is QueryMode.PREVIEW:
                         return DbtClient(manifest).preview(
                             cast(str, request.selector), project=project, profiles=profiles, limit=request.limit,
@@ -132,7 +133,7 @@ class Runtime:
         return value
 
     def lineage(self, build: StoredBuild, selector: str) -> list[JsonObject]:
-        """元数据读取不依赖物化表存活，不取得数据查询的清理锁。"""
+        """元数据读取不依赖物化表存活。"""
         def invoke() -> list[JsonObject] | ServiceError:
             try:
                 with self._engine_context(build, build.config_snapshot.schema_name, SNAPSHOT_TARGET) as context:
@@ -148,18 +149,6 @@ class Runtime:
             raise value
         self._check_query_size(build, value)
         return value
-
-    @contextmanager
-    def _query_context(self, build: StoredBuild) -> Iterator[tuple[bytes, Path, Path]]:
-        """数据执行期间持有物化表清理保护。"""
-        try:
-            with self.jobs.query_run(cast(str, build.run_id)) as parent:
-                with self._engine_context(build, cast(str, parent.schema_name),
-                                          cast(str, parent.profile_binding_id)) as context:
-                    yield context
-        except CleanupBlocked as error:
-            raise ServiceError(strings.PHYSICAL_OBJECTS_REMOVED, BUILD_CLEANUP_IN_PROGRESS, 410,
-                               build_id=build.build_id) from error
 
     @contextmanager
     def _engine_context(self, build: StoredBuild, schema: str, target: str) -> Iterator[tuple[bytes, Path, Path]]:

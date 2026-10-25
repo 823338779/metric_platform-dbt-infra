@@ -40,7 +40,6 @@ NEWER_INTENT = strings.NEWER_INTENT
 TARGET_OR_BUILD_CHANGED = strings.TARGET_OR_BUILD_CHANGED
 MATCHED = strings.MATCHED
 MISSING = strings.MISSING
-ACTIVE = strings.ACTIVE
 TERMINAL = frozenset({DEPLOYED, STALE, strings.FAILED, strings.CANCELLED})
 PENDING_STATUSES = (WAITING_FOR_BUILD, PENDING, CHECKING)
 
@@ -212,17 +211,16 @@ class DeploymentStore:
             if target.desired_generation != generation:
                 status, reason = STALE, NEWER_INTENT
             if status == DEPLOYED:
-                build, lifecycle = session.execute(
-                    select(Build, RuntimeJob.run_lifecycle)
+                build = session.scalar(
+                    select(Build)
                     .join(RuntimeJob, Build.run_id == RuntimeJob.job_id)
                     .where(Build.build_id == attempt.build_id)
                     .with_for_update(of=(RuntimeJob, Build))
-                ).one()
-                # 与人工清理锁同一执行记录；head 只比较事务前已完成的观察值。
+                )
+                # 锁定构建与执行记录；head 只比较事务前已完成的观察值。
                 if (
                     target.version != expected_version
                     or build.build_status != SUCCEEDED
-                    or lifecycle != ACTIVE
                     or not build.output_set_id
                     or build.commit_sha != head
                 ):

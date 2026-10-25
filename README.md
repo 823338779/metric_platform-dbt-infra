@@ -22,7 +22,7 @@
 
 无额外 Repository/Port/Facade 镜像层。持久化通过 SQLAlchemy ORM 实现，封存产物与物理引用保护由具体 Store 和数据库约束维护。
 
-构建响应统一读取包含物理生命周期的快照；可查询性判断和响应组装不执行 I/O。
+构建响应读取持久快照，不返回 `queryAvailable` 或 `queryUnavailableReason`。查询不按构建状态、产物引用或工具链版本预判可用性，读取产物及调用引擎时返回实际错误。
 构建、部署历史由 Store 在数据库中筛选并按游标读取，构建列表批量加载初始部署。
 查询用例负责受理编排，`application/query_plan.py` 负责资源及选项到引擎请求的纯转换；
 时间只归一化一次，幂等摘要与执行元数据复用同一请求。部署协调器由启动入口显式传入 worker。
@@ -94,7 +94,7 @@ uv run --frozen dbt-metricflow-service
 dbt 命令通过 `dbtRunner.invoke()` 直接执行，MetricFlow 查询调用 Python API，均不启动引擎 CLI 子进程。
 这些调用在线程中运行并共用进程级串行锁，避免 dbt 全局配置和连接相互影响；HTTP 和租约心跳保持异步。
 `WORKER_CONCURRENCY` 控制任务槽位，不能使同一进程中的引擎调用并行。Git 源码操作仍使用 Git 工具。
-取消或超过单次调用预算后，服务等待当前调用真正退出才释放锁和清理工作目录，不强制终止 Python 线程；
+取消后，服务等待当前调用真正退出才释放锁和清理工作目录，不强制终止 Python 线程；
 若底层驱动长时间不返回，取消完成和服务关闭也会等待。外部写结果无法确认时仍保留 `OUTCOME_UNKNOWN` 保护。
 
 | 配置 | 用途 |
@@ -107,7 +107,6 @@ dbt 命令通过 `dbtRunner.invoke()` 直接执行，MetricFlow 查询调用 Pyt
 | `SERVICE_TOOLCHAIN_VERSION` | 工具链标识；默认按依赖版本及源码计算 |
 | `WORKER_CONCURRENCY` | 执行槽位，默认 2 |
 | `JOB_LEASE_SECONDS` / `JOB_HEARTBEAT_SECONDS` | 默认 90 / 15 秒 |
-| `COMMAND_TIMEOUT_SECONDS` | 单次命令预算，默认 1800 秒 |
 | `MAX_OUTPUT_BYTES` / `MAX_RESULT_BYTES` | 默认 1 MiB 诊断 / 16 MiB 保存结果 |
 | `MAX_ARTIFACT_FILE_BYTES` / `MAX_ARTIFACT_BYTES` | 默认 64 MiB 单文件 / 256 MiB 集合 |
 | `SERVICE_HOST` / `SERVICE_PORT` | HTTP 地址、端口 |
@@ -136,6 +135,8 @@ dbt 命令通过 `dbtRunner.invoke()` 直接执行，MetricFlow 查询调用 Pyt
 
 构建还原完整工程并生成临时 profile，只执行一次 `dbt build`，直接持久化该次调用返回的内存 Manifest。解析、编译、宏、schema/alias、物化、hook 和模型测试均遵循 dbt 原生行为；服务不再注入宏或预先校验模板、SQL、目标及结果，不运行独立的 parse、compile、source freshness、docs generate 或 MetricFlow 查询探测。成功仅表示 dbt build 成功。
 
+构建执行上下文准备好环境、日志回调和租约后，直接调用 `DbtClient.build()`；成功返回的原生 Manifest 交给 `ManifestCapture` 序列化并持久化。执行层不再使用 `CommandSpec` 或通用命令转发。取消仍等待引擎退出、日志落库后才释放环境。
+
 服务不运行 `dbt deps`。有依赖的工程应包含已安装并提交的 `dbt_packages`（或自定义 packages-install-path）；缺少依赖时由 dbt 报错。Git 快照和产物恢复会保留该目录。租约、并发、连接配置、日志脱敏及产物完整性检查继续生效。SDK 失败事件及异常详情写入 `runtime_execution_log`，可按构建查看。
 
 取消先持久化意图。已确认取消返回 CANCELLED；外部写执行无法确认时返回 OUTCOME_UNKNOWN，保留保护引用且不自动重跑。
@@ -160,11 +161,11 @@ uv run --frozen dbt-service-admin build --file build-request.json
 | `POST /query/available-dimensions?build_id={build_id}` | build_id 为独立 URL 参数，请求体指定 metrics，200 同步返回可用的 dimensions 列表，包含时间粒度和允许的过滤操作 |
 | `POST /query?build_id={build_id}` | build_id 为独立 URL 参数，同步执行 QUERY、EXPLAIN、PREVIEW、DIMENSION_VALUES，直接返回本次结果，最多 8 MiB |
 
-目录、可用维度、查询始终使用选定 buildId；不重新解析当前部署。新构建不使旧构建目录和查询失效。物理清理后仍保留目录，`queryAvailable=false`。QUERY/EXPLAIN 使用 metrics；分组/过滤/维度取值使用该构建及指标集合生成的 optionId。PREVIEW 使用 selector。请求体 `limit` 表示本次返回行数上限，默认 1000、最大 10000；查询请求不接受 `offset` 或 `idempotencyKey`。每次请求重新调用引擎，返回 QueryResult，不提供历史结果或分页读取。数值精度和 null 保留，时间按固定构建时区归一化。
+目录、可用维度、查询始终使用选定 buildId；不重新解析当前部署。新构建不使旧构建目录和查询失效。QUERY/EXPLAIN 使用 metrics；分组/过滤/维度取值使用该构建及指标集合生成的 optionId。PREVIEW 使用 selector。请求体 `limit` 表示本次返回行数上限，默认 1000、最大 10000；查询请求不接受 `offset` 或 `idempotencyKey`。每次请求重新调用引擎，返回 QueryResult，不提供历史结果或分页读取。数值精度和 null 保留，时间按固定构建时区归一化。
 
 其他列表默认 50、最多 200，统一 `items/nextCursor`。错误统一为 `error`，包含 `code/message/retryable/phase/buildId`。完整协议以 `/openapi.json` 为准；健康及版本接口仍是 `/health/live`、`/health/ready`、`/versions`。
 
-只有构建、部署及其取消流程使用异步状态。两个查询接口均通过必填的 URL 参数 `build_id` 指定构建，请求体不包含 buildId。可用维度接口请求体只接收 `metrics`，不需要幂等键或任务编号，响应列表字段为 `dimensions`。查询接口在原请求内完成并返回本次结果，相同请求也会重新执行。查询和可用维度不缓存，不写入任务、attempt 或结果表，响应不包含 `queryId`、执行状态和分页字段。原 builds 下的 query-options、available-dimensions、queries 路由及 GET results 路由已移除。失败直接返回结构化 HTTP 错误，不返回 QUEUED/RUNNING；可用维度和查询的状态轮询路由已移除。执行期间以数据库共享会话锁保护固定构建，清理同一构建时必须取得互斥锁；查询退出后释放锁，不产生查询记录。后台 worker 只执行构建和清理，不自动重试查询。服务不按执行时长判定超时，等待引擎返回真实结果或错误。旧 `COMMAND_TIMEOUT_SECONDS` 配置与 `deadline_at` 字段仅保留兼容，不再用于执行、领取或回收判定；worker 心跳租约仍然生效。调用方可自行设置 HTTP 等待时长。
+只有构建、部署及其取消流程使用异步状态。两个查询接口均通过必填的 URL 参数 `build_id` 指定构建，请求体不包含 buildId。可用维度接口请求体只接收 `metrics`，不需要幂等键或任务编号，响应列表字段为 `dimensions`。查询接口在原请求内完成并返回本次结果，相同请求也会重新执行。查询和可用维度不缓存，不写入任务、attempt 或结果表，响应不包含 `queryId`、执行状态和分页字段。原 builds 下的 query-options、available-dimensions、queries 路由及 GET results 路由已移除。失败直接返回结构化 HTTP 错误，不返回 QUEUED/RUNNING；可用维度和查询的状态轮询路由已移除。查询不产生任务记录，也不持有数据库清理锁。后台 worker 只执行构建，不自动重试查询。服务不按执行时长判定超时，等待引擎返回真实结果或错误。worker 心跳租约仍然生效。调用方可自行设置 HTTP 等待时长。
 
 ## 初始化与运维
 
@@ -205,7 +206,7 @@ result = metricflow.query(request)
 
 血缘复用 dbt 已有的 `ls` 命令，没有自定义 dbt `lineage` 命令。`+orders+` 选择当前节点及所有上游、下游；`1+orders+1` 限制为一层；也可使用 `metric:revenue` 等原生 selector。HTTP query string 中的 `+` 必须编码为 `%2B`，例如 `/builds/{buildId}/lineage?selector=1%2Borders%2B1`。不匹配返回空数组。
 
-`ls` 使用当次准备的临时项目/profile和历史 Manifest，不重新 parse 业务 YAML，不连接仓库执行查询。元数据操作复用引擎串行与环境恢复保护，但不取得数据查询清理锁，物化表清理后仍可查血缘；项目配置、适配器和 profile 的初始化条件仍须满足。
+`ls` 使用当次准备的临时项目/profile和历史 Manifest，不重新 parse 业务 YAML，不连接仓库执行查询。元数据操作复用引擎串行与环境恢复保护，不依赖物化表存在；项目配置、适配器和 profile 的初始化条件仍须满足。
 
 查询请求改用 `metrics`，直接传 MetricFlow 指标名（例如 `["revenue"]`），不再接受 `metricResourceIds` 或从 dbt unique_id 映射名称。排序的指标 `fieldId` 同样使用指标名。`available-dimensions` 仍实时调用 MetricFlow，保留按构建、指标集合和路径确定的 `optionId`；维度选项的 `name`、`semanticModelName` 来自引擎结果。
 
@@ -284,3 +285,7 @@ uv run --frozen pytest -q -s tests/integration/test_execution_environment_isolat
 ```
 
 测试核对两个 schema 的实际表内容、相同源码 SHA、固定 build 查询、环境 A 重建后环境 B 不变，以及旧配置快照不变。清理这些专用 schema 和测试数据库应在确认不再需要验收记录后单独执行。
+
+已移除构建清理任务和 `CLEANING/CLEANED` 生命周期，不再通过清理任务关闭历史查询，也不删除共享数据库对象。临时目录仍在执行结束后自动清理。存量数据库需停止服务后，在目标服务 schema 的事务内执行 `src/dbt_metricflow_service/storage/remove_run_cleanup.sql`；保留历史记录，未完成的旧清理任务标记为失败。
+
+任务 `kind` 字段已移除，执行器直接构建；产物集合的 `SOURCE/EXECUTION` 类型保留。已有数据库停服后在目标服务 schema 的事务内执行 `remove_job_kind.sql`；若仍存在旧清理生命周期字段，先执行 `remove_run_cleanup.sql`。迁移保留任务和 attempt 历史，将未完成的旧清理任务标记失败，避免当作构建领取。

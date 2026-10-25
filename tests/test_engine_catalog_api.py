@@ -45,11 +45,5 @@ def test_catalog_http_preserves_native_keys_and_nested_dimensions(store, tmp_pat
     assert invalid.json()["error"]["code"] == "INVALID_QUERY"
     assert client.get(lineage_path).status_code == 422
     assert client.get(resource_path + "/lineage").status_code == 422
-    # 物化表清理后，血缘仍来自历史 Manifest，不走数据查询清理锁。
-    with store.db.transaction() as connection:
-        connection.exec_driver_sql(
-            "UPDATE runtime_job SET run_lifecycle='CLEANED' WHERE job_id=%s",
-            (builds.store.get(build.build_id).run_id,),
-        )
     assert client.get(lineage_path, params={"selector": "+orders+"}).status_code == 200
     assert client.get(resource_path + "/unknown").status_code == 422

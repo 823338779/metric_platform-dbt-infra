@@ -6,7 +6,7 @@ import pytest
 
 from dbt_metricflow_service.application.builds import BuildService
 from dbt_metricflow_service.application.errors import ServiceError
-from dbt_metricflow_service.runtime.executor import RuntimeExecutor
+from dbt_metricflow_service.runtime.dbt_executor import RuntimeExecutor
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.builds import BuildStore
@@ -19,7 +19,7 @@ from tests.test_publication_storage import store as store
 
 def setup(store, repository, monkeypatch):
     builds = BuildStore(store.db)
-    app = BuildService(builds, uuid4().hex, 60)
+    app = BuildService(builds, uuid4().hex)
     body = request(
         repository=f"https://fixture.invalid/{uuid4().hex}.git", commitSha=git(repository, "rev-parse", "HEAD"),
     )
@@ -37,7 +37,7 @@ async def test_submit_fixes_input_and_reserves_run_atomically(store, repository,
     job = jobs.claim(uuid4().hex, toolchain_version=app.toolchain)
     assert job.status == "RUNNING" and job.input_set_id is None
     artifacts = ArtifactStore(store.db)
-    settings = Settings(tmp_path, 60, 1024, temp_root=tmp_path / "runtime")
+    settings = Settings(tmp_path, 1024, temp_root=tmp_path / "runtime")
     fixed = await RuntimeExecutor(settings, jobs, artifacts)._prepare_build_source(job)
     assert fixed.request_json.project_digest == digest(repository, body.commit_sha)
     assert fixed.request_json.build_id == str(first.build_id)

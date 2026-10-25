@@ -10,12 +10,12 @@ import pytest
 from dbt.cli.main import dbtRunner
 from dbt.contracts.graph.manifest import Manifest
 
-from dbt_metricflow_service.execution.dbt import run_dbt
-from dbt_metricflow_service.execution.models import CommandSpec, JobStatus
+from dbt_metricflow_service.execution.models import JobStatus
 from dbt_metricflow_service.platform.manifest_capture import ManifestCapture
-from dbt_metricflow_service.runtime.executor import build_engine_environment
+from dbt_metricflow_service.runtime.dbt_executor import build_engine_environment
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.entities import ArtifactFile, ArtifactSet
+from tests.dbt_execution_helpers import EngineCall, invoke_for_test
 from tests.resource_helpers import make_resource_project
 from tests.schema_helpers import isolated_database
 from tests.test_manifest_capture import manifest_object
@@ -63,8 +63,8 @@ async def test_dbt_passes_manifest_object_without_serializing_or_logging_it(tmp_
     async def authorize():
         pass
 
-    record = await run_dbt("memory", CommandSpec(("dbt", "docs", "generate"), tmp_path, {}, False),
-                           5, 1024, authorize, manifest_sink=received.append)
+    record = await invoke_for_test("memory", EngineCall(("dbt", "docs", "generate"), tmp_path, {}, False),
+                           1024, authorize, manifest_sink=received.append)
     assert record.status == JobStatus.SUCCEEDED
     assert len(received) == 1
     assert received[0] is manifest
@@ -81,8 +81,8 @@ async def test_failed_or_missing_manifest_cannot_provide_payload(tmp_path, monke
     async def authorize():
         pass
 
-    record = await run_dbt("memory", CommandSpec(("dbt", "docs", "generate"), tmp_path, {}, False),
-                           5, 1024, authorize, manifest_sink=received.append)
+    record = await invoke_for_test("memory", EngineCall(("dbt", "docs", "generate"), tmp_path, {}, False),
+                           1024, authorize, manifest_sink=received.append)
     assert record.status == JobStatus.FAILED
     assert received == []
 
@@ -95,9 +95,9 @@ async def test_real_docs_manifest_roundtrips_through_database_without_disk_captu
 
     for args in (("parse",), ("compile",), ("build",), ("docs", "generate")):
         capture = ManifestCapture(10 * 1024 * 1024)
-        spec = CommandSpec(("dbt", *args, "--project-dir", str(project), "--profiles-dir", str(profiles)),
+        spec = EngineCall(("dbt", *args, "--project-dir", str(project), "--profiles-dir", str(profiles)),
                            project, environment, args == ("build",))
-        result = await run_dbt("memory", spec, 60, 1024, authorize,
+        result = await invoke_for_test("memory", spec, 1024, authorize,
                                manifest_sink=capture)
         assert result.status == JobStatus.SUCCEEDED, result.stderr
         assert capture.manifest.nodes

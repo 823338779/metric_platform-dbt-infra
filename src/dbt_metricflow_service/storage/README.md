@@ -23,13 +23,15 @@ Session 关闭 autoflush，涉及锁顺序或外键依赖时显式 flush。数�
 
 字段类型、默认值、可空性及主键由真实 PostgreSQL 初始化回归校验。表约束、索引和触发器由 schema.sql 定义，不使用 `create_all()` 或运行时反射补建结构。UUID 以字符串传递，JSON 的 `None` 保持 SQL NULL 语义。
 
-任务只包含构建和清理，完成事务封存产物并更新状态，不保存通用结果表。查询全程在内存中执行，以共享会话锁阻止并发清理，不产生持久任务。目录以封存的 Manifest 为唯一来源，仅由 ManifestCapture 传递原文，再由 dbt SDK 提供原生节点与依赖；产物集合仅记录来源与完整性字段，不另存完整目录或重复元数据 JSON。旧分支、发布关系和默认输出复用表已移除。
+任务只包含构建，完成事务封存产物并更新状态，不保存通用结果表。查询全程在内存中执行，不持有数据库清理锁，不产生持久任务。目录以封存的 Manifest 为唯一来源，仅由 ManifestCapture 传递原文，再由 dbt SDK 提供原生节点与依赖；产物集合仅记录来源与完整性字段，不另存完整目录或重复元数据 JSON。旧分支、发布关系和默认输出复用表已移除。
 
 构建输出的 `target/manifest.json` 来自唯一一次 `dbt build` 返回的内存 Manifest，使用 dbt 的 WritableManifest 和 JSON 编码器，持久化不读取本地 Manifest。构建成功后仅统一执行副本的 target-path，不注入 schema/alias 宏。完成事务只要求 Manifest，不再要求 catalog.json、人工验证标记或查询探测证明。ManifestCapture.persist 负责将内存内容与对应产物路径交给通用 memory_files 接口；存储层不再单独识别 manifest_json 参数。其他已有产物仍从工作目录捕获；大小、摘要、租约及事务封存规则不变。
 
 Manifest 使用 UTF-8 紧凑 JSON（不转义中文、去掉分隔符空格），入库时采用 gzip level 6 压缩，固定 `mtime=0`。仅在压缩结果更小时保存 `codec=gzip`，否则保留 `raw`。`raw_size`、`raw_sha256` 和集合摘要按压缩前内容计算，`stored_size` 记录实际存储字节数；容量限制仍按原始内容执行。`read_file` 和 `materialize` 按 codec 自动解压并校验，旧 raw 记录继续可读，无需迁移；已有产物不自动重写。
 
 初始化使用 `dbt-service-admin init-db`：在选定 schema 中一次创建完整当前结构。并发初始化由事务锁串行化，失败时整体回滚；已有全部业务表则直接返回，只有部分业务表时拒绝自动修补。服务启动只读检查这些表是否齐全，不维护结构版本、迁移链或历史数据兼容逻辑。
+
+旧业务超时配置 `COMMAND_TIMEOUT_SECONDS`、执行参数和 `runtime_job.deadline_at` 已移除。升级时先从服务 YAML 中删除该配置项；停止全部旧版本服务和 worker，确认 `search_path` 指向目标服务 schema 后，在事务中执行同目录 `remove_job_deadline.sql`。该脚本仅删除停用的 deadline 列，保留任务、构建和 `runtime_attempt` 租约；新库无需执行。未升级的旧库会在服务启动检查时被拒绝，服务不会自动改表。数据库、Git 的原生超时配置和 worker 心跳租约机制不变。
 
 固定请求、执行配置、产物元数据、诊断与日志投影均使用明确字段的模型，并通过属性访问。JSONB 列仍使用数据库 JSON 映射，在存储边界序列化/验证；dbt 工程 YAML、适配器会话标识映射及数据库驱动配置属于可扩展外部协议边界。动态路径索引和按构建身份索引的字典保留原用途。
 
@@ -72,3 +74,7 @@ COMMIT;
 不再生成或捕获 `published_catalog.json`，构建完成也不要求该文件。Manifest 的完整性仍通过 artifact 文件摘要验证。新初始化结构不再定义 `engine_build.catalog_digest`；现有数据库可保留该旧列和旧同步触发器（新构建对应的目录摘要为空），当前 ORM 和目录读取不再使用它们，无需改写旧构建。
 
 新初始化结构不再定义 `runtime_artifact_set.validation_json`，当前代码不读写该列。现有数据库可保留原有默认值为空对象的列，无需迁移历史产物。构建错误详情中的旧 validationSummary 字段只为历史记录读取保留，新错误直接使用 dbt 日志和执行诊断。
+
+`remove_run_cleanup.sql` 移除旧清理生命周期字段和触发器依赖，只允许新建构建任务；保留历史清理任务，未完成的清理任务以 `CLEANUP_REMOVED` 结束。停止全部服务和 worker 后，在目标 schema 的事务内执行，再启动服务。
+
+任务 `kind` 字段已移除，执行器直接构建；产物集合的 `SOURCE/EXECUTION` 类型保留。已有数据库停服后在目标服务 schema 的事务内执行 `remove_job_kind.sql`；若仍存在旧清理生命周期字段，先执行 `remove_run_cleanup.sql`。迁移保留任务和 attempt 历史，将未完成的旧清理任务标记失败，避免当作构建领取。

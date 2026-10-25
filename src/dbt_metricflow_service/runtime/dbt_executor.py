@@ -4,30 +4,17 @@ import asyncio
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, ParamSpec, TypeVar, cast
+from typing import Final, ParamSpec, TypeVar, cast
 
 from dbt_metricflow_service import constants as strings
-from dbt_metricflow_service.execution.dbt import run_dbt
-from dbt_metricflow_service.execution.models import (
-    CommandSpec,
-    JobRecord,
-    JobStatus,
-)
-from dbt_metricflow_service.runtime.execution_logs import ExecutionLogWriter
 from dbt_metricflow_service.runtime.workspace import attempt_workspace
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
-from dbt_metricflow_service.storage.execution_logs import ExecutionLogStore
 from dbt_metricflow_service.storage.jobs import JobStore
 from dbt_metricflow_service.storage.records import ArtifactMetadata, JobErrorDetail, LeasedJob, StoredJob
 
-if TYPE_CHECKING:
-    from dbt.contracts.graph.manifest import Manifest
-
 # 保留后台线程函数的位置和关键字参数签名。
-UNSUPPORTED_JOB_KIND: Final[str] = "unsupported runtime job kind"
 SOURCE_BRANCH_MISSING: Final[str] = "source branch does not exist"
 
 
@@ -38,8 +25,6 @@ T = TypeVar("T")
 
 
 # 任务类型与持久阶段使用固定协议值，避免执行器扩展公开队列状态。
-BUILD_RUN = strings.BUILD_RUN
-RUN_CLEANUP = strings.RUN_CLEANUP
 PROJECT_DIRECTORY = strings.PROJECT_DIRECTORY
 ERROR_LEASE_LOST = strings.LEASE_LOST
 ERROR_COMMAND_FAILED = strings.COMMAND_FAILED
@@ -122,12 +107,7 @@ class RuntimeExecutor:
 
         # SDK 调用和文件操作均等待线程退出，之后才退出工作目录上下文。
         with attempt_workspace(self.settings.temp_root, job.job_id, job.attempt_id) as attempt:
-            if job.kind == BUILD_RUN:
-                return await self._build(job, attempt)
-            # 固定 schema 内的表由多次构建共用，清理仅结束本构建的可查询生命周期。
-            if job.kind == RUN_CLEANUP:
-                return ExecutionResult()
-            raise ValueError(UNSUPPORTED_JOB_KIND)
+            return await self._build(job, attempt)
 
     async def _build(self, job: LeasedJob, attempt: Path) -> ExecutionResult:
         from ..platform.build import execute_build
@@ -196,38 +176,6 @@ class RuntimeExecutor:
         valid = await _thread(self.jobs.phase, job.job_id, job.lease_token, phase, external=external)
         if not valid:
             raise ExecutionError(ERROR_LEASE_LOST, stopped=False)
-
-    async def _dbt(
-        self, job: LeasedJob, spec: CommandSpec, phase: str,
-        *, manifest_sink: Callable[[Manifest], None] | None = None,
-    ) -> JobRecord:
-        # dbt 使用命令执行记录；不携带 MetricFlow 的请求、结果或业务错误码。
-        writer = ExecutionLogWriter(partial(ExecutionLogStore(self.jobs.db).append, job, phase, spec.argv[1]))
-        try:
-            record = await run_dbt(
-                job.project_id, spec, self.settings.command_timeout_seconds,
-                self.settings.max_output_bytes, lambda: self._authorize(job, phase, external=spec.write_operation),
-                log_sink=writer.emit,
-                manifest_sink=manifest_sink,
-            )
-        finally:
-            # run_dbt 在取消时也等待引擎退出，此后才允许关闭日志队列。
-            await _thread(writer.close)
-        # parse/debug 正常退出无需写入核对，写命令失联不能据退出码释放保护。
-        self._check_record(record, may_write=spec.write_operation)
-        return record
-
-    @staticmethod
-    def _check_record(record: JobRecord, *, may_write: bool) -> None:
-        # 仅统一已脱敏的运行诊断，不解释引擎特有的业务结果。
-        if record.status is not JobStatus.SUCCEEDED:
-            # dbt 的退出码 1 表示已完整返回模型/测试失败；异常退出仍不能证明写入停止。
-            completed_failure = record.status is JobStatus.FAILED and record.exit_code == 1
-            raise ExecutionError(
-                ERROR_COMMAND_FAILED,
-                JobErrorDetail.model_validate(record, from_attributes=True),
-                stopped=not may_write or completed_failure,
-            )
 
     @staticmethod
     def _metadata(job: LeasedJob) -> ArtifactMetadata:

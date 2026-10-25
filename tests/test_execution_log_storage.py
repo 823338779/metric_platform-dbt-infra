@@ -13,9 +13,10 @@ from dbt.events.types import JinjaLogInfo
 from dbt_common.events.base_types import msg_from_base_event
 
 from dbt_metricflow_service.execution.logs import EngineLog
-from dbt_metricflow_service.execution.models import CommandSpec, JobStatus
-from dbt_metricflow_service.runtime.executor import ExecutionError, RuntimeExecutor
+from dbt_metricflow_service.execution.models import JobStatus
+from dbt_metricflow_service.runtime.dbt_executor import ExecutionError, RuntimeExecutor
 from dbt_metricflow_service.storage.jobs import JobStore
+from tests.dbt_execution_helpers import EngineCall, invoke_job_for_test
 from tests.schema_helpers import isolated_database
 from tests.test_build_acceptance import CALLER, TOOLCHAIN, request, service
 
@@ -96,7 +97,7 @@ async def test_executor_persists_events_with_build_and_attempt_context(tmp_path,
         first = app.submit_snapshot(request(), CALLER)
         second = app.submit_snapshot(request(), CALLER)
         jobs = JobStore(db)
-        executor = RuntimeExecutor(SimpleNamespace(command_timeout_seconds=5, max_output_bytes=32), jobs, None)
+        executor = RuntimeExecutor(SimpleNamespace(max_output_bytes=32), jobs, None)
 
         def invoke(self, args):
             for callback in self.callbacks:
@@ -109,13 +110,13 @@ async def test_executor_persists_events_with_build_and_attempt_context(tmp_path,
         for _ in (first, second):
             job = jobs.claim(str(uuid4()), toolchain_version=TOOLCHAIN)
             claimed.append(job)
-            spec = CommandSpec(("dbt", "parse"), tmp_path, {}, False)
+            spec = EngineCall(("dbt", "parse"), tmp_path, {}, False)
             if success:
-                result = await executor._dbt(job, spec, "PARSING")
+                result = await invoke_job_for_test(executor, job, spec, "PARSING")
                 assert result.status == JobStatus.SUCCEEDED
             else:
                 with pytest.raises(ExecutionError):
-                    await executor._dbt(job, spec, "PARSING")
+                    await invoke_job_for_test(executor, job, spec, "PARSING")
         with db.transaction() as connection:
             rows = connection.exec_driver_sql(
                 "SELECT build_id,job_id,attempt_id,phase,command,message,event_name "
@@ -147,7 +148,7 @@ def test_existing_schema_can_add_execution_log_table():
 
 
 async def test_real_parse_and_build_persist_internal_debug_and_model_events(tmp_path):
-    from dbt_metricflow_service.runtime.executor import build_engine_environment
+    from dbt_metricflow_service.runtime.dbt_executor import build_engine_environment
     from tests.resource_helpers import make_resource_project
 
     project, profiles, _ = make_resource_project(tmp_path)
@@ -156,13 +157,13 @@ async def test_real_parse_and_build_persist_internal_debug_and_model_events(tmp_
         service(SimpleNamespace(db=db)).submit_snapshot(request(), CALLER)
         jobs = JobStore(db)
         job = jobs.claim(str(uuid4()), toolchain_version=TOOLCHAIN)
-        executor = RuntimeExecutor(SimpleNamespace(command_timeout_seconds=60, max_output_bytes=32), jobs, None)
+        executor = RuntimeExecutor(SimpleNamespace(max_output_bytes=32), jobs, None)
         environment = build_engine_environment(project, profiles, "main", "test")
         for command, phase in (("parse", "PARSING"), ("build", "BUILDING")):
-            spec = CommandSpec((
+            spec = EngineCall((
                 "dbt", command, "--project-dir", str(project), "--profiles-dir", str(profiles),
             ), project, environment, command == "build")
-            result = await executor._dbt(job, spec, phase)
+            result = await invoke_job_for_test(executor, job, spec, phase)
             assert result.status == JobStatus.SUCCEEDED
         with db.transaction() as connection:
             rows = connection.exec_driver_sql(
@@ -186,7 +187,7 @@ async def test_cancellation_waits_for_last_event_to_be_persisted(tmp_path, monke
         service(SimpleNamespace(db=db)).submit_snapshot(request(), CALLER)
         jobs = JobStore(db)
         job = jobs.claim(str(uuid4()), toolchain_version=TOOLCHAIN)
-        executor = RuntimeExecutor(SimpleNamespace(command_timeout_seconds=10, max_output_bytes=32), jobs, None)
+        executor = RuntimeExecutor(SimpleNamespace(max_output_bytes=32), jobs, None)
         started, release = threading.Event(), threading.Event()
 
         def invoke(self, args):
@@ -197,8 +198,8 @@ async def test_cancellation_waits_for_last_event_to_be_persisted(tmp_path, monke
             return SimpleNamespace(success=True, exception=None)
 
         monkeypatch.setattr(dbtRunner, "invoke", invoke)
-        task = asyncio.create_task(executor._dbt(
-            job, CommandSpec(("dbt", "parse"), tmp_path, {}, False), "PARSING",
+        task = asyncio.create_task(invoke_job_for_test(executor,
+            job, EngineCall(("dbt", "parse"), tmp_path, {}, False), "PARSING",
         ))
         try:
             assert await asyncio.to_thread(started.wait, 5)
@@ -247,8 +248,7 @@ async def test_direct_build_uses_native_macros_and_records_failures(tmp_path, fa
         job = jobs.claim(str(uuid4()), toolchain_version=TOOLCHAIN)
         job.profile_binding_id, job.schema_name = "test", "main"
         artifacts = ArtifactStore(db)
-        executor = RuntimeExecutor(Settings(profiles_dir=profiles, command_timeout_seconds=60,
-                                           max_output_bytes=1024), jobs, artifacts)
+        executor = RuntimeExecutor(Settings(profiles_dir=profiles, max_output_bytes=1024), jobs, artifacts)
         if failure:
             with pytest.raises(ExecutionError) as error:
                 await execute_build(executor, job, project)

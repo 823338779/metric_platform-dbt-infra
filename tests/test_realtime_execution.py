@@ -2,7 +2,6 @@
 
 import json
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 from uuid import uuid4
@@ -10,9 +9,10 @@ from uuid import uuid4
 import pytest
 
 from dbt_metricflow_service.application.errors import ServiceError
+from dbt_metricflow_service.execution.embedded import ENGINE_LOCK
 from dbt_metricflow_service.platform.models import DataQueryResult, DimensionQueryResult, PlatformQueryRequest
 from dbt_metricflow_service.runtime.service import Runtime
-from tests.data_helpers import leased_job, stored_build
+from tests.data_helpers import stored_build
 from tests.test_execution_profiles import secrets as secrets
 from tests.test_execution_profiles import settings as infrastructure
 from tests.test_execution_snapshot_storage import snapshot
@@ -22,27 +22,18 @@ from tests.test_publication_storage import store as store
 @pytest.fixture
 def realtime(tmp_path, secrets):
     runtime = Runtime.__new__(Runtime)
-    runtime.settings = replace(infrastructure(), profiles_dir=tmp_path, command_timeout_seconds=5,
-                               max_output_bytes=64, temp_root=tmp_path / "queries", max_result_bytes=1024)
+    runtime.settings = replace(infrastructure(), profiles_dir=tmp_path, max_output_bytes=64,
+                               temp_root=tmp_path / "queries", max_result_bytes=1024)
     build = stored_build(config_snapshot=snapshot())
     events = []
 
-    @contextmanager
-    def query_run(run_id):
-        assert run_id == build.run_id
-        events.append("lock")
-        try:
-            yield leased_job(project_id="test", schema_name="run_test", profile_binding_id="test")
-        finally:
-            events.append("unlock")
-
     def materialize(set_id, directory):
         assert set_id == build.output_set_id
-        assert events[-1] == "lock"
+        assert ENGINE_LOCK.locked()
         (directory / "dbt_project.yml").write_text("name: test\n", encoding="utf-8")
 
     # 故意不提供 reserve/claim/finish/result 等持久化方法。
-    runtime.jobs = SimpleNamespace(query_run=query_run)
+    runtime.jobs = SimpleNamespace()
     runtime.artifacts = SimpleNamespace(materialize=materialize, read_file=lambda *_: b"saved manifest")
     return runtime, build, events
 
@@ -58,7 +49,7 @@ def test_repeated_calls_execute_in_memory_and_remove_workspaces(realtime, monkey
         project = self._project
         assert self._manifest == b"saved manifest"
         assert request is payload
-        assert events[-1] == "lock"
+        assert ENGINE_LOCK.locked()
         assert (project / "dbt_project.yml").is_file()
         paths.append(project)
         calls.append(request)
@@ -69,7 +60,7 @@ def test_repeated_calls_execute_in_memory_and_remove_workspaces(realtime, monkey
     assert runtime.execute_query(build, payload) == DataQueryResult(rows=[[2]])
     assert paths[0] != paths[1]
     assert all(not path.exists() for path in paths)
-    assert events == ["lock", "unlock", "lock", "unlock"]
+    assert not events
 
 
 def test_preview_context_dispatches_directly_to_dbt_client(realtime, monkeypatch):
@@ -84,7 +75,7 @@ def test_preview_context_dispatches_directly_to_dbt_client(realtime, monkeypatch
         assert selector == "orders"
         assert limit == 10
         assert (profiles / "profiles.yml").is_file()
-        assert events == ["lock"]
+        assert not events
         paths.append(project)
         return DataQueryResult(rows=[[1]])
 
@@ -94,7 +85,7 @@ def test_preview_context_dispatches_directly_to_dbt_client(realtime, monkeypatch
         runId=uuid4(), mode="PREVIEW", selector="orders", limit=10,
     ))
     assert result.rows == [[1]]
-    assert events == ["lock", "unlock"]
+    assert not events
     assert not paths[0].exists()
 
 
@@ -128,11 +119,9 @@ def test_lineage_uses_temporary_context_without_data_cleanup_lock(realtime, monk
             raise ValueError("native error")
         return [{"unique_id": "model.sample.orders", "depends_on": {"nodes": []}}]
 
-    runtime.jobs = SimpleNamespace()  # 血缘不需要 query_run，也不受 CLEANED 状态限制。
+    runtime.jobs = SimpleNamespace()  # 元数据查询不访问任务队列。
     runtime.artifacts.materialize = materialize
     monkeypatch.setattr(DbtClient, "lineage", lineage)
-    if failure == "slow":
-        runtime.settings = replace(runtime.settings, command_timeout_seconds=0.01)
     if failure == "native":
         with pytest.raises(ServiceError) as caught:
             runtime.lineage(build, "1+orders+1")
@@ -159,8 +148,6 @@ def test_errors_release_lock_and_do_not_publish_late_results(realtime, monkeypat
 
     runtime, build, events = realtime
     paths = []
-    if failure == "slow":
-        runtime.settings = replace(runtime.settings, command_timeout_seconds=0.01)
 
     def execute(self, request):
         project = self._project
@@ -170,7 +157,7 @@ def test_errors_release_lock_and_do_not_publish_late_results(realtime, monkeypat
         if failure == "connection":
             raise ConnectionError("private-details")
         time.sleep(0.04)
-        assert events == ["lock"]
+        assert not events
         assert project.exists()
         return DataQueryResult(rows=[[123]])
 
@@ -184,7 +171,7 @@ def test_errors_release_lock_and_do_not_publish_late_results(realtime, monkeypat
         assert caught.value.status == status
         assert caught.value.error.code == code
         assert "private-details" not in str(caught.value)
-    assert events == ["lock", "unlock"]
+    assert not events
     assert all(not path.exists() for path in paths)
 
 
@@ -217,7 +204,7 @@ def test_realtime_result_size_and_shape(realtime, monkeypatch, value, limit, err
         with pytest.raises(ServiceError) as caught:
             runtime.execute_query(build, PlatformQueryRequest(runId=uuid4(), mode="QUERY"))
         assert caught.value.error.code == error_code
-    assert events == ["lock", "unlock"]
+    assert not events
 
 
 @pytest.mark.parametrize("binary", [False, True])
@@ -237,7 +224,7 @@ def test_realtime_non_json_result_is_a_sanitized_service_failure(realtime, monke
     assert caught.value.status == 503
     assert caught.value.error.code == "COMMAND_FAILED"
     assert "private-cell-details" not in str(caught.value)
-    assert events == ["lock", "unlock"]
+    assert not events
 
 
 def test_waiting_queries_do_not_hold_cleanup_connections(realtime, monkeypatch):
@@ -257,7 +244,7 @@ def test_waiting_queries_do_not_hold_cleanup_connections(realtime, monkeypatch):
             lambda _: runtime.execute_query(build, PlatformQueryRequest(runId=uuid4(), mode="QUERY")), range(9),
         ))
     assert results == [DataQueryResult(rows=[[1]])] * 9
-    assert events == ["lock", "unlock"] * 9
+    assert not events
 
 
 def test_real_database_query_path_only_reads_without_persisting_records(store, tmp_path, monkeypatch, secrets):
@@ -268,7 +255,7 @@ def test_real_database_query_path_only_reads_without_persisting_records(store, t
     builds, view, jobs, artifacts = ready_build(store, tmp_path)
     build = builds.store.get(view.build_id)
     runtime = Runtime.__new__(Runtime)
-    runtime.settings = replace(infrastructure(), profiles_dir=tmp_path, command_timeout_seconds=5,
+    runtime.settings = replace(infrastructure(), profiles_dir=tmp_path,
                                max_output_bytes=64, temp_root=tmp_path / "queries")
     runtime.jobs, runtime.artifacts = jobs, artifacts
     monkeypatch.setattr(engine.MetricFlowClient, "query", lambda *args, **kwargs: DataQueryResult(rows=[[1]]))
@@ -300,7 +287,7 @@ def test_dimension_runtime_repeats_calls_with_explicit_metrics(realtime, monkeyp
     def discover(self, *, metrics):
         project = self._project
         assert metrics == ("orders",)
-        assert events[-1] == "lock"
+        assert ENGINE_LOCK.locked()
         assert (project / "dbt_project.yml").is_file()
         paths.append(project)
         return DimensionQueryResult(allowed_filters=["="] if len(paths) == 1 else ["IN"])
@@ -311,7 +298,7 @@ def test_dimension_runtime_repeats_calls_with_explicit_metrics(realtime, monkeyp
     assert runtime.available_dimensions(build, metrics).allowed_filters == ["IN"]
     assert paths[0] != paths[1]
     assert all(not path.exists() for path in paths)
-    assert events == ["lock", "unlock", "lock", "unlock"]
+    assert not events
 
 
 @pytest.mark.parametrize("dimensions", [True, False])
@@ -331,7 +318,7 @@ def test_runtime_rejects_the_other_operations_result_type(realtime, monkeypatch,
         execute()
     assert caught.value.error.code == "RESULT_INVALID"
     assert caught.value.status == 503
-    assert events == ["lock", "unlock"]
+    assert not events
 
 
 @pytest.mark.parametrize("failure,code,status", [
@@ -345,8 +332,6 @@ def test_dimension_errors_keep_http_semantics_and_release_workspace(realtime, mo
 
     runtime, build, events = realtime
     paths = []
-    if failure == "slow":
-        runtime.settings = replace(runtime.settings, command_timeout_seconds=0.01)
 
     def discover(self, *, metrics):
         project = self._project
@@ -357,7 +342,7 @@ def test_dimension_errors_keep_http_semantics_and_release_workspace(realtime, mo
             raise ConnectionError("private-details")
         time.sleep(0.04)
         assert project.exists()
-        assert events == ["lock"]
+        assert not events
         return DimensionQueryResult()
 
     monkeypatch.setattr(engine.MetricFlowClient, "available_dimensions", discover)
@@ -370,7 +355,7 @@ def test_dimension_errors_keep_http_semantics_and_release_workspace(realtime, mo
         assert caught.value.status == status
         assert "private-details" not in str(caught.value)
     assert all(not path.exists() for path in paths)
-    assert events == ["lock", "unlock"]
+    assert not events
 
 
 @pytest.mark.parametrize("dimensions", [True, False])
@@ -400,7 +385,7 @@ def test_cancelled_queries_wait_for_worker_and_restore_environment(realtime, mon
         assert release.wait(5)
         assert project.exists()
         assert (profiles / "profiles.yml").exists()
-        assert events == ["lock"]
+        assert not events
         if late_failure:
             raise ConnectionError("private-query-value")
         return DimensionQueryResult() if dimensions else DataQueryResult(rows=[[1]])
@@ -417,7 +402,7 @@ def test_cancelled_queries_wait_for_worker_and_restore_environment(realtime, mon
             assert ENGINE_LOCK.locked()
             assert paths[0].exists()
             assert profile_paths[0].exists()
-            assert events == ["lock"]
+            assert not events
         finally:
             release.set()
             with pytest.raises(asyncio.CancelledError):
@@ -432,7 +417,7 @@ def test_cancelled_queries_wait_for_worker_and_restore_environment(realtime, mon
         else:
             runtime.execute_query(build, PlatformQueryRequest(runId=uuid4(), mode="QUERY"))
     assert not ENGINE_LOCK.locked()
-    assert events == ["lock", "unlock"]
+    assert not events
     assert all(not path.exists() for path in paths + profile_paths)
     assert dict(os.environ) == original_environment
 
@@ -445,7 +430,6 @@ def test_slow_engine_errors_keep_original_error(realtime, monkeypatch, dimension
     import dbt_metricflow_service.delegates.clients.metric_flow_client as engine
 
     runtime, build, events = realtime
-    runtime.settings = replace(runtime.settings, command_timeout_seconds=0.01)
     paths = []
 
     def execute(self, **kwargs):
@@ -453,7 +437,7 @@ def test_slow_engine_errors_keep_original_error(realtime, monkeypatch, dimension
         paths.append(project)
         time.sleep(0.04)
         assert project.exists()
-        assert events == ["lock"]
+        assert not events
         raise engine.InvalidDimensionsRequest("private-late-error") if invalid_dimensions else ConnectionError(
             "private-late-error"
         )
@@ -467,5 +451,5 @@ def test_slow_engine_errors_keep_original_error(realtime, monkeypatch, dimension
     assert caught.value.error.code == ("INVALID_QUERY" if invalid_dimensions else "COMMAND_FAILED")
     assert caught.value.status == (422 if invalid_dimensions else 503)
     assert "private-late-error" not in str(caught.value)
-    assert events == ["lock", "unlock"]
+    assert not events
     assert all(not path.exists() for path in paths)

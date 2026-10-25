@@ -30,7 +30,7 @@ def test_real_environment_isolation(tmp_path):
     repository = os.environ["ENVIRONMENT_TEST_REPOSITORY"]
     branch = os.environ.get("ENVIRONMENT_TEST_BRANCH", "main")
     settings = Settings(
-        profiles_dir=tmp_path, command_timeout_seconds=TIMEOUT, max_output_bytes=1048576,
+        profiles_dir=tmp_path, max_output_bytes=1048576,
         database_url=os.environ["SERVICE_TEST_DATABASE_URL"], service_token=token,
         temp_root=Path(tempfile.gettempdir()) / ("dbtenv-" + token[:8]), toolchain_version="isolation-" + token,
         execution_instances={"isolation": {"type": "starrocks", "hosts": [host], "port": port}},
@@ -111,7 +111,8 @@ def test_real_environment_isolation(tmp_path):
         # 不存在的 catalog 必须失败，不能退回默认 catalog 覆盖 B 的同名 schema。
         invalid = dict(snapshots[1], environmentId=str(uuid4()), catalog="missing_" + uuid4().hex)
         failed = completed(invalid, expected="FAILED")
-        assert failed["queryAvailable"] is False
+        assert "queryAvailable" not in failed
+        assert "queryUnavailableReason" not in failed
         assert contents(schemas[1]) == before
         print("isolation evidence", [{key: build[key] for key in ("buildId", "commitSha", "execution")}
                                      for build in (first, second, third)])

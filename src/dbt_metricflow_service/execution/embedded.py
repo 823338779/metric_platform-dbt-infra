@@ -85,7 +85,11 @@ async def run_serialized(
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
-            await _settle(task)
+            try:
+                await _settle(task)
+            except Exception:
+                # 引擎已在执行上下文中记录错误；迟到错误不覆盖调用方取消。
+                pass
             raise
     finally:
         ENGINE_LOCK.release()

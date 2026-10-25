@@ -16,7 +16,7 @@ from tests.test_execution_snapshot_storage import snapshot
 
 def settings():
     return Settings(
-        profiles_dir=Path("profiles"), command_timeout_seconds=30, max_output_bytes=1024,
+        profiles_dir=Path("profiles"), max_output_bytes=1024,
         execution_instances={"warehouse": ExecutionInstance(
             type="starrocks", hosts=["localhost", "127.0.0.1"], port=9030,
         )},

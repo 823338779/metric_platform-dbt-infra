@@ -2,28 +2,25 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import json
 import logging
 import os
 import threading
 import time
 from types import SimpleNamespace
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 from dbt.cli.main import dbtRunner
-from psycopg2 import sql
-from psycopg2.extensions import parse_dsn
 from psycopg2.extras import Json
 
-import dbt_metricflow_service.runtime.executor as runtime_execution
-from dbt_metricflow_service.execution.models import CommandSpec
-from dbt_metricflow_service.runtime.executor import ExecutionError, RuntimeExecutor
+import dbt_metricflow_service.runtime.dbt_executor as runtime_execution
+from dbt_metricflow_service.runtime.dbt_executor import ExecutionError, RuntimeExecutor
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.jobs import JobStore
 from dbt_metricflow_service.storage.postgres import Database
 from dbt_metricflow_service.storage.records import JobRequest
+from tests.dbt_execution_helpers import EngineCall, invoke_job_for_test
 
 # 测试使用真实存储和执行线程，仅替换访问外部仓库的 SDK 调用。
 DATABASE_ENV = "SERVICE_TEST_DATABASE_URL"
@@ -39,10 +36,10 @@ EXECUTE_CODE = (
 SET_PROJECT_SQL = "UPDATE runtime_project SET source_set_id=%s WHERE project_id=%s"
 GET_ATTEMPT_SQL = "SELECT execution_stage FROM runtime_attempt WHERE attempt_id=%s"
 INSERT_JOB_SQL = """INSERT INTO runtime_job
-    (job_id,kind,project_id,request_fingerprint,request_json,config_version,toolchain_version,
-     deadline_at,input_set_id,profile_binding_id,schema_name)
-    VALUES (%s,%s,%s,'fixture',%s,'1',%s,clock_timestamp()+interval '1 hour',%s,'fixture','run_fixture')"""
-# SDK 替身与调用预算测试使用固定协议字段和诊断内容。
+    (job_id,project_id,request_fingerprint,request_json,config_version,toolchain_version,
+     input_set_id,profile_binding_id,schema_name)
+    VALUES (%s,%s,'fixture',%s,'1',%s,%s,'fixture','run_fixture')"""
+# SDK 替身与慢调用测试使用固定协议字段和诊断内容。
 SCHEMA_ENV = "DBT_PLATFORM_SCHEMA"
 TARGET_ENV = "DBT_TARGET"
 FIXTURE_SCHEMA = "run_fixture"
@@ -54,8 +51,7 @@ ENGINE_LOGGER = "dbt"
 DIAGNOSTIC = "x" * 1000
 DBT = "dbt"
 BUILD = "build"
-CLEANUP_JOB = "RUN_CLEANUP"
-CLEANUP_PAYLOAD = JobRequest()
+BUILD_PAYLOAD = JobRequest()
 COMPLETED_FILE = "completed"
 BUILD_CODE = """
 import json, os, sys
@@ -99,18 +95,16 @@ print(raw)
 """
 
 
-def claimed(execution, kind, request):
+def claimed(execution, request):
     """直接建立有效认领输入，执行测试不重复覆盖 HTTP 受理策略。"""
     executor, database, project_id, set_id = execution
     toolchain = str(uuid4())
     with database.transaction() as connection:
         connection.exec_driver_sql(INSERT_JOB_SQL, (
-            str(uuid4()), kind, project_id,
+            str(uuid4()), project_id,
             Json(request.model_dump(mode="json", by_alias=True, exclude_unset=True)), toolchain, set_id,
         ))
     job = executor.jobs.claim(str(uuid4()), toolchain_version=toolchain)
-    if kind == "RUN_CLEANUP":
-        job.parent_run_id = str(uuid4())
     return job
 
 
@@ -137,8 +131,8 @@ def programmatic_engine(monkeypatch, execute=None):
 async def run_build(executor, job, project):
     environment = runtime_execution.build_engine_environment(
         project, executor.settings.profiles_dir, job.schema_name, job.profile_binding_id)
-    spec = CommandSpec(("dbt", "build"), project, environment, True)
-    return await executor._dbt(job, spec, "BUILDING")
+    spec = EngineCall(("dbt", "build"), project, environment, True)
+    return await invoke_job_for_test(executor, job, spec, "BUILDING")
 
 
 @pytest.fixture
@@ -160,7 +154,7 @@ def execution(tmp_path):
         connection.exec_driver_sql(SET_PROJECT_SQL, (set_id, project_id))
     settings = Settings(
          profiles_dir=tmp_path / "profiles",
-        command_timeout_seconds=5, max_output_bytes=256, temp_root=tmp_path / "work",
+        max_output_bytes=256, temp_root=tmp_path / "work",
     )
     yield RuntimeExecutor(settings, jobs, artifacts), database, project_id, set_id
     database.close()
@@ -168,40 +162,14 @@ def execution(tmp_path):
 
 
 
-@pytest.mark.parametrize("kind,payload", [
-    ("RUN_CLEANUP", JobRequest(build_id=str(uuid4()))),
-    ("RUN_CLEANUP", JobRequest()),
-])
-async def test_cleanup_preserves_shared_objects_without_result_payload(execution, monkeypatch, kind, payload):
-    executor, _, _, _ = execution
-    job = claimed(execution, kind, payload)
-    if kind == "RUN_CLEANUP":
-        job.parent_run_id = str(uuid4())
-    programmatic_engine(monkeypatch)
-    result = await executor.execute(job)
-    assert result.output_set_id is None
-    assert not (executor.settings.temp_root / str(job.job_id) / str(job.attempt_id)).exists()
 
 
-async def test_cleanup_before_source_attachment_has_no_external_work(execution):
-    executor, database, _, _ = execution
-    job = claimed(execution, "RUN_CLEANUP", JobRequest())
-    with database.transaction() as connection:
-        sql_result = connection.exec_driver_sql(
-            "UPDATE runtime_job SET input_set_id=NULL WHERE job_id=%s", (job.job_id,)
-        )
-    job.input_set_id = None
-    result = await executor.execute(job)
-    assert result.output_set_id is None
-    with database.transaction() as connection:
-        sql_result = connection.exec_driver_sql(GET_ATTEMPT_SQL, (job.attempt_id,))
-        assert sql_result.scalar_one() == "PREPARING"
 
 
 async def test_expired_lease_does_not_start_engine(execution, monkeypatch, tmp_path):
     executor, database, _, _ = execution
     marker = tmp_path / "must-not-exist"
-    job = claimed(execution, "RUN_CLEANUP", JobRequest())
+    job = claimed(execution, JobRequest())
     with database.transaction() as connection:
         connection.exec_driver_sql(
             "UPDATE runtime_attempt SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE attempt_id=%s",
@@ -224,10 +192,7 @@ async def test_cancellation_or_slow_call_waits_for_engine_before_workspace_remov
     executor, _, _, _ = execution
     started, release = threading.Event(), threading.Event()
     finished = []
-    executor.settings = dataclasses.replace(
-        executor.settings, command_timeout_seconds=5 if cancel else 0.02,
-    )
-    job = claimed(execution, CLEANUP_JOB, CLEANUP_PAYLOAD)
+    job = claimed(execution, BUILD_PAYLOAD)
     workspace = executor.settings.temp_root / str(job.job_id) / str(job.attempt_id)
 
     # 取消或慢调用期间引擎仍可写工作目录；必须等待这次写入结束才能移除目录。
@@ -278,8 +243,8 @@ async def test_cancellation_or_slow_call_waits_for_engine_before_workspace_remov
 
 async def test_slow_success_retains_bounded_diagnostics(execution, monkeypatch):
     executor, _, project_id, _ = execution
-    executor.settings = dataclasses.replace(executor.settings, command_timeout_seconds=0.2, max_output_bytes=32)
-    job = claimed(execution, "RUN_CLEANUP", JobRequest())
+    executor.settings = dataclasses.replace(executor.settings, max_output_bytes=32)
+    job = claimed(execution, JobRequest())
     # 诊断经过真实 SDK 日志收集器，等待线程返回后上报。
     def execute(project, profiles):
         logging.getLogger(ENGINE_LOGGER).warning(DIAGNOSTIC)
@@ -295,14 +260,14 @@ async def test_slow_success_retains_bounded_diagnostics(execution, monkeypatch):
 
 async def test_write_engine_connection_loss_does_not_confirm_external_stop(execution, monkeypatch):
     executor, _, _, _ = execution
-    job = claimed(execution, "BUILD_RUN", JobRequest())
-    spec = CommandSpec((DBT, BUILD),
+    job = claimed(execution, JobRequest())
+    spec = EngineCall((DBT, BUILD),
                        executor.settings.temp_root, dict(os.environ), True)
     spec.cwd.mkdir(parents=True, exist_ok=True)
     # SDK 连接异常不能证明外部写入已经停止，保留未知结果保护。
     monkeypatch.setattr(dbtRunner, "invoke", lambda *_: SimpleNamespace(success=False, exception=ConnectionError()))
     with pytest.raises(ExecutionError) as error:
-        await executor._dbt(job, spec, "BUILDING")
+        await invoke_job_for_test(executor, job, spec, "BUILDING")
     assert error.value.stopped is False
 
 
@@ -331,47 +296,3 @@ async def test_repeated_cancellation_waits_for_filesystem_thread(tmp_path):
         release.set()
         await asyncio.gather(task, return_exceptions=True)
     assert marker.exists()
-
-
-async def test_source_only_cleanup_preserves_schema_without_semantic_manifest(execution, monkeypatch, tmp_path):
-    executor, database, project_id, _ = execution
-    connection = parse_dsn(os.environ[DATABASE_ENV])
-    for name, key in [("HOST", "host"), ("PORT", "port"), ("USER", "user"), ("DATABASE", "dbname")]:
-        monkeypatch.setenv("CLEANUP_TEST_" + name, connection[key])
-    monkeypatch.setenv("DBT_ENV_SECRET_CLEANUP_PASSWORD", connection.get("password", ""))
-    schema = "run_" + uuid4().hex
-    profiles = executor.settings.profiles_dir
-    profiles.mkdir()
-    (profiles / "profiles.yml").write_text(json.dumps({"cleanup_fixture": {
-        "target": "fixture", "outputs": {"fixture": {
-            "type": "postgres", "host": "{{ env_var('CLEANUP_TEST_HOST') }}",
-            "port": "{{ env_var('CLEANUP_TEST_PORT') | int }}", "user": "{{ env_var('CLEANUP_TEST_USER') }}",
-            "password": "{{ env_var('DBT_ENV_SECRET_CLEANUP_PASSWORD') }}",
-            "dbname": "{{ env_var('CLEANUP_TEST_DATABASE') }}", "schema": "{{ env_var('DBT_PLATFORM_SCHEMA') }}",
-            "threads": 1,
-        }},
-    }}), encoding="utf-8")
-    source = tmp_path / "cleanup-source"
-    source.mkdir()
-    (source / PROJECT_FILE).write_text(PROJECT_TEXT + "profile: cleanup_fixture\n", encoding="utf-8")
-    set_id = executor.artifacts.capture(project_id, source)
-    job = claimed(execution, "RUN_CLEANUP", JobRequest())
-    with database.transaction() as connection:
-        sql_result = connection.exec_driver_sql(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
-        sql_result = connection.exec_driver_sql("UPDATE runtime_job SET input_set_id=%s,schema_name=%s WHERE job_id=%s",
-                       (set_id, schema, job.job_id))
-    job.input_set_id = set_id
-    job.schema_name = schema
-    job.parent_run_id = str(UUID(schema.removeprefix("run_")))
-    executor.settings = dataclasses.replace(executor.settings, command_timeout_seconds=30)
-    try:
-        result = await executor.execute(job)
-        assert result.output_set_id is None
-        with database.transaction() as connection:
-            sql_result = connection.exec_driver_sql("SELECT 1 FROM pg_namespace WHERE nspname=%s", (schema,))
-            assert sql_result.mappings().first() is not None
-    finally:
-        with database.transaction() as connection:
-            sql_result = connection.exec_driver_sql(
-                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema))
-            )

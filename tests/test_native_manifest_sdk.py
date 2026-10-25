@@ -11,7 +11,7 @@ from dbt_metricflow_service.delegates.clients.metric_flow_client import MetricFl
 from dbt_metricflow_service.execution.embedded import create_output, engine_environment
 from dbt_metricflow_service.platform.manifest_capture import ManifestCapture
 from dbt_metricflow_service.platform.models import PlatformQueryRequest
-from dbt_metricflow_service.runtime.executor import build_engine_environment
+from dbt_metricflow_service.runtime.dbt_executor import build_engine_environment
 from tests.resource_helpers import make_resource_project
 
 

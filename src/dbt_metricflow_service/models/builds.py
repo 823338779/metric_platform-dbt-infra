@@ -61,8 +61,6 @@ class BuildView(Contract):
     finished_at: datetime | None = Field(default=None, description="终态时间")
     cancel_requested: bool = Field(default=False, description="是否已请求取消")
     catalog_available: bool = Field(default=False, description="完整封存目录是否可读")
-    query_available: bool = Field(default=False, description="是否可受理新的查询")
-    query_unavailable_reason: str | None = Field(default=None, description="不可查询原因")
     error: ErrorView | None = Field(default=None, description="脱敏错误摘要")
     initial_deployment: DeploymentAttemptView | None = Field(default=None, description="受理时附带的部署意图")
 

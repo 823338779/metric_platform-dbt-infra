@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -15,7 +16,10 @@ from dbt_metricflow_service.storage.records import LeasedJob
 from .manifest_capture import ManifestCapture
 
 if TYPE_CHECKING:
-    from dbt_metricflow_service.runtime.executor import ExecutionResult, RuntimeExecutor
+    from dbt_metricflow_service.runtime.dbt_executor import ExecutionResult, RuntimeExecutor
+
+
+MISSING_MANIFEST = "successful dbt build did not return a manifest"
 
 
 def _normalize_artifact_target(project: Path) -> None:
@@ -29,23 +33,38 @@ def _normalize_artifact_target(project: Path) -> None:
 async def execute_build(
     executor: RuntimeExecutor, job: LeasedJob, project: Path, *, profiles: Path | None = None,
 ) -> ExecutionResult:
-    from ..execution.models import CommandSpec
-    from ..runtime.executor import ExecutionResult, _thread, build_engine_environment
+    from ..execution.dbt import dbt_execution
+    from ..execution.embedded import run_serialized
+    from ..runtime.execution_logs import ExecutionLogWriter
+    from ..runtime.dbt_executor import ExecutionResult, _thread, build_engine_environment
+    from ..storage.execution_logs import ExecutionLogStore
 
     settings = executor.settings
     profiles = profiles or settings.profiles_dir
     environment = build_engine_environment(
         project, profiles, cast(str, job.schema_name), cast(str, job.profile_binding_id),
     )
-    spec = CommandSpec(
-        (strings.DBT_EXECUTABLE, strings.DBT_BUILD_COMMAND), project, environment, True,
-        operation=lambda callbacks: DbtClient().build(
-            project, profiles, target=cast(str, job.profile_binding_id),
-            target_path=project / strings.TARGET_DIRECTORY, callbacks=callbacks,
-        ),
-    )
     capture = ManifestCapture(settings.max_artifact_file_bytes)
-    await executor._dbt(job, spec, strings.BUILDING, manifest_sink=capture)
+    writer = ExecutionLogWriter(partial(
+        ExecutionLogStore(executor.jobs.db).append, job, strings.BUILDING, strings.DBT_BUILD_COMMAND,
+    ))
+
+    def build() -> None:
+        with dbt_execution(job.project_id, environment, settings.max_output_bytes, writer.emit) as context:
+            result = DbtClient().build(
+                project, profiles, target=cast(str, job.profile_binding_id),
+                target_path=project / strings.TARGET_DIRECTORY, callbacks=[context.callback],
+            )
+            context.check(result)
+            if result.manifest is None:
+                raise ValueError(MISSING_MANIFEST)
+            capture(result.manifest)
+
+    try:
+        await run_serialized(build, lambda: executor._authorize(job, strings.BUILDING, external=True))
+    finally:
+        # 取消时串行执行器也会等待引擎退出，之后才关闭日志写入器。
+        await _thread(writer.close)
     await _thread(_normalize_artifact_target, project)
     output = await _thread(
         capture.persist, executor.artifacts, job.project_id, project,

@@ -107,7 +107,7 @@ def test_independent_deploy_retry_and_recreated_branch_require_new_intent(store,
     assert deploy.reconcile(key, renewed.generation).deployment_status == "DEPLOYED"
 
 
-def test_deploy_cannot_bypass_missing_execution_environment(store, tmp_path):
+def test_deploy_allows_historical_toolchain(store, tmp_path):
     from dbt_metricflow_service.application.deployments import DeploymentService
     from dbt_metricflow_service.models.deployments import DeploymentKey, DeploymentRequest
     from dbt_metricflow_service.storage.deployments import DeploymentStore
@@ -130,5 +130,5 @@ def test_deploy_cannot_bypass_missing_execution_environment(store, tmp_path):
     key = DeploymentKey(
         repository=build.repository, environment=str(build.execution.environment_id), branchName=build.branch_name
     )
-    assert deploy.reconcile(key, attempt.generation).reason == "EXECUTION_ENVIRONMENT_UNAVAILABLE"
-    assert deploy.current(key).active_build_id is None
+    assert deploy.reconcile(key, attempt.generation).deployment_status == "DEPLOYED"
+    assert str(deploy.current(key).active_build_id) == str(build.build_id)

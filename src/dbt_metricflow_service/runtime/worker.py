@@ -12,7 +12,7 @@ from sqlalchemy.exc import TimeoutError as PoolTimeout
 
 from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.platform.execution_profile import ExecutionConfigurationError
-from dbt_metricflow_service.runtime.executor import ERROR_COMMAND_FAILED, ExecutionError, RuntimeExecutor
+from dbt_metricflow_service.runtime.dbt_executor import ERROR_COMMAND_FAILED, ExecutionError, RuntimeExecutor
 from dbt_metricflow_service.storage.records import JobErrorDetail, LeasedJob, StoredBuild
 
 TARGET_RELEASE_DEFERRED: Final[str] = "target release deferred to persisted attempt evidence"
@@ -20,7 +20,7 @@ TARGET_RELEASE_DEFERRED: Final[str] = "target release deferred to persisted atte
 
 if TYPE_CHECKING:
     from dbt_metricflow_service.application.deployments import DeploymentService
-    from dbt_metricflow_service.runtime.executor import ExecutionResult
+    from dbt_metricflow_service.runtime.dbt_executor import ExecutionResult
     from dbt_metricflow_service.runtime.service import Runtime
 
 
@@ -73,7 +73,6 @@ class Worker:
                     self.runtime.jobs.claim, str(self.runtime.instance_id),
                     toolchain_version=self.runtime.toolchain,
                     config_versions=[self.runtime.settings.config_version],
-                    kinds=[strings.BUILD_RUN, strings.RUN_CLEANUP],
                 )
                 if job is not None:
                     await self._execute(job)

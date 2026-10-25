@@ -3,9 +3,9 @@
 import json
 from types import SimpleNamespace
 
+import dbt.flags
 import pytest
 from dbt.contracts.graph.manifest import Manifest
-from dbt.flags import get_flags
 
 
 def manifest_object(payload):
@@ -20,7 +20,7 @@ def manifest_object(payload):
 def test_capture_preserves_native_manifest_and_provides_compact_bytes(monkeypatch):
     from dbt_metricflow_service.platform.manifest_capture import ManifestCapture
 
-    monkeypatch.setattr(get_flags(), "SEND_ANONYMOUS_USAGE_STATS", False, raising=False)
+    monkeypatch.setattr(dbt.flags, "GLOBAL_FLAGS", SimpleNamespace(SEND_ANONYMOUS_USAGE_STATS=False))
     manifest = Manifest()
     manifest.metadata.project_name = "指标"
     payload = manifest.writable_manifest().to_dict(omit_none=False, context={"artifact": True})
@@ -40,7 +40,7 @@ def test_capture_omits_execution_paths_without_mutating_native_manifest(tmp_path
     from dbt_metricflow_service.platform.manifest_capture import ManifestCapture
     from tests.test_publication_catalog import package
 
-    monkeypatch.setattr(get_flags(), "SEND_ANONYMOUS_USAGE_STATS", False, raising=False)
+    monkeypatch.setattr(dbt.flags, "GLOBAL_FLAGS", SimpleNamespace(SEND_ANONYMOUS_USAGE_STATS=False))
     native = DbtClient(json.dumps(package()).encode())._manifest
     model = native.nodes["model.sample.orders"]
     model.compiled_path = str(tmp_path / "target/compiled/orders.sql")

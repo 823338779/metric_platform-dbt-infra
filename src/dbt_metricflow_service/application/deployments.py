@@ -45,7 +45,6 @@ class DeploymentService:
         # 只读 Git 函数是来源证明，不涉及调用方的分支管理/合并流程。
         self.store = store
         self.builds = builds.store
-        self.build_service = builds
         self.catalogs = catalogs
         self.head_reader = head_reader
         self.ancestry_reader = ancestry_reader
@@ -121,14 +120,6 @@ class DeploymentService:
             )
         if status != strings.SUCCEEDED:
             return attempt_view(attempt)
-        # 物理清理或历史工具链不可用不能通过独立部署入口绕过。
-        reason = self.build_service.query_unavailable_reason(build)
-        if reason:
-            return attempt_view(
-                cast(
-                    StoredDeploymentAttempt, self.store.settle(key, generation, strings.FAILED, reason)
-                )
-            )
         try:
             self.catalogs.read_build(build)
         except ServiceError as error:

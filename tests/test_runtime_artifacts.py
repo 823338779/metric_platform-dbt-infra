@@ -24,8 +24,8 @@ MANIFEST_BYTES = b'{ "semantic_models": [] }\n'
 SQL_PROJECT = "INSERT INTO runtime_project(project_id) VALUES (%s)"
 SQL_MUTATE = "UPDATE runtime_artifact_file SET content = %s WHERE set_id = %s"
 SQL_STATE = "UPDATE runtime_artifact_set SET state = 'STAGING' WHERE set_id = %s"
-SQL_JOB = """INSERT INTO runtime_job(job_id,kind,project_id,request_fingerprint,config_version,
-toolchain_version,deadline_at) VALUES (%s,'BUILD_RUN',%s,'test','1','1',clock_timestamp()+interval '1 hour')"""
+SQL_JOB = """INSERT INTO runtime_job(job_id,project_id,request_fingerprint,config_version,
+toolchain_version) VALUES (%s,%s,'test','1','1')"""
 SQL_ATTEMPT = """INSERT INTO runtime_attempt(attempt_id,job_id,attempt_no,worker_id,lease_token,lease_expires_at)
 VALUES (%s,%s,1,%s,%s,clock_timestamp()+interval '1 hour')"""
 

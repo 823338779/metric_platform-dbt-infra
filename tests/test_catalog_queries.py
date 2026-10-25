@@ -19,10 +19,10 @@ def ready_build(store, tmp_path, before_finish=None):
     build = app.submit_snapshot(request(branchName="feature/" + uuid4().hex), CALLER)
     jobs = JobStore(store.db)
     run = app.store.get(build.build_id).run_id
-    job = jobs.claim(str(uuid4()), toolchain_version=app.toolchain, kinds=["BUILD_RUN"])
+    job = jobs.claim(str(uuid4()), toolchain_version=app.toolchain)
     while job.job_id != run:
         jobs.fail(job.job_id, job.lease_token, "TEST_FINISHED")
-        job = jobs.claim(str(uuid4()), toolchain_version=app.toolchain, kinds=["BUILD_RUN"])
+        job = jobs.claim(str(uuid4()), toolchain_version=app.toolchain)
     directory = tmp_path / uuid4().hex
     target = directory / "target"
     target.mkdir(parents=True)
@@ -81,48 +81,10 @@ def test_cancel_before_finish_has_one_terminal_state(store, tmp_path):
     assert app.cancel_snapshot(build.build_id, CALLER)[1] == 200
 
 
-def test_catalog_survives_physical_removal(store, tmp_path):
-    from dbt_metricflow_service.application.catalog import CatalogService
-
-    app, build, jobs, artifacts = ready_build(store, tmp_path)
-    with store.db.transaction() as connection:
-        connection.exec_driver_sql(
-            "UPDATE runtime_job SET run_lifecycle='CLEANED' WHERE job_id=%s", (app.store.get(build.build_id).run_id,)
-        )
-    catalogs = CatalogService(app.store, artifacts)
-    assert "metric.revenue" in catalogs.list(build.build_id)["metrics"]
-    assert app.snapshot_view(build.build_id).catalog_available
-    assert not app.snapshot_view(build.build_id).query_available
 
 
-@pytest.mark.parametrize("lifecycle", ["CLEANING", "CLEANED"])
-def test_build_retry_preserves_physical_availability(store, tmp_path, lifecycle):
-
-    app, build, jobs, artifacts = ready_build(store, tmp_path)
-    row = app.store.get(build.build_id)
-    with store.db.transaction() as connection:
-        connection.exec_driver_sql(
-            "UPDATE runtime_job SET run_lifecycle=%s WHERE job_id=%s", (lifecycle, row.run_id),
-        )
-    retry = app.submit_snapshot(row.request_json, CALLER)
-    assert retry.build_id == build.build_id
-    assert retry.catalog_available
-    assert not retry.query_available
-    assert retry.query_unavailable_reason == "PHYSICAL_OBJECTS_REMOVED"
-    assert retry == app.snapshot_view(build.build_id)
 
 
-def test_cleanup_completion_preserves_catalog_and_source(store, tmp_path):
-    from dbt_metricflow_service.application.catalog import CatalogService
-
-    app, build, jobs, artifacts = ready_build(store, tmp_path)
-    run = app.store.get(build.build_id).run_id
-    jobs.reserve_cleanup(run)
-    cleanup = jobs.claim(str(uuid4()), toolchain_version=app.toolchain, kinds=["RUN_CLEANUP"])
-    assert jobs.finish(cleanup.job_id, cleanup.lease_token)
-    assert CatalogService(app.store, artifacts).list(build.build_id)["metrics"]
-    assert app.snapshot_view(build.build_id).catalog_available
-    assert app.snapshot_view(build.build_id).query_unavailable_reason == "PHYSICAL_OBJECTS_REMOVED"
 
 
 def test_option_scope_includes_build_and_metric_set(store, tmp_path):
@@ -139,8 +101,7 @@ def test_option_scope_includes_build_and_metric_set(store, tmp_path):
     assert first.dimensions
 
 
-def test_historical_environment_missing_is_503(store, tmp_path):
-    from dbt_metricflow_service.application.errors import ServiceError
+def test_historical_toolchain_does_not_block_query(store, tmp_path):
     from dbt_metricflow_service.application.queries import QueryService
     from dbt_metricflow_service.models.queries import AvailableDimensionsRequest
 
@@ -148,11 +109,11 @@ def test_historical_environment_missing_is_503(store, tmp_path):
     app.toolchain = "different"
     execute = inline_executor()
     query = QueryService(app, execute, execute.discover_dimensions)
-    with pytest.raises(ServiceError) as failure:
-        query.available_dimensions(
-            build.build_id, AvailableDimensionsRequest(metrics=["revenue"]), CALLER
-        )
-    assert failure.value.status == 503
+    result = query.available_dimensions(
+        build.build_id, AvailableDimensionsRequest(metrics=["revenue"]), CALLER,
+    )
+    assert result.dimensions
+
 
 
 def test_explain_returns_in_memory_without_result_store(store, tmp_path, monkeypatch):

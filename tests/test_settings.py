@@ -32,7 +32,6 @@ def test_settings_reads_paths_and_limits(monkeypatch, tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     monkeypatch.setenv("SERVICE_TEMP_ROOT", str(projects))
     monkeypatch.setenv("DBT_PROFILES_DIR", str(profiles))
-    monkeypatch.setenv("COMMAND_TIMEOUT_SECONDS", "45")
     monkeypatch.setenv("MAX_OUTPUT_BYTES", "4096")
     monkeypatch.setenv("JOB_ARTIFACTS_ROOT", str(artifacts))
 
@@ -40,7 +39,6 @@ def test_settings_reads_paths_and_limits(monkeypatch, tmp_path: Path) -> None:
 
     assert settings.temp_root == projects.resolve()
     assert settings.profiles_dir == profiles.resolve()
-    assert settings.command_timeout_seconds == 45
     assert settings.max_output_bytes == 4096
 
 
@@ -63,7 +61,7 @@ def test_settings_loads_file_relative_paths_and_server(monkeypatch, tmp_path: Pa
     config.write_text(
         "SERVICE_HOST: 127.0.0.1\nSERVICE_PORT: 8123\n"
         "DBT_PROFILES_DIR: ../profiles\n"
-        "SERVICE_TEMP_ROOT: ../scratch\nWORKER_CONCURRENCY: 4\nCOMMAND_TIMEOUT_SECONDS: 45\n"
+        "SERVICE_TEMP_ROOT: ../scratch\nWORKER_CONCURRENCY: 4\n"
         "SERVICE_DATABASE_URL: postgresql://localhost/example\n",
         encoding="utf-8",
     )
@@ -76,8 +74,20 @@ def test_settings_loads_file_relative_paths_and_server(monkeypatch, tmp_path: Pa
     assert settings.profiles_dir == tmp_path / "profiles"
     assert settings.temp_root == tmp_path / "scratch"
     assert settings.worker_concurrency == 4
-    assert settings.command_timeout_seconds == 45
     assert settings.database_url == "postgresql://localhost/example"
+
+
+def test_removed_command_timeout_environment_does_not_affect_startup(monkeypatch):
+    monkeypatch.setenv("COMMAND_TIMEOUT_SECONDS", "unused")
+    settings = Settings.from_environment()
+    assert settings.max_output_bytes > 0
+
+
+def test_removed_command_timeout_configuration_is_rejected(tmp_path):
+    config = tmp_path / "service.yaml"
+    config.write_text("COMMAND_TIMEOUT_SECONDS: 45\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="服务配置结构或配置值无效"):
+        Settings.from_file(config)
 
 
 # 部署环境应覆盖文件；环境变量中的相对路径延续原有工作目录语义。

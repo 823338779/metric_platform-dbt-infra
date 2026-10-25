@@ -17,6 +17,7 @@ from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.builds import BuildStore
 from dbt_metricflow_service.storage.execution_logs import ExecutionLogStore
 from dbt_metricflow_service.storage.jobs import JobStore
+from tests.dbt_execution_helpers import invoke_job_for_test
 from tests.schema_helpers import isolated_database
 from tests.test_build_acceptance import CALLER, TOOLCHAIN, request
 
@@ -27,7 +28,7 @@ def context(tmp_path):
 
     with isolated_database() as db:
         db.initialize()
-        service = BuildService(BuildStore(db), TOOLCHAIN, 600)
+        service = BuildService(BuildStore(db), TOOLCHAIN)
         build = service.submit_snapshot(request(), CALLER)
         job = JobStore(db).claim(str(uuid4()), toolchain_version=TOOLCHAIN)
 
@@ -37,7 +38,7 @@ def context(tmp_path):
         app = FastAPI()
         register_exception_handlers(app)
         app.include_router(router(service, guard, Settings(
-            temp_root=tmp_path, profiles_dir=tmp_path, command_timeout_seconds=30, max_output_bytes=1024,
+            temp_root=tmp_path, profiles_dir=tmp_path, max_output_bytes=1024,
         )))
         with TestClient(app) as client:
             yield client, service, db, build, job
@@ -182,18 +183,18 @@ def test_api_rejects_invalid_position_inside_scoped_cursor(context, position):
 async def test_frontend_api_reads_real_dbt_parse_events(context, tmp_path):
     from types import SimpleNamespace
 
-    from dbt_metricflow_service.execution.models import CommandSpec
-    from dbt_metricflow_service.runtime.executor import RuntimeExecutor, build_engine_environment
+    from dbt_metricflow_service.runtime.dbt_executor import RuntimeExecutor, build_engine_environment
+    from tests.dbt_execution_helpers import EngineCall
     from tests.resource_helpers import make_resource_project
 
     client, _, db, build, job = context
     project, profiles, _ = make_resource_project(tmp_path)
-    executor = RuntimeExecutor(SimpleNamespace(command_timeout_seconds=60, max_output_bytes=32), JobStore(db), None)
-    spec = CommandSpec(
+    executor = RuntimeExecutor(SimpleNamespace(max_output_bytes=32), JobStore(db), None)
+    spec = EngineCall(
         ("dbt", "parse", "--project-dir", str(project), "--profiles-dir", str(profiles)), project,
         build_engine_environment(project, profiles, "main", "test"), False,
     )
-    await executor._dbt(job, spec, "PARSING")
+    await invoke_job_for_test(executor, job, spec, "PARSING")
     response = client.get(f"/builds/{build.build_id}/execution-logs", params={"limit": 200})
     assert response.status_code == 200
     rows = response.json()["items"]

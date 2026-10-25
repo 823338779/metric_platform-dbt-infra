@@ -126,7 +126,7 @@ def main(argv: list[str] | None = None) -> None:
                 from dbt_metricflow_service.storage.builds import BuildStore
 
                 service = BuildService(BuildStore(db), settings.toolchain_version or current_toolchain(),
-                                       settings.command_timeout_seconds, settings.config_version)
+                                       settings.config_version)
                 request = SnapshotBuildRequest.model_validate(_json(args.file, settings.max_artifact_file_bytes))
                 validate_execution_target(request.execution, settings)
                 result = service.submit_snapshot(request, strings.ADMIN_IDENTITY)

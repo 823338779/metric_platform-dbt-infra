@@ -50,7 +50,6 @@ class ServiceConfiguration(ConfigurationModel):
     SERVICE_HOST: ConfigurationScalar = None
     SERVICE_PORT: ConfigurationScalar = None
     DBT_PROFILES_DIR: ConfigurationScalar = None
-    COMMAND_TIMEOUT_SECONDS: ConfigurationScalar = None
     MAX_OUTPUT_BYTES: ConfigurationScalar = None
     SERVICE_DATABASE_URL: ConfigurationScalar = None
     SERVICE_TEMP_ROOT: ConfigurationScalar = None

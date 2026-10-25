@@ -333,7 +333,6 @@ COMMENT ON COLUMN runtime_attempt.finished_at IS '执行终结或被判定失联
 
 CREATE TABLE runtime_job (
     job_id uuid NOT NULL,
-    kind text NOT NULL,
     project_id text NOT NULL,
     parent_run_id uuid,
     idempotency_scope text,
@@ -348,11 +347,9 @@ CREATE TABLE runtime_job (
     profile_binding_id text,
     status text DEFAULT 'QUEUED'::text NOT NULL,
     phase text DEFAULT 'PREPARING'::text NOT NULL,
-    run_lifecycle text,
     attempt_no integer DEFAULT 0 NOT NULL,
     current_attempt_id uuid,
     available_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    deadline_at timestamp with time zone NOT NULL,
     max_attempts integer DEFAULT 3 NOT NULL,
     retry_policy text DEFAULT 'PREPARATION_ONLY'::text NOT NULL,
     error_code text,
@@ -361,20 +358,17 @@ CREATE TABLE runtime_job (
     started_at timestamp with time zone,
     finished_at timestamp with time zone,
     CONSTRAINT runtime_job_check CHECK (((idempotency_key IS NULL) = (idempotency_scope IS NULL))),
-    CONSTRAINT runtime_job_kind_check CHECK ((kind = ANY (ARRAY['BUILD_RUN'::text, 'RUN_CLEANUP'::text]))),
     CONSTRAINT runtime_job_max_attempts_check CHECK (((max_attempts >= 1) AND (max_attempts <= 3))),
     CONSTRAINT runtime_job_retry_policy_check CHECK ((retry_policy = ANY (ARRAY['PREPARATION_ONLY'::text, 'NEVER'::text]))),
-    CONSTRAINT runtime_job_run_lifecycle_check CHECK ((run_lifecycle = ANY (ARRAY['ACTIVE'::text, 'CLEANING'::text, 'CLEANED'::text]))),
     CONSTRAINT runtime_job_status_check CHECK ((status = ANY (ARRAY['QUEUED'::text, 'RUNNING'::text, 'SUCCEEDED'::text, 'FAILED'::text])))
 );
 
-COMMENT ON COLUMN runtime_job.job_id IS '内部构建或清理任务标识';
+COMMENT ON COLUMN runtime_job.job_id IS '内部任务标识';
 
-COMMENT ON COLUMN runtime_job.kind IS '构建或物理清理任务';
 
 COMMENT ON COLUMN runtime_job.project_id IS '所属逻辑项目';
 
-COMMENT ON COLUMN runtime_job.parent_run_id IS '清理绑定的固定构建 run';
+COMMENT ON COLUMN runtime_job.parent_run_id IS '历史父任务引用';
 
 COMMENT ON COLUMN runtime_job.idempotency_scope IS '幂等键的接口命名空间';
 
@@ -400,7 +394,6 @@ COMMENT ON COLUMN runtime_job.status IS '持久队列及公开状态的内部生
 
 COMMENT ON COLUMN runtime_job.phase IS '构建准备、执行与验证阶段';
 
-COMMENT ON COLUMN runtime_job.run_lifecycle IS '构建 run 的活动及清理生命周期';
 
 COMMENT ON COLUMN runtime_job.attempt_no IS '已经领取执行的次数';
 
@@ -408,7 +401,6 @@ COMMENT ON COLUMN runtime_job.current_attempt_id IS '唯一当前执行 attempt'
 
 COMMENT ON COLUMN runtime_job.available_at IS '允许领取或重试的最早时间';
 
-COMMENT ON COLUMN runtime_job.deadline_at IS '所有尝试共享的最终截止时间';
 
 COMMENT ON COLUMN runtime_job.max_attempts IS '包含首次执行的受控最大尝试数';
 
@@ -493,10 +485,10 @@ CREATE UNIQUE INDEX runtime_job_idempotency ON runtime_job USING btree (idempote
 
 CREATE INDEX runtime_job_parent ON runtime_job USING btree (parent_run_id, status);
 
-CREATE INDEX runtime_job_queue ON runtime_job USING btree (kind, available_at, created_at) WHERE (status = 'QUEUED'::text);
+CREATE INDEX runtime_job_queue ON runtime_job USING btree (available_at, created_at) WHERE (status = 'QUEUED'::text);
 
 
-CREATE TRIGGER engine_job_change AFTER UPDATE OF status, phase, output_set_id, error_code, run_lifecycle ON runtime_job FOR EACH ROW EXECUTE FUNCTION engine_sync_job();
+CREATE TRIGGER engine_job_change AFTER UPDATE OF status, phase, output_set_id, error_code ON runtime_job FOR EACH ROW EXECUTE FUNCTION engine_sync_job();
 
 CREATE TRIGGER runtime_artifact_file_guard BEFORE INSERT OR DELETE OR UPDATE ON runtime_artifact_file FOR EACH ROW EXECUTE FUNCTION runtime_guard_artifact_file();
 

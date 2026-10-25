@@ -110,7 +110,7 @@ def test_query_routes_reject_build_id_in_body(path):
     assert any(error["loc"] == ["body", "buildId"] for error in response.json()["detail"])
 
 
-@pytest.mark.parametrize("code,status", [("INVALID_QUERY", 422), ("COMMAND_FAILED", 503), ("COMMAND_TIMEOUT", 504)])
+@pytest.mark.parametrize("code,status", [("INVALID_QUERY", 422), ("COMMAND_FAILED", 503)])
 def test_failed_query_returns_http_error_in_original_request(store, tmp_path, code, status):
     service, parent, build = query_service(store, tmp_path)
 

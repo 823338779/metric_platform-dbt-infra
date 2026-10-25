@@ -32,7 +32,7 @@ def live_service():
         count = sum(not isinstance(item, tuple) for item in executions)
         return DataQueryResult(columns=[{"name": "orders", "type": "int"}], rows=[[count]], truncated=False)
 
-    builds = SimpleNamespace(load=lambda _: build, query_unavailable_reason=lambda _: None, timeout=30)
+    builds = SimpleNamespace(load=lambda _: build)
     return QueryService(builds, execute, discover_dimensions), build_id, executions
 
 

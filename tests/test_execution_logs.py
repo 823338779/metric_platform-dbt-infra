@@ -10,8 +10,8 @@ from dbt.cli.main import dbtRunner
 from dbt.events.types import JinjaLogDebug, JinjaLogInfo
 from dbt_common.events.base_types import msg_from_base_event
 
-from dbt_metricflow_service.execution.dbt import run_dbt
-from dbt_metricflow_service.execution.models import CommandSpec, JobStatus
+from dbt_metricflow_service.execution.models import JobStatus
+from tests.dbt_execution_helpers import EngineCall, invoke_for_test
 
 
 async def authorize():
@@ -35,8 +35,8 @@ async def test_structured_events_are_redacted_without_tail_truncation(tmp_path, 
         return SimpleNamespace(success=True, exception=None)
 
     monkeypatch.setattr(dbtRunner, "invoke", invoke)
-    record = await run_dbt(
-        "project", CommandSpec(("dbt", "build"), tmp_path, {}, True), 5, 32, authorize,
+    record = await invoke_for_test(
+        "project", EngineCall(("dbt", "build"), tmp_path, {}, True), 32, authorize,
         log_sink=captured.append,
     )
     assert record.status == JobStatus.SUCCEEDED
@@ -61,8 +61,8 @@ async def test_structured_events_are_redacted_without_tail_truncation(tmp_path, 
 async def test_returned_base_exception_cannot_escape_worker(tmp_path, monkeypatch, exception):
     monkeypatch.setattr(dbtRunner, "invoke", lambda *_: SimpleNamespace(success=False, exception=exception))
     captured = []
-    record = await run_dbt("project", CommandSpec(("dbt", "build"), tmp_path, {}, True),
-                           5, 1024, authorize, log_sink=captured.append)
+    record = await invoke_for_test("project", EngineCall(("dbt", "build"), tmp_path, {}, True),
+                           1024, authorize, log_sink=captured.append)
     assert record.status == JobStatus.FAILED
     assert record.exit_code == 2
     assert record.stderr == type(exception).__name__
@@ -80,8 +80,8 @@ async def test_log_sink_failure_does_not_change_dbt_result(tmp_path, monkeypatch
         raise RuntimeError("private database connection details")
 
     monkeypatch.setattr(dbtRunner, "invoke", invoke)
-    record = await run_dbt(
-        "project", CommandSpec(("dbt", "parse"), tmp_path, {}, False), 5, 1024, authorize,
+    record = await invoke_for_test(
+        "project", EngineCall(("dbt", "parse"), tmp_path, {}, False), 1024, authorize,
         log_sink=unavailable,
     )
     assert record.status == (JobStatus.SUCCEEDED if success else JobStatus.FAILED)
@@ -101,8 +101,8 @@ async def test_sdk_exception_without_events_is_logged_and_redacted(tmp_path, mon
             raise error
         return SimpleNamespace(success=False, exception=error)
     monkeypatch.setattr(dbtRunner, "invoke", invoke)
-    record = await run_dbt("project", CommandSpec(("dbt", "build"), tmp_path, {}, True),
-                           5, 1024, authorize, log_sink=captured.append)
+    record = await invoke_for_test("project", EngineCall(("dbt", "build"), tmp_path, {}, True),
+                           1024, authorize, log_sink=captured.append)
     assert record.status == JobStatus.FAILED
     assert captured and captured[-1].level == "error"
     assert "invalid model: ***" in captured[-1].message
@@ -123,8 +123,8 @@ async def test_execution_paths_are_removed_before_log_sink_and_diagnostics(tmp_p
     monkeypatch.setattr(dbtRunner, "invoke", invoke)
     environment = {"DBT_PROJECT_DIR": str(project), "DBT_PROFILES_DIR": str(profiles),
                    "DBT_TARGET_PATH": str(project / "target")}
-    record = await run_dbt("project", CommandSpec(("dbt", "build"), project, environment, True),
-                           5, 4096, authorize, log_sink=captured.append)
+    record = await invoke_for_test("project", EngineCall(("dbt", "build"), project, environment, True),
+                           4096, authorize, log_sink=captured.append)
     assert record.status == JobStatus.FAILED
     for text in [record.stdout, *(entry.message for entry in captured)]:
         assert str(tmp_path) not in text

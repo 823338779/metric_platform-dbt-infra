@@ -44,11 +44,10 @@ class MetricFlowResult(Generic[ResultT]):
 
 
 async def run_metricflow(
-    project: str, request: MetricFlowRequest[ResultT], timeout_seconds: float, max_output_bytes: int,
+    project: str, request: MetricFlowRequest[ResultT], max_output_bytes: int,
     before_start: Callable[[], Awaitable[None]],
 ) -> MetricFlowResult[ResultT]:
     """在共享串行保护下执行 MetricFlow，等待引擎返回。"""
-    # timeout_seconds 仅保留调用兼容。
     return await run_serialized(
         lambda: invoke_metricflow(project, request, max_output_bytes), before_start,
     )

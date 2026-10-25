@@ -35,7 +35,7 @@ def runtime_pair(tmp_path):
     toolchain = uuid4().hex
     runtimes = [Runtime(Settings(
          profiles_dir=tmp_path / "profiles",
-        command_timeout_seconds=30, max_output_bytes=1024,
+        max_output_bytes=1024,
         database_url=dsn, temp_root=tmp_path / str(index), toolchain_version=toolchain,
     )) for index in range(2)]
     project = "api_" + uuid4().hex

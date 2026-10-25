@@ -24,7 +24,6 @@ from .errors import ServiceError
 from .query_plan import compile_query
 
 QUERY_RESPONSE_LIMIT_MESSAGE: Final = "query response exceeds the size limit"
-UNAVAILABLE_BUILD_MESSAGE: Final = "build is not available for new engine tasks"
 
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
@@ -39,19 +38,10 @@ class QueryService:
         self.execute = execute
         self.discover_dimensions = discover_dimensions
 
-    def _available(self, build: StoredBuild) -> None:
-        code = self.builds.query_unavailable_reason(build)
-        if code:
-            status = (
-                410 if code == strings.PHYSICAL_OBJECTS_REMOVED else 409 if code == strings.BUILD_NOT_SUCCEEDED else 503
-            )
-            raise ServiceError(code, UNAVAILABLE_BUILD_MESSAGE, status, build_id=build.build_id)
-
     def available_dimensions(
         self, build_id: UUID | str, request: AvailableDimensionsRequest, caller: str,
     ) -> AvailableDimensionsView:
         build = self.builds.load(build_id)
-        self._available(build)
         selected = sorted(set(request.metrics))
         result, _ = self._available_dimensions(build, selected)
         return AvailableDimensionsView(
@@ -66,7 +56,6 @@ class QueryService:
 
     def submit(self, build_id: UUID | str, request: QueryRequest, caller: str) -> QueryResult:
         build = self.builds.load(build_id)
-        self._available(build)
         timezone = build.config_snapshot.business_timezone
         request = normalize_query_time(request, timezone)
         body = canonical_query(request)

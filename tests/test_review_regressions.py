@@ -100,41 +100,8 @@ def test_build_acceptance_and_observation_have_consistent_lock_order(store, monk
         event.remove(store.db.engine, "after_cursor_execute", after_statement)
 
 
-def test_realtime_query_lock_blocks_cleanup_and_releases_without_records(store, tmp_path):
-    from dbt_metricflow_service.storage.jobs import CleanupBlocked
-    from tests.test_catalog_queries import ready_build
-
-    app, build, jobs, artifacts = ready_build(store, tmp_path)
-    run = app.store.get(build.build_id).run_id
-    with jobs.query_run(run) as parent:
-        assert parent.job_id == run
-        with pytest.raises(CleanupBlocked):
-            jobs.reserve_cleanup(run)
-        # 同一构建可有多个实时读取者，不需要插入子任务。
-        with jobs.query_run(run):
-            with store.db.transaction() as connection:
-                assert (
-                    connection.exec_driver_sql(
-                        "SELECT count(*) FROM runtime_job WHERE parent_run_id=%s",
-                        (run,),
-                    ).scalar_one()
-                    == 0
-                )
-    jobs.reserve_cleanup(run)
-    with pytest.raises(CleanupBlocked):
-        with jobs.query_run(run):
-            pytest.fail("cleaning build reached execution")
 
 
-def test_realtime_query_lock_releases_after_failure(store, tmp_path):
-    from tests.test_catalog_queries import ready_build
-
-    app, build, jobs, artifacts = ready_build(store, tmp_path)
-    run = app.store.get(build.build_id).run_id
-    with pytest.raises(RuntimeError):
-        with jobs.query_run(run):
-            raise RuntimeError("engine failed")
-    assert jobs.reserve_cleanup(run).kind == "RUN_CLEANUP"
 
 
 def test_failed_new_intent_fences_inflight_old_switch(store, tmp_path, monkeypatch):

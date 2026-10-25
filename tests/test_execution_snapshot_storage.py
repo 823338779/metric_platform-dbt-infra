@@ -28,7 +28,7 @@ def request(**changes):
 
 
 def accept(store, body):
-    return BuildStore(store.db).accept_snapshot(body, "environment-tests", "test-toolchain", 600, "runtime-v1")
+    return BuildStore(store.db).accept_snapshot(body, "environment-tests", "test-toolchain", "runtime-v1")
 
 
 def test_snapshot_acceptance_does_not_read_execution_binding(store):

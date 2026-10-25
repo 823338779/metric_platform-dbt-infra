@@ -22,7 +22,6 @@ def client(store, tmp_path):
     app = create_app(
         Settings(
             profiles_dir=tmp_path,
-            command_timeout_seconds=30,
             max_output_bytes=1024,
             database_url=os.environ["SERVICE_TEST_DATABASE_URL"],
             service_token=TOKEN,

@@ -14,7 +14,6 @@ from sqlalchemy import select
 from dbt_metricflow_service.application.builds import BuildService
 from dbt_metricflow_service.application.catalog import CatalogService
 from dbt_metricflow_service.application.deployments import DeploymentService
-from dbt_metricflow_service.application.errors import ServiceError
 from dbt_metricflow_service.application.queries import QueryService
 from dbt_metricflow_service.models.configuration import ExecutionCredential, ExecutionInstance
 from dbt_metricflow_service.models.deployments import DeploymentKey
@@ -23,7 +22,7 @@ from dbt_metricflow_service.models.execution import SnapshotBuildRequest as Buil
 from dbt_metricflow_service.models.native import NativeProject
 from dbt_metricflow_service.models.queries import AvailableDimensionsRequest, QueryRequest
 from dbt_metricflow_service.platform.source import is_ancestor, remote_head
-from dbt_metricflow_service.runtime.executor import ExecutionError, RuntimeExecutor
+from dbt_metricflow_service.runtime.dbt_executor import ExecutionError, RuntimeExecutor
 from dbt_metricflow_service.runtime.service import Runtime
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.builds import BuildStore
@@ -80,7 +79,6 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
     )
     settings = Settings(
         profiles,
-        180,
         1048576,
         database_url=os.environ["SERVICE_TEST_DATABASE_URL"],
         temp_root=tmp_path / "runtime",
@@ -95,7 +93,7 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
     runtime = Runtime(settings)
     runtime.db.initialize()
     store = BuildStore(runtime.db)
-    builds = BuildService(store, runtime.toolchain, 180)
+    builds = BuildService(store, runtime.toolchain)
     catalogs = CatalogService(store, runtime.artifacts)
     queries = QueryService(builds, runtime.execute_query, runtime.available_dimensions)
     deployments = DeploymentService(
@@ -107,8 +105,8 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
     )
     target = DeploymentKey(repository=repository_url, branchName="main", environment=str(snapshot.environment_id))
 
-    async def execute(kind):
-        job = runtime.jobs.claim(str(uuid4()), toolchain_version=runtime.toolchain, kinds=[kind])
+    async def execute():
+        job = runtime.jobs.claim(str(uuid4()), toolchain_version=runtime.toolchain)
         assert job
         result = await RuntimeExecutor(settings, runtime.jobs, runtime.artifacts).execute(job)
         assert runtime.jobs.finish(job.job_id, job.lease_token, output_set_id=result.output_set_id)
@@ -126,7 +124,7 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
             ),
             "integration",
         )
-        await execute("BUILD_RUN")
+        await execute()
         assert builds.snapshot_view(view.build_id).build_status == "SUCCEEDED"
         assert deployments.reconcile(target, view.initial_deployment.generation).deployment_status == "DEPLOYED"
         return view
@@ -226,7 +224,7 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
             ),
             "integration",
         )
-        job = runtime.jobs.claim(str(uuid4()), toolchain_version=runtime.toolchain, kinds=["BUILD_RUN"])
+        job = runtime.jobs.claim(str(uuid4()), toolchain_version=runtime.toolchain)
         with pytest.raises((ValueError, ExecutionError)):
             await RuntimeExecutor(settings, runtime.jobs, runtime.artifacts).execute(job)
         runtime.jobs.fail(job.job_id, job.lease_token, "INVALID_DEFINITION")
@@ -235,11 +233,9 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
         assert Decimal(
             str((await query(first.build_id, mode="QUERY", metrics=[metric])).rows[0][0])
         ) == Decimal("32.00")
-        # 清理结束旧构建查询生命周期，保留共享物理表、历史目录和源码。
+        # 后续构建保留共享物理表、历史目录和源码，历史构建仍可查询。
         first_run = store.get(first.build_id).run_id
         first_schema = runtime.jobs.get(first_run).schema_name
-        runtime.jobs.reserve_cleanup(first_run)
-        await execute("RUN_CLEANUP")
         with runtime.db.transaction() as connection:
             assert (
                 connection.exec_driver_sql(
@@ -251,8 +247,7 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
         assert catalogs.list(first.build_id)["metrics"]
         assert catalogs.resource(first.build_id, next(key for key, item in resources["nodes"].items()
             if item["name"] == dataset), "source").content
-        with pytest.raises(ServiceError):
-            await query(first.build_id, mode="QUERY", metrics=[metric])
+        assert (await query(first.build_id, mode="QUERY", metrics=[metric])).rows
         assert (await query(second.build_id, mode="QUERY", metrics=[metric])).rows
     finally:
         with runtime.db.transaction() as connection:

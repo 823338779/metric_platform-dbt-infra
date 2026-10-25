@@ -1,22 +1,14 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
-from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from pathlib import Path
-from typing import TYPE_CHECKING, Final, Mapping
+from typing import Final
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from dbt_metricflow_service import constants as strings
-
-if TYPE_CHECKING:
-    from dbt_common.events.base_types import EventMsg
-
-    from dbt_metricflow_service.delegates.clients.dbt_client import DbtResult
 
 JOB_ID_DESCRIPTION: Final[str] = "服务进程内唯一的任务标识。"
 JOB_PROJECT_DESCRIPTION: Final[str] = "任务所属的安全项目标识。"
@@ -24,7 +16,7 @@ JOB_STATUS_DESCRIPTION: Final[str] = "任务当前生命周期状态。"
 SUBMITTED_AT_DESCRIPTION: Final[str] = "任务进入内存队列的 UTC 时间。"
 STARTED_AT_DESCRIPTION: Final[str] = "开始执行的 UTC 时间。"
 FINISHED_AT_DESCRIPTION: Final[str] = "执行及清理结束的 UTC 时间。"
-EXIT_CODE_DESCRIPTION: Final[str] = "命令退出码或 SDK 结果映射码；结束前或超时时为空。"
+EXIT_CODE_DESCRIPTION: Final[str] = "命令退出码或 SDK 结果映射码；尚未返回或操作不提供退出码时为空。"
 STDOUT_DESCRIPTION: Final[str] = "经过截断和凭据遮盖的标准输出尾部。"
 STDERR_DESCRIPTION: Final[str] = "经过截断和凭据遮盖的标准错误尾部。"
 OUTPUT_TRUNCATED_DESCRIPTION: Final[str] = "任一输出流是否超过保留上限。"
@@ -40,7 +32,6 @@ class JobStatus(StrEnum):
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
-    TIMED_OUT = "timed_out"
 
 
 class JobRecord(BaseModel):
@@ -66,17 +57,3 @@ class JobRecord(BaseModel):
             started_at=self.started_at, finished_at=self.finished_at, exit_code=exit_code,
             stdout=self.stdout, stderr=stderr, output_truncated=self.output_truncated,
         )
-
-
-@dataclass(frozen=True, slots=True)
-class CommandSpec:
-    """一次进程内 dbt 调用所需的参数、目录和隔离环境。"""
-
-    # 诊断命令身份；无绑定操作时，其余参数交给 DbtClient.invoke。
-    argv: tuple[str, ...]
-    cwd: Path
-    environment: Mapping[str, str]
-    # 是否需要持久化外部写入标记及保守的取消保护。
-    write_operation: bool
-    # 已组装上下文的 client 操作；为空时兼容原生命令调用。
-    operation: Callable[[list[Callable[[EventMsg], None]]], DbtResult] | None = field(default=None, repr=False)

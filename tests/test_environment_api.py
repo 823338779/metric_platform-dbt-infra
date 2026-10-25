@@ -17,7 +17,7 @@ from tests.test_publication_storage import store as store
 @pytest.fixture
 def client(store, tmp_path):
     config = infrastructure()
-    app = create_app(Settings(profiles_dir=tmp_path, command_timeout_seconds=30, max_output_bytes=1024,
+    app = create_app(Settings(profiles_dir=tmp_path, max_output_bytes=1024,
         database_url=os.environ["SERVICE_TEST_DATABASE_URL"], service_token=TOKEN, temp_root=tmp_path,
         toolchain_version="environment-api", execution_instances=config.execution_instances,
         execution_credentials=config.execution_credentials))

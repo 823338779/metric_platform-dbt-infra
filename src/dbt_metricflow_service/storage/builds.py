@@ -30,15 +30,14 @@ MISSING_ENVIRONMENT_MESSAGE: Final = "environmentId is required"
 TERMINAL_BUILD_MESSAGE: Final = "terminal build cannot be cancelled"
 
 JSON_MODE = strings.JSON_MODE
-BUILD_KIND = strings.BUILD_RUN
 PROJECT_PREFIX = strings.ENGINE_IDEMPOTENCY_PREFIX
 QUEUED = strings.QUEUED
 FAILED = strings.FAILED
 CANCELLED = strings.CANCELLED
 JSONB_CONCAT = "||"
 
-# 共享读取表达式保留关联任务的生命周期。
-BUILD_VIEW = select(Build, RuntimeJob.run_lifecycle).join(RuntimeJob, RuntimeJob.job_id == Build.run_id)
+# 构建快照直接读取持久构建记录。
+BUILD_VIEW = select(Build)
 
 
 def digest(value: JsonValue) -> str:
@@ -54,15 +53,13 @@ class BuildStore:
 
     def get(self, build_id: UUID | str) -> StoredBuild | None:
         with self.db.session() as session:
-            row = session.execute(BUILD_VIEW.where(Build.build_id == str(build_id))).one_or_none()
+            row = session.scalar(BUILD_VIEW.where(Build.build_id == str(build_id)))
             if row is None:
                 return None
-            result = entity_record(row[0], StoredBuild)
-            result.run_lifecycle = row[1]
-            return result
+            return entity_record(row, StoredBuild)
 
     def accept_snapshot(
-        self, request: SnapshotBuildRequest, caller: str, toolchain: str, timeout: int, runtime_config_version: str,
+        self, request: SnapshotBuildRequest, caller: str, toolchain: str, runtime_config_version: str,
     ) -> StoredBuild:
         from .deployments import DeploymentStore
 
@@ -119,7 +116,6 @@ class BuildStore:
             )
             job = self.jobs.reserve_in_transaction(
                 session,
-                BUILD_KIND,
                 project,
                 payload,
                 job_id=str(run_id),
@@ -127,7 +123,6 @@ class BuildStore:
                 toolchain_version=toolchain,
                 profile_binding_id=profile_target,
                 schema_name=schema_name,
-                timeout_seconds=timeout,
             )
             session.get(RuntimeJob, job.job_id).physical_target_key = target_key
             build = Build(
@@ -191,10 +186,8 @@ class BuildStore:
         with self.db.session() as session:
             statement = statement.order_by(Build.created_at.desc(), Build.build_id.desc()).limit(limit + 1)
             rows = []
-            for build, lifecycle in session.execute(statement):
-                record = entity_record(build, StoredBuild)
-                record.run_lifecycle = lifecycle
-                rows.append(record)
+            for build in session.scalars(statement):
+                rows.append(entity_record(build, StoredBuild))
         selected = rows[:limit]
         next_cursor = (
             write_cursor(

@@ -27,6 +27,9 @@ def test_wheel_contains_schema_resource(wheel_path):
         names = set(archive.namelist())
     prefix = "dbt_metricflow_service/storage/"
     assert prefix + "schema.sql" in names
+    assert prefix + "remove_job_deadline.sql" in names
+    assert prefix + "remove_run_cleanup.sql" in names
+    assert prefix + "remove_job_kind.sql" in names
     assert not any(name.startswith((prefix + "alembic/", prefix + "migrations/")) for name in names)
     for removed in ("legacy_schema.py", "legacy_schema.json", "migration.py", "publication_import.py",
                     "history_models.py", "validation_audit.py"):

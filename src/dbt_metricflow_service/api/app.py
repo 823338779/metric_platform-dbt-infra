@@ -51,7 +51,7 @@ def create_app(settings: Settings) -> FastAPI:
     if not settings.database_url:
         raise ValueError(POSTGRES_DATABASE_URL_REQUIRED)
     runtime = Runtime(settings)
-    build_service = BuildService(BuildStore(runtime.db), runtime.toolchain, settings.command_timeout_seconds,
+    build_service = BuildService(BuildStore(runtime.db), runtime.toolchain,
                                  getattr(settings, strings.CONFIG_VERSION_FIELD, None))
     catalog_service = CatalogService(build_service.store, runtime.artifacts)
     deployment_service = DeploymentService(DeploymentStore(runtime.db),

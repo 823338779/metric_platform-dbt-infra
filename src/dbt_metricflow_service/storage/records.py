@@ -25,7 +25,7 @@ class EmptyConfig(StoredRecord):
 
 
 class JobRequest(Contract):
-    """持久任务请求；清理任务和底层队列任务允许空请求。"""
+    """持久构建任务请求；底层队列测试允许空请求。"""
 
     repository: str | None = None
     branch_name: str | None = None
@@ -158,7 +158,6 @@ class StoredBuild(StoredRecord):
     created_at: datetime  # 受理时间。
     updated_at: datetime  # 最近更新时间。
     finished_at: datetime | None  # 终态时间。
-    run_lifecycle: str | None = None  # 关联查询附加的物理执行生命周期。
 
 
 class StoredDeploymentTarget(StoredRecord):
@@ -204,16 +203,14 @@ class StoredJob(StoredRecord):
     idempotency_key: str | None
     attempt_no: int
     available_at: datetime
-    deadline_at: datetime
     max_attempts: int
     retry_policy: str
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
     job_id: str  # 内部任务身份。
-    kind: str  # 构建或清理类型。
     project_id: str  # 内部执行容器身份。
-    parent_run_id: str | None  # 清理引用的构建任务。
+    parent_run_id: str | None  # 历史父任务引用。
     request_json: JobRequest  # 固定执行请求。
     request_fingerprint: str  # 幂等请求摘要。
     status: str  # 执行状态。
@@ -224,7 +221,6 @@ class StoredJob(StoredRecord):
     toolchain_version: str  # 固定工具链版本。
     profile_binding_id: str | None  # 数据仓库配置引用。
     schema_name: str | None  # 受控物理 schema。
-    run_lifecycle: str | None  # 构建物理对象的生命周期。
     current_attempt_id: str | None  # 当前执行尝试身份。
     error_code: str | None  # 稳定错误码。
     error_detail: JobErrorDetail | None  # 脱敏错误元数据。

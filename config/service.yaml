@@ -25,8 +25,7 @@ EXECUTION_CREDENTIALS:
 # 多副本必须使用各自独立目录。
 SERVICE_TEMP_ROOT: "../../tmp/dbt"
 
-# 单个 CLI 子进程超时（秒）与每个 stdout/stderr 保留的最大字节数。
-COMMAND_TIMEOUT_SECONDS: 1800
+# 每个 stdout/stderr 保留的最大字节数。
 MAX_OUTPUT_BYTES: 1048576
 
 # 实例并发执行数、任务租约有效期及续租间隔（秒）；租约至少是间隔的三倍。

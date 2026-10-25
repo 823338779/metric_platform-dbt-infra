@@ -7,6 +7,7 @@ import pytest
 
 from dbt_metricflow_service.storage.execution_targets import ExecutionTargetStore
 from dbt_metricflow_service.storage.jobs import JobStore, StoreConflict
+from tests.dbt_execution_helpers import invoke_job_for_test
 from tests.test_execution_snapshot_storage import accept, request, snapshot
 from tests.test_publication_storage import store as store
 
@@ -61,10 +62,10 @@ def test_unknown_outcome_keeps_target_blocked(store):
 async def test_worker_releases_target_after_completed_dbt_failure(store, tmp_path, monkeypatch, interrupted):
     from dbt.cli.main import dbtRunner
 
-    from dbt_metricflow_service.execution.models import CommandSpec
     from dbt_metricflow_service.runtime.worker import Worker
     from dbt_metricflow_service.storage.builds import BuildStore
     from dbt_metricflow_service.storage.entities import RuntimeAttempt, RuntimeJob
+    from tests.dbt_execution_helpers import EngineCall
 
     body = request()
     first = leased(store, body)
@@ -75,14 +76,14 @@ async def test_worker_releases_target_after_completed_dbt_failure(store, tmp_pat
     assert not targets.claim(second.job_id, second.lease_token)
     worker = Worker(SimpleNamespace(
         db=store.db, jobs=jobs, artifacts=None,
-        settings=SimpleNamespace(command_timeout_seconds=5, max_output_bytes=1024, heartbeat_seconds=15),
+        settings=SimpleNamespace(max_output_bytes=1024, heartbeat_seconds=15),
     ))
     monkeypatch.setattr(dbtRunner, "invoke", lambda *_: SimpleNamespace(
         success=False, exception=RuntimeError("interrupted") if interrupted else None,
     ))
 
     async def execute(job):
-        await worker.executor._dbt(job, CommandSpec(("dbt", "build"), tmp_path, {}, True), "BUILDING")
+        await invoke_job_for_test(worker.executor, job, EngineCall(("dbt", "build"), tmp_path, {}, True), "BUILDING")
 
     monkeypatch.setattr(worker.executor, "execute", execute)
     await worker._execute(first)

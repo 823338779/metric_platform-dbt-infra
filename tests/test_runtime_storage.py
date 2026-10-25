@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pytest
 
-from dbt_metricflow_service.storage.jobs import CleanupBlocked, JobStore, ProjectBusy, StoreConflict
+from dbt_metricflow_service.storage.jobs import JobStore, ProjectBusy, StoreConflict
 from dbt_metricflow_service.storage.postgres import Database
 from dbt_metricflow_service.storage.records import ArtifactMetadata, JobRequest
 from tests.test_execution_snapshot_storage import request, snapshot
@@ -41,7 +41,7 @@ def project(store):
 
 
 def reserve(store, name, **kwargs):
-    return store.reserve(BUILD, name, JobRequest(), toolchain_version=VERSION, **kwargs)
+    return store.reserve(name, JobRequest(), toolchain_version=VERSION, **kwargs)
 
 
 def claim(store):
@@ -109,37 +109,21 @@ def test_preparation_retry_keeps_stale_attempt_fenced(store):
     assert store.get(row.job_id).error_code == "BUILD_FAILED"
 
 
-def test_unconfirmed_external_attempt_blocks_cleanup_until_stop_confirmed(store, tmp_path):
-    from dbt_metricflow_service.storage.artifacts import ArtifactStore
-
-    name = project(store)
-    (tmp_path / "dbt_project.yml").write_text("name: cleanup_guard\n", encoding="utf-8")
-    source = ArtifactStore(store.db).capture(name, tmp_path)
-    parent = reserve(store, name, input_set_id=source)
-    attempt = claim(store)
-    store.phase(attempt.job_id, attempt.lease_token, "BUILDING", external=True)
-    expire(store, attempt)
-    store.recover()
-    assert store.get(parent.job_id).error_code == "EXECUTION_OUTCOME_UNKNOWN"
-    with pytest.raises(CleanupBlocked):
-        store.reserve_cleanup(parent.job_id)
-    store.confirm_stopped(attempt.attempt_id, attempt.lease_token)
-    assert store.reserve_cleanup(parent.job_id).kind == "RUN_CLEANUP"
 
 
 def test_build_without_output_cannot_be_published(store):
     name = project(store)
-    row = store.reserve(BUILD, name, JobRequest(), toolchain_version=VERSION)
+    row = store.reserve(name, JobRequest(), toolchain_version=VERSION)
     attempt = claim(store)
     with pytest.raises(ValueError, match="output"):
         store.finish(row.job_id, attempt.lease_token)
     assert store.get(row.job_id).status == "RUNNING"
 
 
-def test_legacy_deadline_does_not_expire_healthy_build(store):
+def test_recovery_preserves_healthy_build(store):
     name = project(store)
     worker = str(uuid4())
-    row = reserve(store, name, timeout_seconds=-1)
+    row = reserve(store, name)
     assert store.recover() == 0
     attempt = store.claim(worker, toolchain_version=VERSION)
     assert attempt.job_id == row.job_id
@@ -215,14 +199,6 @@ def test_finish_rolls_back_artifacts_and_job_on_failure(store, tmp_path, failure
         assert build.output_set_id is None
 
 
-def test_cleanup_uses_parent_versions_and_can_clean_failed_build(store):
-    name = project(store)
-    parent = store.reserve(BUILD, name, JobRequest(), toolchain_version=VERSION, schema_name="run_schema")
-    attempt = claim(store)
-    assert store.fail(parent.job_id, attempt.lease_token, "BUILD_FAILED")
-    cleanup = store.reserve_cleanup(parent.job_id)
-    assert cleanup.toolchain_version == VERSION
-    assert claim(store).job_id == cleanup.job_id
 
 
 def test_sealed_set_cannot_be_demoted_or_rewritten(store, tmp_path):
@@ -254,31 +230,3 @@ def test_build_admission_rejects_project_import_after_input_validation(store):
     with pytest.raises(StoreConflict, match="changed"):
         reserve(store, name, expected_revision=checked.revision)
     assert store.project(name).busy_job_id is None
-
-
-def test_cleanup_releases_artifact_references_but_preserves_tombstone(store, tmp_path):
-    from dbt_metricflow_service.storage.artifacts import ArtifactStore
-    name = project(store)
-    artifacts = ArtifactStore(store.db)
-    (tmp_path / "dbt_project.yml").write_text("name: cleanup\n", encoding="utf-8")
-    source = artifacts.capture(name, tmp_path)
-    parent = store.reserve(BUILD, name, JobRequest(), toolchain_version=VERSION)
-    attempt = claim(store)
-    store.attach_input(parent.job_id, attempt.lease_token, source)
-    store.fail(parent.job_id, attempt.lease_token, "PREPARATION_FAILED")
-    cleanup = store.reserve_cleanup(parent.job_id)
-    execution = claim(store)
-    assert execution.job_id == cleanup.job_id
-    assert store.finish(execution.job_id, execution.lease_token)
-    assert store.get(parent.job_id).run_lifecycle == "CLEANED"
-    assert artifacts.delete_unreferenced(source)
-
-
-def test_missing_source_cannot_report_clean_after_known_external_execution(store):
-    name = project(store)
-    parent = store.reserve(BUILD, name, JobRequest(), toolchain_version=VERSION)
-    attempt = claim(store)
-    store.phase(parent.job_id, attempt.lease_token, "BUILDING", external=True)
-    store.fail(parent.job_id, attempt.lease_token, "IMPORTED_FAILED", stopped=True)
-    with pytest.raises(CleanupBlocked):
-        store.reserve_cleanup(parent.job_id)

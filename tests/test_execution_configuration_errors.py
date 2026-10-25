@@ -19,14 +19,14 @@ from tests.test_execution_snapshot_storage import snapshot
 
 def unavailable_settings(tmp_path):
     return replace(settings(), execution_credentials={}, temp_root=tmp_path,
-                   command_timeout_seconds=30, heartbeat_seconds=60, lease_seconds=180)
+                   heartbeat_seconds=60, lease_seconds=180)
 
 
 def test_query_missing_credentials_is_retryable_service_failure(tmp_path, monkeypatch):
     runtime = object.__new__(Runtime)
     runtime.settings = unavailable_settings(tmp_path)
     runtime.artifacts = None
-    runtime.jobs = SimpleNamespace(query_run=lambda _: nullcontext({}))
+    runtime.jobs = SimpleNamespace()
     monkeypatch.setattr("dbt_metricflow_service.runtime.service.materialized_workspace",
                         lambda *args: nullcontext(tmp_path))
     build = stored_build(run_id="run", output_set_id="output", config_snapshot=snapshot())

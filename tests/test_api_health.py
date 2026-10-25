@@ -21,7 +21,7 @@ def application(monkeypatch, tmp_path):
 
     (tmp_path / "profiles.yml").write_text("fixture: {}")
     settings = replace(
-        infrastructure(), profiles_dir=tmp_path, command_timeout_seconds=30, max_output_bytes=1024,
+        infrastructure(), profiles_dir=tmp_path, max_output_bytes=1024,
         database_url="postgresql://unused/test", temp_root=tmp_path,
     )
     runtime = SimpleNamespace(
@@ -30,6 +30,7 @@ def application(monkeypatch, tmp_path):
         jobs=SimpleNamespace(db=None),
         artifacts=None,
         toolchain="test",
+        lineage=lambda *_: pytest.fail("unexpected lineage query"),
         available_dimensions=lambda *_: pytest.fail("unexpected dimensions query"),
         execute_query=lambda *_: pytest.fail("health endpoint executed a query"),
         started=False,

@@ -14,6 +14,12 @@ REQUIRED_TABLES = frozenset(Base.metadata.tables)
 NOT_INITIALIZED: Final = "Runtime database is not initialized; run dbt-service-admin init-db on an empty schema"
 CURRENT_SCHEMA = "SELECT current_schema()"
 SCHEMA_MISMATCH: Final = "Runtime database schema is incompatible; initialize a new empty schema"
+JOB_DEADLINE_MIGRATION_REQUIRED: Final = "Stop services and run remove_job_deadline.sql on the service schema"
+CLEANUP_MIGRATION_REQUIRED: Final = "Stop services and run remove_run_cleanup.sql on the service schema"
+JOB_KIND_MIGRATION_REQUIRED: Final = "Stop services and run remove_job_kind.sql on the service schema"
+LEGACY_JOB_KIND_COLUMN: Final = strings.RESOURCE_KIND_FIELD
+LEGACY_RUN_LIFECYCLE_COLUMN: Final = "run_lifecycle"
+LEGACY_JOB_DEADLINE_COLUMN: Final = "deadline_at"
 INITIALIZATION_LOCK = "SELECT pg_advisory_xact_lock(609302026)"
 
 
@@ -26,6 +32,13 @@ def _tables(connection: Connection) -> set[str]:
 def check(connection: Connection) -> None:
     if _tables(connection) != REQUIRED_TABLES:
         raise RuntimeError(NOT_INITIALIZED)
+    job_columns = {column[strings.NAME_FIELD] for column in inspect(connection).get_columns(strings.RUNTIME_JOB_TABLE)}
+    if LEGACY_JOB_DEADLINE_COLUMN in job_columns:
+        raise RuntimeError(JOB_DEADLINE_MIGRATION_REQUIRED)
+    if LEGACY_RUN_LIFECYCLE_COLUMN in job_columns:
+        raise RuntimeError(CLEANUP_MIGRATION_REQUIRED)
+    if LEGACY_JOB_KIND_COLUMN in job_columns:
+        raise RuntimeError(JOB_KIND_MIGRATION_REQUIRED)
     columns = {column[strings.NAME_FIELD] for column in inspect(connection).get_columns(strings.ENGINE_BUILD_TABLE)}
     if (
         not {strings.ENVIRONMENT_ID_FIELD, strings.PHYSICAL_TARGET_KEY_FIELD}.issubset(columns)

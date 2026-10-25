@@ -8,14 +8,15 @@ from uuid import uuid4
 import pytest
 import yaml
 
+from dbt_metricflow_service.delegates.clients.dbt_client import DbtClient
 from dbt_metricflow_service.platform.build import execute_build
-from dbt_metricflow_service.runtime.executor import ExecutionError, RuntimeExecutor
+from dbt_metricflow_service.runtime.dbt_executor import ExecutionError, RuntimeExecutor
 from dbt_metricflow_service.storage.records import JobRequest
 from tests.data_helpers import leased_job
 
 
 @pytest.fixture
-def publication_executor(tmp_path):
+def publication_executor(tmp_path, monkeypatch):
     project = tmp_path / "project"
     project.mkdir()
     (project / "dbt_project.yml").write_text("name: sample\nversion: '1.0'\ntarget-path: custom-target\n")
@@ -30,18 +31,21 @@ def publication_executor(tmp_path):
     calls, captured = [], {}
     manifest = {"nodes": {}, "memory_build": True}
 
-    async def dbt(_job, spec, phase, *, manifest_sink=None):
-        calls.append((spec, phase))
-        assert spec.argv[1] == "build", "build must not run additional commands"
-        assert spec.write_operation
-        manifest_sink(SimpleNamespace(writable_manifest=lambda: SimpleNamespace(to_dict=lambda **_: manifest)))
+    def build(self, project, profiles, **kwargs):
+        calls.append((project, profiles))
+        return SimpleNamespace(success=True, exception=None, manifest=SimpleNamespace(
+            writable_manifest=lambda: SimpleNamespace(to_dict=lambda **_: manifest),
+        ))
+    monkeypatch.setattr(DbtClient, "build", build)
 
     def capture(_project_id, _project, **kwargs):
         captured.update(kwargs)
         return "sealed-output"
 
-    executor = SimpleNamespace(settings=SimpleNamespace(profiles_dir=tmp_path, max_artifact_file_bytes=1024 * 1024),
-        _dbt=dbt, _metadata=RuntimeExecutor._metadata, artifacts=SimpleNamespace(capture=capture))
+    executor = RuntimeExecutor(
+        SimpleNamespace(profiles_dir=tmp_path, max_artifact_file_bytes=1024 * 1024, max_output_bytes=1024),
+        SimpleNamespace(db=None, phase=lambda *args, **kwargs: True), SimpleNamespace(capture=capture),
+    )
     return executor, job, project, calls, captured
 
 
@@ -58,7 +62,7 @@ async def test_only_build_persists_memory_manifest_without_other_artifacts(publi
     result = await execute_build(executor, job, project)
     assert result.output_set_id == "sealed-output"
     assert len(calls) == 1
-    assert calls[0][1] == "BUILDING"
+    assert calls[0] == (project, executor.settings.profiles_dir)
     assert json.loads(captured["memory_files"]["target/manifest.json"])["memory_build"] is True
     assert "validation_json" not in captured["metadata"].model_dump()
     assert yaml.safe_load((project / "dbt_project.yml").read_text())["target-path"] == "target"
@@ -85,39 +89,31 @@ async def test_build_context_calls_client_with_paths_and_target(publication_exec
         assert target == job.profile_binding_id
         assert target_path == project / "target"
         calls.append(callbacks)
-        return SimpleNamespace(manifest=SimpleNamespace(
+        return SimpleNamespace(success=True, exception=None, manifest=SimpleNamespace(
             writable_manifest=lambda: SimpleNamespace(to_dict=lambda **_: {"memory_build": True}),
         ))
 
-    async def invoke(_job, context, phase, *, manifest_sink):
-        assert context.argv == ("dbt", "build")
-        assert phase == "BUILDING"
-        manifest_sink(context.operation([]).manifest)
-
     monkeypatch.setattr(DbtClient, "build", build)
-    executor._dbt = invoke
     await execute_build(executor, job, project)
-    assert calls == [[]]
+    assert len(calls) == 1 and len(calls[0]) == 1
     assert captured["memory_files"]
 
 
-async def test_missing_memory_manifest_cannot_publish(publication_executor):
+async def test_missing_memory_manifest_cannot_publish(publication_executor, monkeypatch):
     executor, job, project, _calls, captured = publication_executor
-    async def without_manifest(*args, **kwargs):
-        pass
-    executor._dbt = without_manifest
-    with pytest.raises(ValueError, match="manifest is unavailable"):
+    monkeypatch.setattr(DbtClient, "build", lambda *args, **kwargs: SimpleNamespace(
+        success=True, exception=None, manifest=None,
+    ))
+    with pytest.raises(ExecutionError):
         await execute_build(executor, job, project)
     assert not captured
 
 
-async def test_dbt_failure_propagates_without_artifact_capture(publication_executor):
+async def test_dbt_failure_propagates_without_artifact_capture(publication_executor, monkeypatch):
     executor, job, project, _calls, captured = publication_executor
-    failure = ExecutionError("COMMAND_FAILED", stopped=True)
-    async def fail(*args, **kwargs):
-        raise failure
-    executor._dbt = fail
+    monkeypatch.setattr(DbtClient, "build", lambda *args, **kwargs: SimpleNamespace(success=False, exception=None))
     with pytest.raises(ExecutionError) as error:
         await execute_build(executor, job, project)
-    assert error.value is failure
+    assert error.value.code == "COMMAND_FAILED"
+    assert error.value.stopped
     assert not captured

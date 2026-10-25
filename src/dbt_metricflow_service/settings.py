@@ -35,7 +35,6 @@ AMBIGUOUS_PROFILE_CONFIGURATION: Final[str] = "配置文件不能同时指定 DB
 logger = logging.getLogger(__name__)
 
 DEFAULT_PROFILES_DIR = strings.PROFILES_DIRECTORY
-DEFAULT_COMMAND_TIMEOUT_SECONDS = 1800
 DEFAULT_MAX_OUTPUT_BYTES = 1_048_576
 MAX_OUTPUT_BYTES_ENV = strings.MAX_OUTPUT_BYTES
 # 默认启动文件独立于调用者的工作目录，部署时可用环境变量替换。
@@ -80,8 +79,6 @@ class Settings:
 
     # dbt profiles.yml 所在目录，可来自部署挂载或服务配置生成的临时快照。
     profiles_dir: Path
-    # Maximum wall-clock duration allowed for one CLI subprocess.
-    command_timeout_seconds: int
     # Maximum number of bytes retained for each subprocess output stream.
     max_output_bytes: int
     # 启用 PostgreSQL 运行时的连接信息；repr 不包含凭据。
@@ -102,7 +99,6 @@ class Settings:
     max_result_bytes: int = 16 * 1024 * 1024
     max_artifact_file_bytes: int = 64 * 1024 * 1024
     max_artifact_bytes: int = 256 * 1024 * 1024
-    # 同步选项/清理接口等待持久任务的最大秒数。
     # HTTP 服务监听地址与端口，不影响管理命令的数据库连接。
     server_host: str = strings.LISTEN_HOST
     server_port: int = 8000
@@ -184,13 +180,6 @@ class Settings:
             execution_instances=instances,
             execution_credentials=credentials,
             profiles_dir=path(strings.DBT_PROFILES_DIR, config.DBT_PROFILES_DIR, DEFAULT_PROFILES_DIR),
-            command_timeout_seconds=int(
-                value(
-                    strings.COMMAND_TIMEOUT_SECONDS,
-                    config.COMMAND_TIMEOUT_SECONDS,
-                    str(DEFAULT_COMMAND_TIMEOUT_SECONDS),
-                )
-            ),
             max_output_bytes=int(value(MAX_OUTPUT_BYTES_ENV, config.MAX_OUTPUT_BYTES, str(DEFAULT_MAX_OUTPUT_BYTES))),
             database_url=value(strings.SERVICE_DATABASE_URL, config.SERVICE_DATABASE_URL) or None,
             service_token=value(strings.SERVICE_TOKEN, config.SERVICE_TOKEN) or None,

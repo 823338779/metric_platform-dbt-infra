@@ -74,7 +74,6 @@ async def test_runtime_reconciles_explicit_deployments(store, tmp_path):
         Settings(
             profiles_dir=tmp_path,
             database_url=os.environ["SERVICE_TEST_DATABASE_URL"],
-            command_timeout_seconds=30,
             max_output_bytes=1024,
             temp_root=tmp_path / "worker",
             toolchain_version=build.toolchain_version,

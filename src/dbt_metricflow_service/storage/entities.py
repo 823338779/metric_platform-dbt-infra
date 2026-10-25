@@ -45,14 +45,13 @@ class RuntimeJob(Base):
 
     __tablename__ = strings.RUNTIME_JOB_TABLE
 
-    job_id: Mapped[StringUUID] = mapped_column(primary_key=True, comment="内部构建或清理任务标识")
-    kind: Mapped[str] = mapped_column(comment="构建或物理清理任务")
+    job_id: Mapped[StringUUID] = mapped_column(primary_key=True, comment="内部任务标识")
     physical_target_key: Mapped[str | None] = mapped_column(comment="本次执行的物理写入目标")
     target_claimed: Mapped[bool] = mapped_column(
         server_default=text(strings.SQL_FALSE), comment="目标写入权是否仍被占用"
     )
     project_id: Mapped[str] = mapped_column(comment="所属逻辑项目")
-    parent_run_id: Mapped[StringUUID | None] = mapped_column(comment="清理绑定的固定构建 run")
+    parent_run_id: Mapped[StringUUID | None] = mapped_column(comment="历史父任务引用")
     idempotency_scope: Mapped[str | None] = mapped_column(comment="幂等键的接口命名空间")
     idempotency_key: Mapped[str | None] = mapped_column(comment="调用方提供的幂等键")
     request_fingerprint: Mapped[str] = mapped_column(comment="包含固定输入和配置版本的规范化请求摘要")
@@ -69,13 +68,11 @@ class RuntimeJob(Base):
         server_default=text(strings.SQL_QUEUED), comment="持久队列及公开状态的内部生命周期"
     )
     phase: Mapped[str] = mapped_column(server_default=text(strings.SQL_PREPARING), comment="构建准备、执行与验证阶段")
-    run_lifecycle: Mapped[str | None] = mapped_column(comment="构建 run 的活动及清理生命周期")
     attempt_no: Mapped[int] = mapped_column(server_default=text(strings.SQL_ZERO), comment="已经领取执行的次数")
     current_attempt_id: Mapped[StringUUID | None] = mapped_column(comment="唯一当前执行 attempt")
     available_at: Mapped[datetime] = mapped_column(
         server_default=text(strings.SQL_CLOCK_TIMESTAMP), comment="允许领取或重试的最早时间"
     )
-    deadline_at: Mapped[datetime] = mapped_column(comment="所有尝试共享的最终截止时间")
     max_attempts: Mapped[int] = mapped_column(
         server_default=text(strings.SQL_THREE), comment="包含首次执行的受控最大尝试数"
     )

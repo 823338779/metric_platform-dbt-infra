@@ -121,7 +121,7 @@ def test_postgres_build_job_and_artifact_records(tmp_path):
             repository="https://example.com/project.git", branch_name="main", execution=execution(),
             idempotency_key=str(uuid4()),
         )
-        build = builds.accept_snapshot(request, "test", "strict-records", 600, "1")
+        build = builds.accept_snapshot(request, "test", "strict-records", "1")
         assert build.request_json.repository == request.repository
         assert build.config_snapshot.schema_name == "preview"
         with db.session() as session:
