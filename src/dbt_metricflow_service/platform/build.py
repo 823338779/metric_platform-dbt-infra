@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 from uuid import UUID
 
 import sqlglot
+from dbt_common.utils.encoding import JSONEncoder
 from sqlglot import exp
 
 from dbt_metricflow_service import constants as strings
@@ -18,6 +20,8 @@ from ..platform.namespace import TABLE_NAME_PATTERN, prepare_fixed_schema_projec
 from .template import validate_templates
 
 if TYPE_CHECKING:
+    from dbt.contracts.graph.manifest import Manifest
+
     from dbt_metricflow_service.runtime.executor import ExecutionResult, RuntimeExecutor
 
 
@@ -37,6 +41,7 @@ BUILD_PROOF_FAILED_MESSAGE: Final[str] = '构建或测试证明失败'
 REQUIRED_EXECUTION_INCOMPLETE_MESSAGE: Final[str] = '模型或必需测试执行不完整'
 PHYSICAL_OBJECTS_MISSING_MESSAGE: Final[str] = '物理对象缺失，不能发布'
 QUERY_PROOF_MISSING_MESSAGE: Final[str] = '缺少查询证明'
+FINAL_MANIFEST_MISSING_MESSAGE: Final[str] = 'final dbt manifest is unavailable'
 
 UTF8 = strings.UTF8
 MANIFEST_FILE = strings.MANIFEST_FILE
@@ -207,6 +212,16 @@ async def execute_publication(
         str(target),
     )
 
+    manifest_json: bytes | None = None
+
+    def capture_manifest(manifest: Manifest) -> None:
+        nonlocal manifest_json
+        payload = manifest.writable_manifest().to_dict(omit_none=False, context={"artifact": True})
+        content = json.dumps(payload, cls=JSONEncoder, ensure_ascii=False, separators=(",", ":")).encode(UTF8)
+        if len(content) > settings.max_artifact_file_bytes:
+            raise ValueError(BUILD_PROOF_LIMIT_MESSAGE)
+        manifest_json = content
+
     async def command(*args: str) -> None:
         # deps 不支持 target-path，沿用既有执行器的命令参数边界。
         options = common[:-2] if args[0] == DEPS else common
@@ -215,7 +230,10 @@ async def execute_publication(
         from .validation_summary import failure_summary
 
         try:
-            await executor._dbt(job, spec, COMMAND_PHASES[args[0]])
+            if args == (DOCS, GENERATE):
+                await executor._dbt(job, spec, COMMAND_PHASES[args[0]], manifest_sink=capture_manifest)
+            else:
+                await executor._dbt(job, spec, COMMAND_PHASES[args[0]])
         except ExecutionError as error:
             # 摘要与当前租约失败事务一起保存；不复制 stderr、SQL 或数据库异常。
             summary = failure_summary(target, args[0], settings.max_artifact_file_bytes)
@@ -273,6 +291,8 @@ async def execute_publication(
     if len(raw_results) > settings.max_artifact_file_bytes:
         raise ValueError(BUILD_PROOF_LIMIT_MESSAGE)
     await command(DOCS, GENERATE)
+    if manifest_json is None:
+        raise ValueError(FINAL_MANIFEST_MISSING_MESSAGE)
     probe = (await executor.probe_query_capability(job, project, profiles=profiles)
              if request.execution else await executor.probe_query_capability(job, project))
     manifest = NativeManifest.model_validate_json((target / MANIFEST_FILE).read_bytes())
@@ -319,5 +339,6 @@ async def execute_publication(
         producer_attempt_id=job.attempt_id,
         kind=EXECUTION,
         metadata=metadata,
+        manifest_json=manifest_json,
     )
     return ExecutionResult(output_set_id=output)

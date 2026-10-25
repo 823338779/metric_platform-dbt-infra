@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Final, ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, Final, ParamSpec, TypeVar, cast
 
 from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.execution.dbt import run_dbt
@@ -25,6 +25,9 @@ from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.execution_logs import ExecutionLogStore
 from dbt_metricflow_service.storage.jobs import JobStore
 from dbt_metricflow_service.storage.records import ArtifactMetadata, JobErrorDetail, LeasedJob, StoredJob
+
+if TYPE_CHECKING:
+    from dbt.contracts.graph.manifest import Manifest
 
 # 保留后台线程函数的位置和关键字参数签名。
 UNSUPPORTED_JOB_KIND: Final[str] = "unsupported runtime job kind"
@@ -204,7 +207,10 @@ class RuntimeExecutor:
         if not valid:
             raise ExecutionError(ERROR_LEASE_LOST, stopped=False)
 
-    async def _dbt(self, job: LeasedJob, spec: CommandSpec, phase: str) -> JobRecord:
+    async def _dbt(
+        self, job: LeasedJob, spec: CommandSpec, phase: str,
+        *, manifest_sink: Callable[[Manifest], None] | None = None,
+    ) -> JobRecord:
         # dbt 使用命令执行记录；不携带 MetricFlow 的请求、结果或业务错误码。
         writer = ExecutionLogWriter(partial(ExecutionLogStore(self.jobs.db).append, job, phase, spec.argv[1]))
         try:
@@ -212,6 +218,7 @@ class RuntimeExecutor:
                 job.project_id, spec, self.settings.command_timeout_seconds,
                 self.settings.max_output_bytes, lambda: self._authorize(job, phase, external=spec.write_operation),
                 log_sink=writer.emit,
+                manifest_sink=manifest_sink,
             )
         finally:
             # run_dbt 在取消和超时时也等待引擎退出，此后才允许关闭日志队列。

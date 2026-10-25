@@ -48,7 +48,7 @@ def publication_executor(tmp_path):
                 "nodes": {"model.sample.orders": {"columns": {}}}}
     captured = {}
 
-    async def dbt(_job, spec, _phase):
+    async def dbt(_job, spec, _phase, *, manifest_sink=None):
         if spec.argv[1] in ("parse", "compile", "build"):
             (target / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
             (target / "semantic_manifest.json").write_text('{"semantic_models": [], "metrics": []}')
@@ -57,6 +57,13 @@ def publication_executor(tmp_path):
         if spec.argv[1] == "docs":
             (target / "catalog.json").write_text(json.dumps(physical))
             (target / "run_results.json").write_text('{"results": []}')
+            # 最终命令内存内容与磁盘版本可区分，验证没有偷偷回退到读文件。
+            def to_dict(*, omit_none, context):
+                assert omit_none is False
+                assert context == {"artifact": True}
+                return {**manifest, "memory_final": True, "label": "指标"}
+
+            manifest_sink(SimpleNamespace(writable_manifest=lambda: SimpleNamespace(to_dict=to_dict)))
 
     async def metricflow(*_args):
         return ProbeResult(query_capability=True)
@@ -83,6 +90,24 @@ async def test_publication_persists_catalog_file_and_minimum_validation_flags(pu
         all_tests_passed=True, representative_query_passed=True, relations_verified=True,
     )
     assert not hasattr(captured["metadata"], "catalog_json")
+    assert json.loads(captured["manifest_json"])["memory_final"] is True
+    assert '"label":"指标"'.encode() in captured["manifest_json"]
+    assert b'": ' not in captured["manifest_json"]
+
+
+async def test_publication_rejects_missing_final_memory_manifest(publication_executor):
+    executor, job, project, _results, _physical, captured = publication_executor
+    original = executor._dbt
+
+    async def without_manifest(*args, **kwargs):
+        if "manifest_sink" in kwargs:
+            kwargs["manifest_sink"] = lambda _: None
+        return await original(*args, **kwargs)
+
+    executor._dbt = without_manifest
+    with pytest.raises(ValueError, match="final dbt manifest is unavailable"):
+        await execute_publication(executor, job, project.parent, project)
+    assert not captured
 
 
 @pytest.mark.parametrize("missing", ["model.sample.orders", "test.sample.orders"])

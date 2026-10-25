@@ -14,9 +14,11 @@ from .logs import EngineLog
 from .models import CommandSpec, JobRecord, JobStatus
 
 UNSUPPORTED_ENGINE_COMMAND: Final[str] = "unsupported engine command"
+MISSING_MANIFEST: Final[str] = "successful dbt command did not return a manifest"
 
 
 if TYPE_CHECKING:
+    from dbt.contracts.graph.manifest import Manifest
     from dbt_common.events.base_types import EventMsg
 
 DBT = strings.DBT_EXECUTABLE
@@ -26,13 +28,15 @@ async def run_dbt(
     project: str, command: CommandSpec, timeout_seconds: float, max_output_bytes: int,
     before_start: Callable[[], Awaitable[None]],
     *, log_sink: Callable[[EngineLog], None] | None = None,
+    manifest_sink: Callable[[Manifest], None] | None = None,
 ) -> JobRecord:
     """只接受 dbt 命令，完成串行与租约检查后执行并返回脱敏记录。"""
     # 在授权和引擎初始化前拒绝非 dbt 入口。
     if command.argv[:1] != (DBT,):
         raise ValueError(UNSUPPORTED_ENGINE_COMMAND)
     record, timed_out = await run_serialized(
-        lambda: _invoke_dbt(project, command, max_output_bytes, log_sink), timeout_seconds, before_start,
+        lambda: _invoke_dbt(project, command, max_output_bytes, log_sink, manifest_sink),
+        timeout_seconds, before_start,
     )
     if timed_out:
         return record.with_outcome(status=JobStatus.TIMED_OUT, exit_code=None, stderr=record.stderr)
@@ -42,6 +46,7 @@ async def run_dbt(
 def _invoke_dbt(
     project: str, command: CommandSpec, max_output_bytes: int,
     log_sink: Callable[[EngineLog], None] | None,
+    manifest_sink: Callable[[Manifest], None] | None,
 ) -> JobRecord:
     started = datetime.now(UTC)
     output = create_output(max_output_bytes)
@@ -59,6 +64,11 @@ def _invoke_dbt(
             exit_code = 0 if result.success else (2 if result.exception is not None else 1)
             if result.exception is not None:
                 error_type = type(result.exception).__name__
+            if result.success and manifest_sink is not None:
+                if result.manifest is None:
+                    raise ValueError(MISSING_MANIFEST)
+                # 在引擎环境退出前交给调用方处理，Manifest 不进入诊断或日志。
+                manifest_sink(result.manifest)
     except Exception as error:
         # 不公开可能包含连接凭据的原始异常文本。
         exit_code = 2

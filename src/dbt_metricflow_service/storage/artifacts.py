@@ -248,21 +248,33 @@ class ArtifactStore:
             raise ValueError(INVALID_ARTIFACT_LIMITS_MESSAGE)
 
     def capture(self, project_id: str, directory: Path, *, producer_attempt_id: str | None = None,
-                kind: str = SOURCE, metadata: ArtifactMetadata | None = None) -> str:
+                kind: str = SOURCE, metadata: ArtifactMetadata | None = None,
+                manifest_json: bytes | None = None) -> str:
         if kind not in {SOURCE, EXECUTION}:
+            raise ValueError(UNSUPPORTED_ARTIFACT_KIND_MESSAGE)
+        if manifest_json is not None and kind != EXECUTION:
             raise ValueError(UNSUPPORTED_ARTIFACT_KIND_MESSAGE)
         metadata = metadata or ArtifactMetadata()
         files: list[CaptureFile] = []
         total = 0
         # 先完成路径和容量检查，再以单个事务保存集合，失败不会留下半份快照。
-        for relative, path in _files(Path(directory), kind, self.max_file_bytes):
-            size = path.stat().st_size
+        paths = dict(_files(Path(directory), kind, self.max_file_bytes))
+        manifest_path = None
+        if manifest_json is not None:
+            # _files 已验证项目配置的路径和大小；内存产物沿用项目的 target-path。
+            config = ArtifactProject.model_validate(yaml.safe_load((Path(directory) / PROJECT_FILE).read_bytes()))
+            manifest_path = (_relative(config.target_path) / strings.MANIFEST_FILE).as_posix()
+            paths[manifest_path] = Path(directory) / manifest_path
+            _check_paths(list(paths))
+        for relative, path in sorted(paths.items()):
+            from_memory = manifest_json is not None and relative == manifest_path
+            size = len(manifest_json) if manifest_json is not None and from_memory else path.stat().st_size
             total += size
             if size > self.max_file_bytes or total > self.max_set_bytes:
                 raise ValueError(ARTIFACT_SET_LIMIT_MESSAGE)
             files.append(CaptureFile(
                 relative_path=relative, path=path, raw_size=size, raw_sha256="",
-                executable=bool(path.stat().st_mode & stat.S_IXUSR),
+                executable=False if from_memory else bool(path.stat().st_mode & stat.S_IXUSR),
             ))
         set_id = str(uuid4())
         with self.database.session() as session:
@@ -290,14 +302,23 @@ class ArtifactStore:
             session.flush()
             for item in files:
                 # 有界读取可发现检查与读取之间增长的文件，不无限制读入内存。
-                with item.path.open(strings.BINARY_READ_MODE) as stream:
-                    content = stream.read(self.max_file_bytes + 1)
+                if manifest_json is not None and item.relative_path == manifest_path:
+                    content = manifest_json
+                else:
+                    with item.path.open(strings.BINARY_READ_MODE) as stream:
+                        content = stream.read(self.max_file_bytes + 1)
                 if len(content) != item.raw_size:
                     raise ValueError(ARTIFACT_CHANGED_MESSAGE)
                 item.raw_sha256 = hashlib.sha256(content).hexdigest()
+                stored_content, codec = content, RAW
+                if manifest_json is not None and item.relative_path == manifest_path:
+                    compressed = gzip.compress(content, compresslevel=6, mtime=0)
+                    # 小文件可能因 gzip 头部变大；只保留确实节省空间的压缩结果。
+                    if len(compressed) < len(content):
+                        stored_content, codec = compressed, GZIP
                 session.add(ArtifactFile(
-                    set_id=set_id, relative_path=item.relative_path, content=content, codec=RAW,
-                    raw_sha256=item.raw_sha256, raw_size=len(content), stored_size=len(content),
+                    set_id=set_id, relative_path=item.relative_path, content=stored_content, codec=codec,
+                    raw_sha256=item.raw_sha256, raw_size=len(content), stored_size=len(stored_content),
                     media_type=mimetypes.guess_type(item.relative_path)[0] or DEFAULT_MEDIA_TYPE,
                     executable=item.executable,
                 ))
