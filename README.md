@@ -215,7 +215,7 @@ result = metricflow.query(request)
 
 PREVIEW 改用 `selector` 参数（例如 `"orders"`），交给 `dbt show` 原生选择和执行，必须匹配一个非 seed 节点。它执行已保存模型的 SQL，而不是读取既有物化表；服务不再拼接 `select * from relation`。seed 被排除，避免 dbt SeedRunner 的物化行为。旧 `datasetResourceId` 不再接受。
 
-历史查询只需要保存的 `manifest.json` 提供业务定义。`MetricFlowClient` 委托 `DbtClient` 调用 dbt 原生 `SemanticManifest` 转换器重新生成 MetricFlow 所需的 `semantic_manifest.json`，不重新 parse 业务 YAML，也不信任旧 semantic_manifest 文件。dbt `show` 显式注入从历史 artifact 恢复的 Manifest。工程配置、连接 profile、适配器及数据库仍是执行前提；不需要重新读取原来的业务 YAML/SQL 定义。
+历史查询只需要保存的 `manifest.json` 提供业务定义。`DbtClient` 和 `MetricFlowClient` 保留在服务内作为薄适配层：委托 dbt 原生 Manifest 加载及语义转换器、MetricFlow 原生上下文与查询引擎解释内容，不自行解析资源或推导依赖。维度发现与数据查询共享该 Client 的内存语义上下文，不生成或读取 `semantic_manifest.json`，也不重新 parse 业务 YAML。dbt `show` 显式注入从历史 artifact 恢复的 Manifest。工程配置、连接 profile、适配器及数据库仍是执行前提；不需要重新读取原来的业务 YAML/SQL 定义。
 
 对结果未知的执行，人工核实目标仓库停止后才释放保护：
 

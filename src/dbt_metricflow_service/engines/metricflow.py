@@ -6,7 +6,9 @@ from functools import cached_property
 from pathlib import Path
 from typing import Final
 
-from dbt_metricflow.cli.cli_configuration import CLIConfiguration
+from dbt.adapters.factory import get_adapter_by_type
+from dbt_metricflow.cli.dbt_connectors.adapter_backed_client import AdapterBackedSqlClient
+from dbt_metricflow.cli.dbt_connectors.dbt_config_accessor import dbtProjectMetadata
 from metricflow.engine.metricflow_engine import MetricFlowEngine, MetricFlowQueryRequest, MetricFlowQueryType
 from metricflow_semantic_interfaces.type_enums.time_granularity import TimeGranularity
 from metricflow_semantics.errors.error_classes import InformativeUserError, InvalidQueryException
@@ -72,33 +74,35 @@ def _where_constraints(request: CompiledQuery) -> list[str]:
 
 class MetricFlowClient:
     def __init__(self, manifest: bytes, *, project: Path | None = None, profiles: Path | None = None) -> None:
-        self._manifest = manifest
+        self._dbt = DbtClient(manifest)
         self._project = project
         self._profiles = profiles
+
+    @cached_property
+    def _semantic_context(self) -> SemanticManifestLookup:
+        # 维度发现和执行共享同一份原生上下文；模型定义只来自传入的构建快照。
+        return SemanticManifestLookup(self._dbt.semantic_manifest())
 
     @cached_property
     def _engine(self) -> MetricFlowEngine:
         if self._project is None or self._profiles is None:
             raise ValueError(QUERY_CONTEXT_REQUIRED_MESSAGE)
-        DbtClient(self._manifest).write_semantic_manifest(self._project / strings.SEMANTIC_MANIFEST_PATH)
-        configuration = CLIConfiguration()
-        configuration.setup(dbt_profiles_path=self._profiles, dbt_project_path=self._project,
-                            configure_file_logging=False)
+        context = self._semantic_context
+        # 只加载执行配置和 adapter，不调用读取磁盘 semantic_manifest 的 CLI 产物加载器。
+        metadata = dbtProjectMetadata.load_from_paths(profiles_path=self._profiles, project_path=self._project)
+        adapter = get_adapter_by_type(metadata.profile.credentials.type)
         # StarRocks 复用 dbt adapter 执行查询；其他 adapter 保持上游 MetricFlow 客户端。
-        if configuration.dbt_artifacts.adapter.type() == STARROCKS_ADAPTER:
-            return MetricFlowEngine(
-                semantic_manifest_lookup=configuration.semantic_manifest_lookup,
-                sql_client=StarRocksSqlClient(configuration.dbt_artifacts.adapter),
-            )
-        return configuration.mf
+        sql_client = (
+            StarRocksSqlClient(adapter) if adapter.type() == STARROCKS_ADAPTER else AdapterBackedSqlClient(adapter)
+        )
+        return MetricFlowEngine(semantic_manifest_lookup=context, sql_client=sql_client)
 
     @cached_property
     def _dimension_engine(self) -> MetricFlowEngine:
         # 每个客户端只使用传入的构建快照，不写 semantic_manifest 或读取项目目录。
-        client = DbtClient(self._manifest)
         return MetricFlowEngine(
-            semantic_manifest_lookup=SemanticManifestLookup(client.semantic_manifest()),
-            sql_client=PlanningSqlClient(client.adapter_type),
+            semantic_manifest_lookup=self._semantic_context,
+            sql_client=PlanningSqlClient(self._dbt.adapter_type),
         )
 
     def available_dimensions(self, metrics: tuple[str, ...]) -> DimensionQueryResult:

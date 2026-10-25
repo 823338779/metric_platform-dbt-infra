@@ -94,11 +94,6 @@ class DbtClient:
     def source_path(self, resource_id: str) -> str:
         return self._manifest.expect(resource_id).original_file_path.replace("\\", "/")
 
-    def write_semantic_manifest(self, path: Path) -> None:
-        """调用 dbt 转换器生成 MetricFlow 输入，无需重新 parse 业务定义。"""
-        path.parent.mkdir(parents=True, exist_ok=True)
-        SemanticManifest(self._manifest).write_json_to_file(str(path))
-
     def semantic_manifest(self) -> PydanticSemanticManifest:
         """直接从构建 Manifest 转换内存语义模型，保留 MetricFlow 的原生转换规则。"""
         return transform_dbt_generated_manifest(SemanticManifest(self._manifest)._get_pydantic_semantic_manifest())

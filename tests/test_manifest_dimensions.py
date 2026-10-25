@@ -24,8 +24,8 @@ def test_dimensions_use_only_supplied_manifest(tmp_path, monkeypatch):
     def forbidden(*args, **kwargs):
         pytest.fail("dimension discovery must not load project files or write a semantic manifest")
 
-    monkeypatch.setattr("dbt_metricflow_service.engines.metricflow.CLIConfiguration.setup", forbidden)
-    monkeypatch.setattr("dbt_metricflow_service.engines.dbt.DbtClient.write_semantic_manifest", forbidden)
+    monkeypatch.setattr("dbt_metricflow_service.engines.metricflow.dbtProjectMetadata.load_from_paths", forbidden)
+    monkeypatch.setattr("dbt.contracts.graph.semantic_manifest.SemanticManifest.write_json_to_file", forbidden)
     # 不同请求传入不同快照，不能复用磁盘上的旧 Manifest 或上一请求的引擎。
     client = MetricFlowClient(content)
     result = client.available_dimensions(("revenue",))
