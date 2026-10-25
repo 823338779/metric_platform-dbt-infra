@@ -62,7 +62,7 @@ class CatalogService:
         return manifest
 
     def list(self, build_id: UUID | str) -> list[JsonObject]:
-        # 复用 dbt 原生 ls，以封存 Manifest 为上下文列出全部默认资源类型。
+        # 复用 dbt 原生 ls，以封存 Manifest 为上下文列出白名单内的业务资源。
         return self.lineage(build_id, "*")
 
     def resource(self, build_id: UUID | str, resource_id: str) -> ResourceView:

@@ -37,6 +37,10 @@ DBT_SHOW = "show"
 DBT_SELECT = "--select"
 DBT_EXCLUDE = "--exclude"
 DBT_SEED_SELECTOR = "resource_type:seed"
+DBT_RESOURCE_TYPE = "--resource-type"
+BUSINESS_RESOURCE_TYPES = (
+    "source", "seed", "snapshot", "model", "semantic_model", "metric", "saved_query", "exposure",
+)
 DBT_OUTPUT = "--output"
 
 
@@ -78,10 +82,11 @@ class DbtClient:
         return cast(JsonObject, self._manifest.expect(resource_id).to_dict(omit_none=False))
 
     def lineage(self, selector: str, *, project: Path, profiles: Path) -> list[JsonObject]:
-        """原样使用 dbt 图选择表达式，返回 ls 的原生节点 JSON。"""
+        """使用 dbt 图选择表达式和业务资源白名单，返回原生节点 JSON。"""
         result = self.invoke([
             DBT_LIST, strings.DBT_PROJECT_DIR_OPTION, str(project), strings.DBT_PROFILES_DIR_OPTION, str(profiles),
             f"{DBT_SELECT}={selector}", DBT_OUTPUT, strings.JSON_MODE,
+            DBT_RESOURCE_TYPE, *BUSINESS_RESOURCE_TYPES,
         ])
         if isinstance(result.exception, InvalidSelectorError):
             raise InvalidDimensionsRequest(INVALID_SELECTOR_MESSAGE) from result.exception
