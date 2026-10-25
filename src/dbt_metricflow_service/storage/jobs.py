@@ -18,7 +18,6 @@ from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.models.execution import ExecutionSnapshot
 from dbt_metricflow_service.models.payloads import JsonObject
 from dbt_metricflow_service.storage.records import (
-    ArtifactValidation,
     EmptyConfig,
     JobErrorDetail,
     JobRequest,
@@ -49,7 +48,6 @@ INVALID_PROJECT_SOURCE_MESSAGE: Final = "Project source must be a sealed source 
 INVALID_SOURCE_SET_MESSAGE: Final = "Invalid source artifact set"
 MISSING_NATIVE_ARTIFACTS_MESSAGE: Final = "BUILD_RUN output is missing required native artifacts"
 MISSING_RUN_MESSAGE: Final = "Run does not exist"
-MISSING_VALIDATION_EVIDENCE_MESSAGE: Final = "BUILD_RUN output lacks successful validation evidence"
 OUTPUT_ATTEMPT_CONFLICT_MESSAGE: Final = "Output must belong to the authorized attempt"
 OUTPUT_PROJECT_CONFLICT_MESSAGE: Final = "Output belongs to a different project"
 PROJECT_CHANGED_MESSAGE: Final = "Project changed during request validation; retry"
@@ -84,9 +82,7 @@ SOURCE = strings.SOURCE
 EXPIRED_UNCONFIRMED = strings.EXPIRED_UNCONFIRMED
 STOPPED = strings.STOPPED
 CLEANUP_SCOPE = strings.RUN_CLEANUP
-REQUIRED_BUILD_FILES = frozenset(
-    {strings.MANIFEST_PATH, strings.SEMANTIC_MANIFEST_PATH, strings.CATALOG_PATH, strings.PUBLISHED_CATALOG_PATH}
-)
+REQUIRED_BUILD_FILES = frozenset({strings.MANIFEST_PATH})
 MAX_DIAGNOSTIC = 1024 * 1024
 
 
@@ -590,11 +586,6 @@ class JobStore:
                         )
                         if not REQUIRED_BUILD_FILES.issubset(files):
                             raise ValueError(MISSING_NATIVE_ARTIFACTS_MESSAGE)
-                        validation = ArtifactValidation.model_validate(output.validation_json)
-                        if not (validation.all_tests_passed is True
-                                and validation.representative_query_passed is True
-                                and validation.relations_verified is True):
-                            raise ValueError(MISSING_VALIDATION_EVIDENCE_MESSAGE)
                     if seal is None:
                         from .artifacts import ArtifactStore
 

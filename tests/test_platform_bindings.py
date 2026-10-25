@@ -120,3 +120,22 @@ def test_build_rejects_unsafe_schema(schema) -> None:
     with pytest.raises(ValidationError) as error:
         BuildRequest.model_validate({**build_body(), "execution": {**build_body()["execution"], "schema": schema}})
     assert [item["loc"] for item in error.value.errors()] == [("execution", "schema")]
+
+
+@pytest.mark.parametrize("install_path", ["dbt_packages", "installed_packages"])
+def test_committed_installed_packages_are_part_of_source_snapshot(repository, tmp_path, install_path):
+    from dbt_metricflow_service.platform.bindings import resolve_commit
+
+    (repository / "dbt_project.yml").write_text(f"name: sample\npackages-install-path: {install_path}\n")
+    (repository / "packages.yml").write_text("packages:\n  - package: example/package\n    version: 1.0.0\n")
+    package = repository / install_path / "package"
+    (package / "macros").mkdir(parents=True)
+    (package / "dbt_project.yml").write_text("name: package\nversion: '1.0'\n")
+    macro = "{% macro value() %}1{% endmacro %}"
+    (package / "macros/value.sql").write_text(macro)
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "include installed dependency")
+    sha = git(repository, "rev-parse", "HEAD")
+    restored, _ = resolve_commit(ProjectBinding("sample", str(repository), ".", "postgres"),
+                                 sha, tmp_path / "restored")
+    assert (restored / install_path / "package/macros/value.sql").read_text() == macro

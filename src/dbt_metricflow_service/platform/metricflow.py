@@ -6,18 +6,16 @@ from pathlib import Path
 from typing import Final
 
 from dbt_metricflow.cli.cli_configuration import CLIConfiguration
-from dbt_metricflow.cli.dbt_connectors.value_mapping_validation import validate_value_mapping_data
 from metricflow.engine.metricflow_engine import MetricFlowEngine, MetricFlowQueryRequest, MetricFlowQueryType
 from metricflow_semantics.naming.linkable_spec_name import StructuredLinkableSpecName
 
 from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.adapters.starrocks import STARROCKS_ADAPTER, StarRocksSqlClient
-from dbt_metricflow_service.platform.catalog import catalog_from_artifacts
+from dbt_metricflow_service.models.native import NativeManifest
 from dbt_metricflow_service.platform.models import (
     DataQueryResult,
     DimensionQueryResult,
     PlatformQueryRequest,
-    ProbeResult,
     QueryMode,
 )
 from dbt_metricflow_service.platform.queries import _json_cell, available_dimensions, serialize_rows, validate_query
@@ -26,7 +24,6 @@ from ..models.payloads import JsonValue, ResultColumn
 
 FILTER_VALUE_UNSUPPORTED_MESSAGE: Final[str] = '筛选值类型不支持'
 IN_FILTER_LIMIT_MESSAGE: Final[str] = 'IN 筛选值超限'
-QUERYABLE_METRICS_MISSING_MESSAGE: Final[str] = 'MetricFlow 没有可查询指标'
 INVALID_METRICS_DIMENSIONS_MESSAGE: Final[str] = 'invalid metrics or dimensions'
 PREVIEW_RESOURCE_UNAVAILABLE_MESSAGE: Final[str] = '预览资源不可查询'
 METRICFLOW_RESULT_MISSING_MESSAGE: Final[str] = 'MetricFlow 未返回结果集'
@@ -95,34 +92,24 @@ def execute_available_dimensions(project: Path, profiles: Path, metrics: tuple[s
         raise InvalidDimensionsRequest(INVALID_METRICS_DIMENSIONS_MESSAGE) from error
 
 
-def probe_query_capability(project: Path, profiles: Path) -> ProbeResult:
-    """独立的构建验收探针，不接收维度发现或数据查询请求。"""
-    configuration = _configuration(project, profiles)
-    validate_value_mapping_data(configuration.semantic_manifest_lookup, configuration.dbt_artifacts.adapter)
-    engine = _engine(configuration)
-    metrics = engine.list_metrics(include_dimensions=False)
-    if not metrics:
-        raise ValueError(QUERYABLE_METRICS_MISSING_MESSAGE)
-    result = engine.query(MetricFlowQueryRequest.create(metric_names=[metrics[0].name], limit=1))
-    return ProbeResult(query_capability=result.result_df is not None)
-
-
 def execute_programmatic(project: Path, profiles: Path, request: PlatformQueryRequest) -> DataQueryResult:
     """执行类型化数据请求；包含数据行查询、维度值、预览和 explain。"""
     configuration = _configuration(project, profiles)
     engine = _engine(configuration)
     if request.mode is QueryMode.PREVIEW:
-        catalog = catalog_from_artifacts(project / strings.TARGET_DIRECTORY)
-        resource = next(
-            (item for item in catalog.resources if item.resource_id == request.dataset_resource_id),
-            None,
-        )
-        if resource is None or resource.kind not in {strings.TABLE, strings.VIEW}:
+        manifest = NativeManifest.model_validate_json(
+            (project / strings.TARGET_DIRECTORY / strings.MANIFEST_FILE).read_bytes())
+        resource = manifest.nodes.get(request.dataset_resource_id) or manifest.sources.get(request.dataset_resource_id)
+        if (resource is None or not resource.relation_name or
+                request.dataset_resource_id not in manifest.sources and
+                (resource.resource_type not in
+                 (strings.DBT_MODEL_RESOURCE, strings.DBT_SEED_RESOURCE, strings.DBT_SNAPSHOT_RESOURCE)
+                 or resource.config.materialized == strings.DBT_EPHEMERAL_MATERIALIZATION)):
             raise ValueError(PREVIEW_RESOURCE_UNAVAILABLE_MESSAGE)
         adapter = configuration.dbt_artifacts.adapter
         with adapter.connection_named(strings.PREVIEW_CONNECTION_NAME):
             _response, table = adapter.execute(
-                f"select * from {resource.relation} limit {request.limit + 1}", fetch=True
+                f"select * from {resource.relation_name} limit {request.limit + 1}", fetch=True
             )
         columns = [
             ResultColumn(name=name, type=type(table[0][index]).__name__ if table.rows else strings.UNKNOWN_VALUE_TYPE)

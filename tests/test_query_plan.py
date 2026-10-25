@@ -8,15 +8,15 @@ from dbt_metricflow_service.models.payloads import DimensionOption
 from dbt_metricflow_service.models.queries import QueryRequest
 from dbt_metricflow_service.platform.dimensions import DimensionBinding, map_available_dimensions
 from dbt_metricflow_service.platform.models import DimensionQueryResult
-from tests.catalog_helpers import catalog, resource
+from tests.catalog_helpers import resource
 
 RUN = "00000000-0000-0000-0000-000000000001"
 RESOURCES = {
     "metric.revenue": resource("metric.revenue", name="revenue"),
-    "dataset.orders": resource("dataset.orders", capabilities=["PREVIEW"]),
+    "dataset.orders": resource("dataset.orders"),
 }
 DIMENSIONS = [DimensionOption.model_validate({
-    "optionId": "region", "resourceId": None, "displayName": "Region",
+    "optionId": "region", "displayName": "Region",
     "dimensionType": "categorical", "valueType": "string", "granularities": [], "operators": ["IN"],
 })]
 MAPPING = {"region": DimensionBinding("order__region", {})}
@@ -80,7 +80,7 @@ def test_base_time_option_changes_grouping_and_order_with_selected_grain(grain):
         "allowedFilters": ["="],
     }
     available, mapping = map_available_dimensions(
-        RUN, ["metric.revenue"], catalog(), DimensionQueryResult.model_validate(native)
+        RUN, ["metric.revenue"], DimensionQueryResult.model_validate(native)
     )
     assert len(available.dimensions) == 1
     option = available.dimensions[0]
@@ -115,7 +115,7 @@ def test_metric_time_grains_form_one_option_even_without_a_native_base_dimension
         "allowedFilters": ["="],
     }
     available, mapping = map_available_dimensions(
-        RUN, ["metric.revenue"], catalog(), DimensionQueryResult.model_validate(native)
+        RUN, ["metric.revenue"], DimensionQueryResult.model_validate(native)
     )
     assert len(available.dimensions) == 3
     option = available.dimensions[-1]

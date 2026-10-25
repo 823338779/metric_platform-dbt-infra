@@ -18,8 +18,6 @@ from psycopg2.extras import Json
 
 import dbt_metricflow_service.runtime.executor as runtime_execution
 from dbt_metricflow_service.execution.models import CommandSpec
-from dbt_metricflow_service.platform import metricflow
-from dbt_metricflow_service.platform.models import ProbeResult
 from dbt_metricflow_service.runtime.executor import ExecutionError, RuntimeExecutor
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
@@ -52,7 +50,7 @@ FIXTURE_TARGET = "fixture"
 MODE_KEY = "mode"
 CLEANUP_MODE = "CLEANUP"
 OBSERVED_KEY = "observed"
-ENGINE_LOGGER = "metricflow"
+ENGINE_LOGGER = "dbt"
 DIAGNOSTIC = "x" * 1000
 DBT = "dbt"
 BUILD = "build"
@@ -123,13 +121,24 @@ def programmatic_engine(monkeypatch, execute=None):
         assert (project / PROJECT_FILE).exists()
         assert os.environ[SCHEMA_ENV] == FIXTURE_SCHEMA
         assert os.environ[TARGET_ENV] == FIXTURE_TARGET
-        return ProbeResult(query_capability=True)
+        return SimpleNamespace(success=True, exception=None)
 
     def forbidden(*args, **kwargs):
         raise AssertionError("runtime must execute the engine in process")
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden)
-    monkeypatch.setattr(metricflow, "probe_query_capability", execute or default_execute)
+    def invoke(self, args):
+        from pathlib import Path
+        operation = execute or default_execute
+        return operation(Path(os.environ["DBT_PROJECT_DIR"]), Path(os.environ["DBT_PROFILES_DIR"]))
+    monkeypatch.setattr(dbtRunner, "invoke", invoke)
+
+
+async def run_build(executor, job, project):
+    environment = runtime_execution.build_engine_environment(
+        project, executor.settings.profiles_dir, job.schema_name, job.profile_binding_id)
+    spec = CommandSpec(("dbt", "build"), project, environment, True)
+    return await executor._dbt(job, spec, "BUILDING")
 
 
 @pytest.fixture
@@ -201,11 +210,11 @@ async def test_expired_lease_does_not_start_engine(execution, monkeypatch, tmp_p
     # 保留真实租约过期检查，SDK 的副作用绝不能出现。
     def execute(project, profiles):
         marker.touch()
-        return ProbeResult(query_capability=True)
+        return SimpleNamespace(success=True, exception=None)
 
     programmatic_engine(monkeypatch, execute)
     with pytest.raises(ExecutionError) as error:
-        await executor.probe_query_capability(job, tmp_path)
+        await run_build(executor, job, tmp_path)
     assert error.value.code == "LEASE_LOST"
     assert not marker.exists()
 
@@ -228,7 +237,7 @@ async def test_cancellation_or_timeout_waits_for_engine_before_workspace_removal
         marker = project / COMPLETED_FILE
         marker.touch()
         finished.append(marker.exists())
-        return ProbeResult(query_capability=True)
+        return SimpleNamespace(success=True, exception=None)
 
     programmatic_engine(monkeypatch, execute)
 
@@ -238,7 +247,7 @@ async def test_cancellation_or_timeout_waits_for_engine_before_workspace_removal
         ) as attempt:
             project = attempt / "project"
             await runtime_execution._thread(executor.artifacts.materialize, job.input_set_id, project)
-            await executor.probe_query_capability(job, project)
+            await run_build(executor, job, project)
 
     task = asyncio.create_task(run_engine())
     try:
@@ -277,11 +286,11 @@ async def test_timeout_retains_bounded_diagnostics_and_unknown_stop(execution, m
     def execute(project, profiles):
         logging.getLogger(ENGINE_LOGGER).warning(DIAGNOSTIC)
         time.sleep(0.3)
-        return ProbeResult(query_capability=True)
+        return SimpleNamespace(success=True, exception=None)
 
     programmatic_engine(monkeypatch, execute)
     with pytest.raises(ExecutionError) as error:
-        await executor.probe_query_capability(job, executor.settings.temp_root)
+        await run_build(executor, job, executor.settings.temp_root)
     assert error.value.code == "COMMAND_TIMEOUT"
     assert error.value.stopped is False
     assert error.value.payload.status == "timed_out"

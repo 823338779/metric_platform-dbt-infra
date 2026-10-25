@@ -91,7 +91,7 @@ uv run --frozen dbt-metricflow-service
 
 普通启动只检查数据库 schema，不自动建表。API 和 worker 同进程运行；已受理任务在数据库中，不依赖 Agent 在线。配置读取顺序：环境变量 > `SERVICE_CONFIG_FILE` 指定文件（默认 `config/service.yaml`）> 默认值。文件内相对路径相对配置文件。
 
-dbt 命令通过 `dbtRunner.invoke()` 直接执行，MetricFlow 验证和查询调用 Python API，均不启动引擎 CLI 子进程。
+dbt 命令通过 `dbtRunner.invoke()` 直接执行，MetricFlow 查询调用 Python API，均不启动引擎 CLI 子进程。
 这些调用在线程中运行并共用进程级串行锁，避免 dbt 全局配置和连接相互影响；HTTP 和租约心跳保持异步。
 `WORKER_CONCURRENCY` 控制任务槽位，不能使同一进程中的引擎调用并行。Git 源码操作仍使用 Git 工具。
 取消或超过单次调用预算后，服务等待当前调用真正退出才释放锁和清理工作目录，不强制终止 Python 线程；
@@ -134,7 +134,9 @@ dbt 命令通过 `dbtRunner.invoke()` 直接执行，MetricFlow 验证和查询�
 
 `ON_SUCCESS` 受理时即分配 generation；较新意图即使失败，也不会恢复较旧待处理意图。独立部署使用 `POST /deployments`，传入 `buildId/branchName/expectedTargetVersion/idempotencyKey`。目标自然键是 repository/environmentId/branchName。切换前重新核对远端 head、构建可用性和目标版本；真实 ref 消失停用指针，网络失败只标记 UNKNOWN。
 
-完整构建运行 deps、parse、compile、build（含测试）、必要的 source freshness、物理关系核验及 MetricFlow 探测。支持 table/view/ephemeral 和不写失败表的测试；seed、snapshot、自定义物化、SQL header、执行 hook 和数据库命令宏明确拒绝。工程读取遵循实际资源目录配置。模板约束不等于任意不可信代码沙箱。
+构建还原完整工程并生成临时 profile，只执行一次 `dbt build`，直接持久化该次调用返回的内存 Manifest。解析、编译、宏、schema/alias、物化、hook 和模型测试均遵循 dbt 原生行为；服务不再注入宏或预先校验模板、SQL、目标及结果，不运行独立的 parse、compile、source freshness、docs generate 或 MetricFlow 查询探测。成功仅表示 dbt build 成功。
+
+服务不运行 `dbt deps`。有依赖的工程应包含已安装并提交的 `dbt_packages`（或自定义 packages-install-path）；缺少依赖时由 dbt 报错。Git 快照和产物恢复会保留该目录。租约、并发、超时、连接配置、日志脱敏及产物完整性检查继续生效。SDK 失败事件及异常详情写入 `runtime_execution_log`，可按构建查看。
 
 取消先持久化意图。已确认取消返回 CANCELLED；外部写执行无法确认时返回 OUTCOME_UNKNOWN，保留保护引用且不自动重跑。
 
@@ -152,8 +154,8 @@ uv run --frozen dbt-service-admin build --file build-request.json
 | `GET /builds/{buildId}/execution-logs` | 按构建增量读取结构化 dbt 详细日志，支持 cursor、limit；[前端对接说明](docs/build-execution-logs-api.md) |
 | `POST /builds/{buildId}/cancel` | 取消构建 |
 | `GET /deployments/current`、`GET /deployments` | 自然键当前观察、意图历史 |
-| `GET /builds/{buildId}/catalog` | 目录搜索、kind 筛选、游标分页 |
-| `GET /builds/{buildId}/resources/{resourceId}` | 资源详情；另有 `/lineage`、`/source`、`/native-details` |
+| `GET /builds/{buildId}/catalog` | 返回 Manifest 原生指标、语义模型、节点与依赖映射 |
+| `GET /builds/{buildId}/resources/{resourceId}` | 按 dbt unique_id 返回原生节点；另有 `/lineage`、`/source`、`/native-details` |
 | `POST /query/available-dimensions?build_id={build_id}` | build_id 为独立 URL 参数，请求体指定 metricResourceIds，200 同步返回可用的 dimensions 列表，包含时间粒度和允许的过滤操作 |
 | `POST /query?build_id={build_id}` | build_id 为独立 URL 参数，同步执行 QUERY、EXPLAIN、PREVIEW、DIMENSION_VALUES，直接返回本次结果，最多 8 MiB |
 
@@ -175,7 +177,13 @@ uv run --frozen dbt-service-admin init-db
 
 空库初始化执行 storage/schema.sql。服务只支持该完整结构，不提供旧协议或旧持久化数据的升级与兼容入口。
 
-持久化保留构建、部署、异步任务及执行尝试、构建日志和必要的产物快照。成功任务不再保存通用结果和诊断副本；目录只保存封存文件，元数据只保存独立的版本、来源和验证字段。完整构建每次独立执行，不保留旧发布基线和默认输出复用机制。执行产物仅保留恢复工程所需文件及 manifest、semantic_manifest、catalog、published_catalog；compiled/run、run_results、sources 和额外验证证据文件只在构建期间使用。
+持久化保留构建、部署、异步任务及执行尝试、构建日志和必要的产物快照。成功任务不再保存通用结果和诊断副本；目录直接读取封存的 manifest.json，元数据只保存独立的版本和来源字段。完整构建每次独立执行，不保留旧发布基线和默认输出复用机制。执行产物保留恢复工程所需文件及 Manifest，dbt 同时生成的 semantic_manifest 也会保留；构建完成不要求 catalog.json 或额外验证证据；compiled/run、run_results、sources 和额外验证证据文件只在构建期间使用。
+
+资源目录接口仅读取对应构建的 `target/manifest.json`，不生成或存储 `published_catalog.json`，也不再创建统一资源模型。`GET /builds/{buildId}/catalog` 返回原生 `metadata`、`metrics`、`semantic_models`、`nodes`、`sources`、`parent_map`、`child_map`；字段保持 dbt 的 snake_case，扩展字段和 null 原样保留。维度直接位于 `semantic_models[unique_id].dimensions`，不存在服务生成的独立维度资源 ID。表列来自 `nodes` / `sources` 中的 YAML 声明，不代表数据库实际列清单。构建不运行 docs generate，不依赖 `catalog.json`。
+
+此次目录接口返回格式有变化：移除 `items`、`nextCursor`、kind 筛选和搜索分页，以及资源的 `attributes`、`capabilities`、`nativeDetails` 包装。资源详情与 `/native-details` 均直接返回原生节点；`/lineage` 返回该节点在 `parent_map`、`child_map` 中的条目，不补推依赖、不折叠 ephemeral 节点。`/source` 继续从原始工程快照读取文件。历史 Manifest 无需迁移。
+
+查询请求的 `metricResourceIds` 使用 `metrics` 的原生 ID，预览的 `datasetResourceId` 使用 `nodes` / `sources` 的原生 ID。`available-dimensions` 仍实时调用 MetricFlow，保留按构建、指标集合和路径确定的 `optionId`；维度选项改为返回引擎原生的 `name` 和 `semanticModelName`，移除自造的 `resourceId`。目录声明的维度不等同于某个指标组合实际可查询的维度。
 
 对结果未知的执行，人工核实目标仓库停止后才释放保护：
 
@@ -213,7 +221,7 @@ uv run --frozen ruff check src tests
 uv run --frozen pytest -q tests/integration/test_publication_proxy_flow.py
 ```
 
-测试覆盖完整构建、部署、四种查询、固定 schema 覆盖与不安全模板失败，创建独立测试 schema；该证据不代表 StarRocks 已做真实集成验证。
+测试覆盖单次 dbt 构建、部署、四种查询、自定义宏与 dbt 失败日志，创建独立测试 schema；该证据不代表 StarRocks 已做真实集成验证。
 
 ## 外部执行快照与环境隔离
 
@@ -237,9 +245,9 @@ EXECUTION_CREDENTIALS:
 
 secret 值通过受保护的环境变量注入。profile 只写 dbt `env_var` 引用，执行后销毁且不封存。实例清单不含环境、catalog/schema；不得为同一物理实例登记多个不同 instanceId，否则无法证明跨别名的物理隔离。
 
-StarRocks 的 profile.catalog 指定 catalog，profile.schema 指定 database；profile.database 留空，避免 source 继承后被误识别成外部 catalog。模型的 catalog/database 覆盖必须仍指向同一物理目标。PostgreSQL 的 catalog 映射为 dbname，DuckDB 的 catalog 必须等于清单中绝对文件路径的文件名（去后缀）。不存在或不可写的外部 catalog 会导致构建失败；不能把更换 catalog 字段当成已验证的适配器写入能力。
+StarRocks 的 profile.catalog 指定 catalog，profile.schema 指定 database；profile.database 留空，避免 source 继承后被误识别成外部 catalog。模型的 catalog/database/schema 覆盖由 dbt 与适配器解释，服务不再限制节点必须属于 profile 中的 schema。PostgreSQL 的 catalog 映射为 dbname，DuckDB 的 catalog 必须等于清单中绝对文件路径的文件名（去后缀）。不存在或不可写的外部 catalog 会导致构建失败；不能把更换 catalog 字段当成已验证的适配器写入能力。
 
-物理归属从不可变构建事实核验，已使用的目标不能交给另一环境。同一环境并发构建串行写入同一目标；租约过期或外部停止情况未知时保留写入保护，直到现有 reconcile 流程确认停止。
+物理归属从不可变构建事实核验，已使用的目标不能交给另一环境。构建按请求声明的物理目标串行调度；工程宏额外选择的其他 schema 不单独纳入该锁；租约过期或外部停止情况未知时保留写入保护，直到现有 reconcile 流程确认停止。
 
 真实隔离验收需设置 `ENVIRONMENT_ISOLATION_E2E=1`、`SERVICE_TEST_DATABASE_URL`（专用服务测试库）、`ENVIRONMENT_TEST_REPOSITORY`、`DBT_ENV_SECRET_ISOLATION_USER`、`DBT_ENV_SECRET_ISOLATION_PASSWORD`；可选 `ENVIRONMENT_TEST_HOST/PORT/BRANCH`。使用已有真实仓库和只读原始数据，测试创建唯一 `env_e2e_*` schema，保留构建事实便于审计：
 

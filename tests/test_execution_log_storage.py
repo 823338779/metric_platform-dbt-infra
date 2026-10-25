@@ -209,3 +209,70 @@ async def test_cancellation_waits_for_last_event_to_be_persisted(tmp_path, monke
                 "SELECT message FROM runtime_execution_log WHERE job_id=%s", (job.job_id,),
             ).scalars().all()
         assert messages == ["last event after cancellation"]
+
+
+@pytest.mark.parametrize("failure", [None, "sql", "test", "parse", "deps"])
+async def test_direct_build_uses_native_macros_and_records_failures(tmp_path, failure):
+    import json
+
+    from dbt_metricflow_service.platform.build import execute_build
+    from dbt_metricflow_service.settings import Settings
+    from dbt_metricflow_service.storage.artifacts import ArtifactStore
+    from tests.resource_helpers import make_resource_project
+
+    project, profiles, _ = make_resource_project(tmp_path)
+    macro = project / "macros/generate_schema_name.sql"
+    macro.parent.mkdir(exist_ok=True)
+    macro.write_text("{% macro generate_schema_name(custom_schema_name, node) %}native_schema{% endmacro %}")
+    model = project / "models/orders.sql"
+    model.write_text("{{ config(alias='native_orders', pre_hook='select 1') }}\n" + model.read_text())
+    if failure == "sql":
+        model.write_text("select * from missing_build_table")
+    elif failure == "test":
+        tests = project / "tests"
+        tests.mkdir(exist_ok=True)
+        (tests / "must_fail.sql").write_text("select 1 as intentional_failure")
+    elif failure == "parse":
+        model.write_text("{{ undefined_build_macro() }}")
+    elif failure == "deps":
+        (project / "packages.yml").write_text("packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n")
+    with isolated_database() as db:
+        db.initialize()
+        service(SimpleNamespace(db=db)).submit_snapshot(request(), CALLER)
+        jobs = JobStore(db)
+        job = jobs.claim(str(uuid4()), toolchain_version=TOOLCHAIN)
+        job.profile_binding_id, job.schema_name = "test", "main"
+        artifacts = ArtifactStore(db)
+        executor = RuntimeExecutor(Settings(profiles_dir=profiles, command_timeout_seconds=60,
+                                           max_output_bytes=1024), jobs, artifacts)
+        if failure:
+            with pytest.raises(ExecutionError) as error:
+                await execute_build(executor, job, project)
+            assert error.value.code == "COMMAND_FAILED"
+        else:
+            result = await execute_build(executor, job, project)
+            with db.session() as session:
+                artifacts.seal(result.output_set_id, session)
+            manifest = json.loads(artifacts.read_file(result.output_set_id, "target/manifest.json"))
+            node = next(node for node in manifest["nodes"].values() if node["name"] == "orders")
+            assert node["schema"] == "native_schema"
+            assert node["alias"] == "native_orders"
+            assert not (project / "target/catalog.json").exists()
+            assert not (project / "target/published_catalog.json").exists()
+        with db.transaction() as connection:
+            rows = connection.exec_driver_sql(
+                "SELECT command,level,message FROM runtime_execution_log WHERE job_id=%s", (job.job_id,),
+            ).mappings().all()
+            outputs = connection.exec_driver_sql(
+                "SELECT count(*) FROM runtime_artifact_set WHERE producer_attempt_id=%s", (job.attempt_id,),
+            ).scalar_one()
+        assert rows and {row["command"] for row in rows} == {"build"}
+        if failure:
+            assert outputs == 0
+            assert any(row["level"] == "error" for row in rows)
+            text = "\n".join(row["message"] for row in rows)
+            expected = {"sql": "missing_build_table", "test": "must_fail", "parse": "undefined_build_macro",
+                        "deps": "dbt deps"}
+            assert expected[failure] in text
+        else:
+            assert outputs == 1

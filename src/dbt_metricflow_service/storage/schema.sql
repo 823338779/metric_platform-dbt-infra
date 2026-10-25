@@ -14,8 +14,6 @@ BEGIN
   phase=CASE WHEN NEW.status='SUCCEEDED' THEN 'COMPLETE'
              WHEN NEW.phase='PREPARING' THEN 'RESOLVING_SOURCE' ELSE NEW.phase END,
   output_set_id=NEW.output_set_id,error_code=NEW.error_code,
-  catalog_digest=(SELECT raw_sha256 FROM runtime_artifact_file
-                  WHERE set_id=NEW.output_set_id AND relative_path='target/published_catalog.json'),
   finished_at=NEW.finished_at,updated_at=clock_timestamp(),version=version+1
  WHERE run_id=NEW.job_id;
  RETURN NEW;
@@ -66,7 +64,6 @@ CREATE TABLE engine_build (
     phase text DEFAULT 'RESOLVING_SOURCE'::text NOT NULL,
     cancel_requested boolean DEFAULT false NOT NULL,
     output_set_id uuid,
-    catalog_digest text,
     error_code text,
     version bigint DEFAULT 1 NOT NULL,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
@@ -114,8 +111,6 @@ COMMENT ON COLUMN engine_build.phase IS '执行进度阶段';
 COMMENT ON COLUMN engine_build.cancel_requested IS '持久取消意图';
 
 COMMENT ON COLUMN engine_build.output_set_id IS '可靠封存产物引用';
-
-COMMENT ON COLUMN engine_build.catalog_digest IS '封存目录字节摘要';
 
 COMMENT ON COLUMN engine_build.error_code IS '脱敏稳定错误码';
 
@@ -253,7 +248,6 @@ CREATE TABLE runtime_artifact_set (
     content_digest text,
     file_count integer DEFAULT 0 NOT NULL,
     raw_bytes bigint DEFAULT 0 NOT NULL,
-    validation_json jsonb DEFAULT '{}'::jsonb NOT NULL,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     sealed_at timestamp with time zone,
     CONSTRAINT runtime_artifact_set_kind_check CHECK ((kind = ANY (ARRAY['SOURCE'::text, 'EXECUTION'::text]))),
@@ -288,7 +282,6 @@ COMMENT ON COLUMN runtime_artifact_set.file_count IS '集合文件数量';
 
 COMMENT ON COLUMN runtime_artifact_set.raw_bytes IS '集合原始文件总字节数';
 
-COMMENT ON COLUMN runtime_artifact_set.validation_json IS '发布验证证据';
 
 COMMENT ON COLUMN runtime_artifact_set.created_at IS '集合创建时间';
 

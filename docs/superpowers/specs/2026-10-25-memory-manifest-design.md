@@ -4,7 +4,7 @@
 
 比较方案：复用 parse 返回值并传给后续命令会改变重新解析行为；采用返回字段可保留现有执行语义，因此选择后者。
 
-dbt 返回内存对象；执行层通过可选回调直接传递 Manifest，由 platform/build.py 的 capture_manifest 内部序列化 WritableManifest 并校验字节大小。回调仍在引擎环境退出前执行。只在最终 docs generate 时请求该内容，避免每个阶段重复序列化和在诊断模型中携带大对象。ArtifactStore.capture 接收可选 manifest_json 字节，以内存字节计算大小和摘要并写入原路径。其他文件和本地验证读取不变，执行产物仍经原有租约检查与事务封存。内存缺失或序列化失败不能回退到磁盘或发布成功。
+dbt 返回内存对象；执行层通过可选回调直接传递 Manifest，由独立的 platform/manifest_capture.py 中的 ManifestCapture 序列化 WritableManifest 并校验字节大小。捕获器保留 dbt 原生 Manifest 对象，不定义或转换为自建 Manifest 模型。回调仍在引擎环境退出前执行。每个需要 Manifest 的命令独立捕获，构建校验从捕获字节生成已有 NativeManifest 投影，不再读取本地 manifest.json。最终只将 docs generate 的内容交给 ArtifactStore.capture，以内存字节计算大小和摘要并写入原路径。其他文件仍按既有流程读取，执行产物仍经原有租约检查与事务封存。内存缺失或序列化失败不能回退到磁盘或发布成功。
 
 范围不包含删除本地文件、改造其他产物来源、数据库结构变化、移除源码快照或直接让 dbt 连接业务数据库。
 

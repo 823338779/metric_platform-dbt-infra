@@ -7,7 +7,7 @@ import pytest
 
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.jobs import JobStore
-from dbt_metricflow_service.storage.records import ArtifactMetadata, ArtifactValidation
+from dbt_metricflow_service.storage.records import ArtifactMetadata
 from tests.synchronous_queries import inline_executor
 from tests.test_build_acceptance import CALLER, request, service
 from tests.test_publication_storage import store as store
@@ -36,34 +36,17 @@ def ready_build(store, tmp_path, before_finish=None):
     }
     source = artifacts.capture(job.project_id, directory, metadata=ArtifactMetadata.model_validate(evidence))
     assert jobs.attach_input(run, job.lease_token, source, project_digest=evidence["project_digest"])
-    for name in ("manifest.json", "semantic_manifest.json", "catalog.json"):
-        (target / name).write_text("{}", encoding="utf-8")
-    catalog = {
-        "schemaVersion": 1,
-        "projectId": job.project_id,
-        "releaseId": str(build.build_id),
-        "resources": [
-            {
-                "resourceId": "metric.revenue",
-                "nativeId": "metric.revenue",
-                "attributes": {
-                    "metricType": "simple",
-                    "definitionSummary": "Revenue",
-                    "inputMetricIds": [],
-                    "datasetIds": [],
-                    "timeConfig": {},
-                },
-                "name": "revenue",
-                "displayName": "Revenue",
-                "kind": "METRIC",
-                "capabilities": ["QUERY"],
-                "nativeDetails": {},
-            }
-        ],
-        "relations": [],
-        "relationBindings": [],
-    }
-    (target / "published_catalog.json").write_text(json.dumps(catalog), encoding="utf-8")
+    from tests.test_publication_catalog import package
+
+    manifest = package()
+    manifest["metrics"] = {"metric.revenue": {
+        "name": "revenue", "label": "Revenue", "type": "simple",
+        "type_params": {"metric_aggregation_params": {"semantic_model": "orders", "agg": "sum"}},
+        "depends_on": {"nodes": ["semantic_model.sample.orders"]},
+    }}
+    manifest["parent_map"] = {"metric.revenue": ["semantic_model.sample.orders"]}
+    manifest["child_map"] = {"semantic_model.sample.orders": ["metric.revenue"]}
+    (target / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     output = artifacts.capture(
         job.project_id,
         directory,
@@ -71,9 +54,6 @@ def ready_build(store, tmp_path, before_finish=None):
         producer_attempt_id=job.attempt_id,
         metadata=ArtifactMetadata(**evidence,
             source_set_id=source,
-            validation_json=ArtifactValidation(
-                allTestsPassed=True, representativeQueryPassed=True, relationsVerified=True
-            ),
         ),
     )
     if before_finish:
@@ -112,7 +92,7 @@ def test_catalog_survives_physical_removal(store, tmp_path):
             "UPDATE runtime_job SET run_lifecycle='CLEANED' WHERE job_id=%s", (app.store.get(build.build_id).run_id,)
         )
     catalogs = CatalogService(app.store, artifacts)
-    assert catalogs.list(build.build_id).items[0].resource_id == "metric.revenue"
+    assert "metric.revenue" in catalogs.list(build.build_id)["metrics"]
     assert app.snapshot_view(build.build_id).catalog_available
     assert not app.snapshot_view(build.build_id).query_available
 
@@ -142,7 +122,7 @@ def test_cleanup_completion_preserves_catalog_and_source(store, tmp_path):
     jobs.reserve_cleanup(run)
     cleanup = jobs.claim(str(uuid4()), toolchain_version=app.toolchain, kinds=["RUN_CLEANUP"])
     assert jobs.finish(cleanup.job_id, cleanup.lease_token)
-    assert CatalogService(app.store, artifacts).list(build.build_id).items
+    assert CatalogService(app.store, artifacts).list(build.build_id)["metrics"]
     assert app.snapshot_view(build.build_id).catalog_available
     assert app.snapshot_view(build.build_id).query_unavailable_reason == "PHYSICAL_OBJECTS_REMOVED"
 

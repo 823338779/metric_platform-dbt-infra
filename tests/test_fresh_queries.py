@@ -34,7 +34,7 @@ def live_service():
         return DataQueryResult(columns=[{"name": "orders", "type": "int"}], rows=[[count]], truncated=False)
 
     builds = SimpleNamespace(load=lambda _: build, query_unavailable_reason=lambda _: None, timeout=30)
-    catalogs = SimpleNamespace(read_build=lambda _: catalog([resource("metric.orders", capabilities=["QUERY"])]))
+    catalogs = SimpleNamespace(read_build=lambda _: catalog([resource("metric.orders")]))
     return QueryService(builds, catalogs, execute, discover_dimensions), build_id, executions
 
 

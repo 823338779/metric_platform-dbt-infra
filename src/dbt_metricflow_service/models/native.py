@@ -102,6 +102,15 @@ class NativeValueMapping(NativeProjection):
     display_dimension: str
 
 
+class NativeColumn(NativeProjection):
+    name: str | None = None
+    type: str | None = None
+    index: int | None = None
+    data_type: str | None = None
+    description: str | None = None
+    comment: str | None = None
+
+
 class NativeNode(NativeProjection):
     name: str | None = None
     description: str | None = None
@@ -114,6 +123,7 @@ class NativeNode(NativeProjection):
     alias: str | None = None
     identifier: str | None = None
     relation_name: str | None = None
+    columns: dict[str, NativeColumn] = Field(default_factory=dict)
     compiled_code: str = ""
     depends_on: NativeDependencies = Field(default_factory=NativeDependencies)
     dimensions: list[NativeNode] = Field(default_factory=list)
@@ -142,32 +152,6 @@ class NativeManifest(NativeProjection):
 class SemanticManifest(NativeProjection):
     semantic_models: list[NativeNode]
     metrics: list[NativeNode]
-
-
-class NativeColumn(NativeProjection):
-    name: str | None = None
-    type: str | None = None
-    index: int | None = None
-    comment: str | None = None
-
-
-class NativePhysicalNode(NativeProjection):
-    columns: dict[str, NativeColumn] = Field(default_factory=dict)
-
-
-class NativePhysicalCatalog(NativeProjection):
-    metadata: NativeMetadata = Field(default_factory=NativeMetadata)
-    nodes: dict[str, NativePhysicalNode] = Field(default_factory=dict)
-    sources: dict[str, NativePhysicalNode] = Field(default_factory=dict)
-
-
-class NativeResult(NativeProjection):
-    unique_id: str
-    status: str
-
-
-class NativeResults(NativeProjection):
-    results: list[NativeResult]
 
 
 class NativeProject(NativeProjection):

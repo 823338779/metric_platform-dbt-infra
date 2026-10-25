@@ -1,6 +1,5 @@
 """执行 profile、物理命名空间和外部 secret 解析的边界。"""
 
-import json
 from pathlib import Path
 
 import pytest
@@ -9,7 +8,6 @@ import yaml
 from dbt_metricflow_service.models.configuration import ExecutionCredential, ExecutionInstance
 from dbt_metricflow_service.platform.execution_profile import (
     materialized_profile,
-    validate_execution_manifest,
     validate_execution_target,
 )
 from dbt_metricflow_service.settings import Settings
@@ -73,30 +71,3 @@ def test_aliases_share_target_but_unknown_instance_is_rejected():
     with pytest.raises(ValueError, match="EXECUTION_TARGET_UNVERIFIED"):
         validate_execution_target(body.model_copy(update={
             "connection": body.connection.model_copy(update={"host": "unexpected.test"})}), settings())
-
-
-def test_manifest_rejects_other_catalog(tmp_path):
-    body = snapshot()
-    manifest = {"nodes": {"model.test": {"resource_type": "model", "config": {"materialized": "table"},
-        "database": body.schema_name, "schema": body.schema_name, "alias": "orders",
-        "relation_name": f"`other_catalog`.`{body.schema_name}`.`orders`"}}}
-    (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    with pytest.raises(ValueError):
-        validate_execution_manifest(tmp_path, body)
-    manifest["nodes"]["model.test"]["relation_name"] = f"`{body.catalog}`.`{body.schema_name}`.`orders`"
-    (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    validate_execution_manifest(tmp_path, body)
-
-
-def test_starrocks_manifest_uses_adapter_catalog_semantics(tmp_path):
-    body = snapshot()
-    node = {"resource_type": "model", "config": {"materialized": "table"},
-            "database": None, "schema": body.schema_name, "alias": "orders",
-            "relation_name": f"`{body.schema_name}`.`orders`"}
-    path = tmp_path / "manifest.json"
-    path.write_text(json.dumps({"nodes": {"model.test": node}}), encoding="utf-8")
-    validate_execution_manifest(tmp_path, body)
-    node["config"]["catalog"] = "other_catalog"
-    path.write_text(json.dumps({"nodes": {"model.test": node}}), encoding="utf-8")
-    with pytest.raises(ValueError, match="catalog"):
-        validate_execution_manifest(tmp_path, body)

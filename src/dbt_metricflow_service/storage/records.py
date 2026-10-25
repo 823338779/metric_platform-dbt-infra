@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool
+from pydantic import BaseModel, ConfigDict, Field
 
 from dbt_metricflow_service import constants as strings
 
@@ -59,12 +59,6 @@ class JobErrorDetail(StoredRecord):
     output_truncated: bool | None = None
 
 
-class ArtifactValidation(Contract):
-    all_tests_passed: StrictBool | None = None
-    representative_query_passed: StrictBool | None = None
-    relations_verified: StrictBool | None = None
-
-
 class ArtifactMetadata(StoredRecord):
     source_set_id: str | None = None
     source_commit_sha: str | None = None
@@ -72,7 +66,6 @@ class ArtifactMetadata(StoredRecord):
     config_version: str | None = strings.DEFAULT_CONFIG_VERSION
     toolchain_version: str | None = strings.DEFAULT_TOOLCHAIN_VERSION
     format_version: str = strings.ARTIFACT_FORMAT_VERSION
-    validation_json: ArtifactValidation = Field(default_factory=ArtifactValidation)
 
 
 class StoredProject(StoredRecord):
@@ -160,7 +153,6 @@ class StoredBuild(StoredRecord):
     phase: str  # 当前执行阶段。
     cancel_requested: bool  # 是否持久化了取消意图。
     output_set_id: str | None  # 完整构建产物集合。
-    catalog_digest: str | None  # 封存目录字节摘要。
     error_code: str | None  # 稳定错误码。
     version: int  # 构建事实版本。
     created_at: datetime  # 受理时间。

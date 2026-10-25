@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -11,13 +10,11 @@ from typing import TYPE_CHECKING, Final, ParamSpec, TypeVar, cast
 
 from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.execution.dbt import run_dbt
-from dbt_metricflow_service.execution.metricflow import MetricFlowRequest, ResultT, run_metricflow
 from dbt_metricflow_service.execution.models import (
     CommandSpec,
     JobRecord,
     JobStatus,
 )
-from dbt_metricflow_service.platform.models import ProbeResult
 from dbt_metricflow_service.runtime.execution_logs import ExecutionLogWriter
 from dbt_metricflow_service.runtime.workspace import attempt_workspace
 from dbt_metricflow_service.settings import Settings
@@ -43,16 +40,10 @@ T = TypeVar("T")
 # 任务类型与持久阶段使用固定协议值，避免执行器扩展公开队列状态。
 BUILD_RUN = strings.BUILD_RUN
 RUN_CLEANUP = strings.RUN_CLEANUP
-VALIDATING = strings.VALIDATING
 PROJECT_DIRECTORY = strings.PROJECT_DIRECTORY
-UTF8 = strings.UTF8
-JSON_MODE = strings.JSON_MODE
 ERROR_LEASE_LOST = strings.LEASE_LOST
 ERROR_COMMAND_FAILED = strings.COMMAND_FAILED
 ERROR_COMMAND_TIMEOUT = strings.COMMAND_TIMEOUT
-ERROR_RESULT_TOO_LARGE = strings.RESULT_TOO_LARGE
-ERROR_RESULT_INVALID = strings.RESULT_INVALID
-ERROR_INVALID_QUERY = strings.INVALID_QUERY
 TARGET_DIRECTORY = strings.TARGET_DIRECTORY
 
 
@@ -140,7 +131,7 @@ class RuntimeExecutor:
             raise ValueError(UNSUPPORTED_JOB_KIND)
 
     async def _build(self, job: LeasedJob, attempt: Path) -> ExecutionResult:
-        from ..platform.build import execute_publication
+        from ..platform.build import execute_build
 
         if not job.request_json.build_id:
             raise ExecutionError(strings.FIXED_COMMIT_INPUT_REQUIRED)
@@ -161,7 +152,7 @@ class RuntimeExecutor:
             await asyncio.sleep(0.25)
         profile = materialized_profile(raw, attempt, self.settings, project)
         with profile as profiles:
-            return await execute_publication(self, job, attempt, project, profiles=profiles)
+            return await execute_build(self, job, project, profiles=profiles)
 
     async def _prepare_build_source(self, job: LeasedJob) -> LeasedJob:
         """受理之后获取固定源码；所有慢 I/O 均在短事务之外。"""
@@ -239,52 +230,6 @@ class RuntimeExecutor:
                 JobErrorDetail.model_validate(record, from_attributes=True),
                 stopped=not timed_out and (not may_write or completed_failure),
             )
-
-    async def probe_query_capability(
-        self, job: LeasedJob, project: Path, profiles: Path | None = None,
-    ) -> ProbeResult:
-        from ..platform.metricflow import probe_query_capability
-        return await self._metricflow(job, project, probe_query_capability, ProbeResult, profiles)
-
-    async def _metricflow(
-        self, job: LeasedJob, project: Path, operation: Callable[[Path, Path], ResultT],
-        result_type: type[ResultT], profiles: Path | None = None,
-    ) -> ResultT:
-        # 请求作为内存对象交给执行线程，结果也不经过临时控制文件。
-        environment = build_engine_environment(
-            project, profiles or self.settings.profiles_dir, cast(str, job.schema_name),
-            cast(str, job.profile_binding_id),
-        )
-        external = job.kind == RUN_CLEANUP
-        result = await run_metricflow(
-            job.project_id, MetricFlowRequest(environment, operation), self.settings.command_timeout_seconds,
-            self.settings.max_output_bytes,
-            lambda: self._authorize(job, VALIDATING, external=external),
-        )
-        # 构建探测在内存中读取结果；清理结果由调用方丢弃。
-        if result.record.status is JobStatus.FAILED and result.error_code == ERROR_INVALID_QUERY:
-            raise ExecutionError(ERROR_INVALID_QUERY)
-        self._check_record(result.record, may_write=job.kind == RUN_CLEANUP)
-        value = result.payload
-        if not isinstance(value, result_type):
-            raise ExecutionError(ERROR_RESULT_INVALID)
-        size = 0
-        try:
-            for chunk in json.JSONEncoder(ensure_ascii=False).iterencode(
-                value.model_dump(mode=strings.PYTHON_MODE, by_alias=True, exclude_unset=True),
-            ):
-                size += len(chunk.encode(UTF8))
-                if size > self.settings.max_result_bytes:
-                    raise ExecutionError(ERROR_RESULT_TOO_LARGE)
-        except (TypeError, ValueError, RecursionError) as error:
-            record = result.record.with_outcome(
-                status=JobStatus.FAILED, exit_code=result.record.exit_code, stderr=type(error).__name__,
-            )
-            raise ExecutionError(
-                ERROR_COMMAND_FAILED, JobErrorDetail.model_validate(record, from_attributes=True),
-                stopped=job.kind != RUN_CLEANUP,
-            ) from error
-        return value
 
     @staticmethod
     def _metadata(job: LeasedJob) -> ArtifactMetadata:

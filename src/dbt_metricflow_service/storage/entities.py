@@ -171,9 +171,6 @@ class ArtifactSet(Base):
     content_digest: Mapped[str | None] = mapped_column(comment="按路径排序的原始文件摘要清单之摘要")
     file_count: Mapped[int] = mapped_column(server_default=text(strings.SQL_ZERO), comment="集合文件数量")
     raw_bytes: Mapped[BigInt] = mapped_column(server_default=text(strings.SQL_ZERO), comment="集合原始文件总字节数")
-    validation_json: Mapped[JsonDocument] = mapped_column(
-        server_default=text(strings.SQL_EMPTY_JSON), comment="发布验证证据"
-    )
     created_at: Mapped[datetime] = mapped_column(
         server_default=text(strings.SQL_CLOCK_TIMESTAMP), comment="集合创建时间"
     )
@@ -225,7 +222,6 @@ class Build(Base):
     phase: Mapped[str] = mapped_column(server_default=text(strings.SQL_RESOLVING_SOURCE), comment="执行进度阶段")
     cancel_requested: Mapped[bool] = mapped_column(server_default=text(strings.SQL_FALSE), comment="持久取消意图")
     output_set_id: Mapped[StringUUID | None] = mapped_column(comment="可靠封存产物引用")
-    catalog_digest: Mapped[str | None] = mapped_column(comment="封存目录字节摘要")
     error_code: Mapped[str | None] = mapped_column(comment="脱敏稳定错误码")
     version: Mapped[BigInt] = mapped_column(server_default=text(strings.SQL_ONE), comment="对象递增版本")
     created_at: Mapped[datetime] = mapped_column(server_default=text(strings.SQL_CLOCK_TIMESTAMP), comment="受理时间")

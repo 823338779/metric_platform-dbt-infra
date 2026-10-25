@@ -289,149 +289,6 @@
       }
     },
     {
-      "name": "catalog",
-      "model": "CatalogPage",
-      "value": {
-        "items": [
-          {
-            "resourceId": "metric.revenue",
-            "nativeId": "metric.revenue",
-            "name": "revenue",
-            "displayName": "metric.revenue",
-            "description": null,
-            "sourcePath": null,
-            "capabilities": [
-              "QUERY"
-            ],
-            "nativeDetails": {},
-            "kind": "METRIC",
-            "attributes": {
-              "metricType": "simple",
-              "definitionSummary": "收入",
-              "inputMetricIds": [],
-              "datasetIds": [
-                "semantic_model.orders"
-              ],
-              "filters": null,
-              "timeConfig": {}
-            }
-          },
-          {
-            "resourceId": "dimension.orders.region",
-            "nativeId": "dimension.orders.region",
-            "name": "region",
-            "displayName": "dimension.orders.region",
-            "description": null,
-            "sourcePath": null,
-            "capabilities": [],
-            "nativeDetails": {},
-            "kind": "DIMENSION",
-            "attributes": {
-              "datasetId": "semantic_model.orders",
-              "dimensionType": "categorical",
-              "expression": null,
-              "timeGranularity": null,
-              "valueMapping": null
-            }
-          },
-          {
-            "resourceId": "semantic_model.orders",
-            "nativeId": "semantic_model.orders",
-            "name": "orders",
-            "displayName": "semantic_model.orders",
-            "description": null,
-            "sourcePath": null,
-            "capabilities": [],
-            "nativeDetails": {},
-            "kind": "SEMANTIC_MODEL",
-            "attributes": {
-              "modelResourceId": "model.orders",
-              "dimensionIds": [
-                "dimension.orders.region"
-              ],
-              "entities": [],
-              "measures": [],
-              "defaultTimeDimension": null
-            }
-          },
-          {
-            "resourceId": "model.orders",
-            "nativeId": "model.orders",
-            "name": "orders",
-            "displayName": "model.orders",
-            "description": null,
-            "sourcePath": null,
-            "capabilities": [
-              "PREVIEW"
-            ],
-            "nativeDetails": {},
-            "kind": "TABLE",
-            "attributes": {
-              "origin": "BUILT",
-              "relation": {
-                "database": null,
-                "schema": "analytics",
-                "identifier": "orders"
-              },
-              "columns": {}
-            }
-          },
-          {
-            "resourceId": "model.order_view",
-            "nativeId": "model.order_view",
-            "name": "order_view",
-            "displayName": "model.order_view",
-            "description": null,
-            "sourcePath": null,
-            "capabilities": [
-              "PREVIEW"
-            ],
-            "nativeDetails": {},
-            "kind": "VIEW",
-            "attributes": {
-              "origin": "BUILT",
-              "relation": {
-                "database": null,
-                "schema": "analytics",
-                "identifier": "orders_view"
-              },
-              "columns": {}
-            }
-          }
-        ],
-        "nextCursor": null,
-        "buildId": "12345678-1234-4234-8234-123456789abc"
-      }
-    },
-    {
-      "name": "resource",
-      "model": "ResourceView",
-      "value": {
-        "resourceId": "metric.revenue",
-        "nativeId": "metric.revenue",
-        "name": "revenue",
-        "displayName": "metric.revenue",
-        "description": null,
-        "sourcePath": null,
-        "capabilities": [
-          "QUERY"
-        ],
-        "nativeDetails": {},
-        "buildId": "12345678-1234-4234-8234-123456789abc",
-        "kind": "METRIC",
-        "attributes": {
-          "metricType": "simple",
-          "definitionSummary": "收入",
-          "inputMetricIds": [],
-          "datasetIds": [
-            "semantic_model.orders"
-          ],
-          "filters": null,
-          "timeConfig": {}
-        }
-      }
-    },
-    {
       "name": "source",
       "model": "ResourceSourceView",
       "value": {
@@ -439,32 +296,6 @@
         "resourceId": "metric.revenue",
         "path": "models/metrics.yml",
         "content": "metrics: []\n"
-      }
-    },
-    {
-      "name": "lineage",
-      "model": "ResourceLineageView",
-      "value": {
-        "buildId": "12345678-1234-4234-8234-123456789abc",
-        "resourceId": "metric.revenue",
-        "dependencies": [
-          {
-            "upstreamResourceId": "semantic_model.orders",
-            "downstreamResourceId": "metric.revenue",
-            "kind": "DEPENDS_ON"
-          }
-        ]
-      }
-    },
-    {
-      "name": "native-details",
-      "model": "ResourceNativeView",
-      "value": {
-        "buildId": "12345678-1234-4234-8234-123456789abc",
-        "resourceId": "metric.revenue",
-        "nativeDetails": {
-          "type": "simple"
-        }
       }
     }
   ],
@@ -625,6 +456,188 @@
         "schema": "analytics",
         "threads": 2,
         "businessTimezone": "Asia/Shanghai"
+      }
+    }
+  ],
+  "nativeExamples": [
+    {
+      "path": "/builds/{build_id}/catalog",
+      "value": {
+        "metadata": {
+          "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json"
+        },
+        "metrics": {
+          "metric.sample.orders": {
+            "name": "orders",
+            "label": "展示 orders",
+            "type": "simple",
+            "type_params": {
+              "metric_aggregation_params": {
+                "semantic_model": "orders",
+                "agg": "sum"
+              }
+            },
+            "depends_on": {
+              "nodes": [
+                "semantic_model.sample.orders"
+              ]
+            }
+          },
+          "metric.sample.returns": {
+            "name": "returns",
+            "label": "展示 returns",
+            "type": "simple",
+            "type_params": {
+              "metric_aggregation_params": {
+                "semantic_model": "returns",
+                "agg": "sum"
+              }
+            },
+            "depends_on": {
+              "nodes": [
+                "semantic_model.sample.returns"
+              ]
+            }
+          },
+          "metric.sample.net": {
+            "name": "net",
+            "type": "derived",
+            "type_params": {
+              "expr": "orders - returns",
+              "metrics": [
+                {
+                  "name": "orders"
+                },
+                {
+                  "name": "returns"
+                }
+              ]
+            }
+          }
+        },
+        "semantic_models": {
+          "semantic_model.sample.orders": {
+            "name": "orders",
+            "original_file_path": "models/orders.yml",
+            "dimensions": [
+              {
+                "name": "region",
+                "type": "categorical"
+              }
+            ],
+            "entities": [],
+            "measures": [],
+            "depends_on": {
+              "nodes": [
+                "model.sample.orders"
+              ]
+            }
+          },
+          "semantic_model.sample.returns": {
+            "name": "returns",
+            "original_file_path": "models/orders.yml",
+            "dimensions": [
+              {
+                "name": "region",
+                "type": "categorical"
+              }
+            ],
+            "entities": [],
+            "measures": [],
+            "depends_on": {
+              "nodes": [
+                "model.sample.returns"
+              ]
+            }
+          }
+        },
+        "nodes": {
+          "model.sample.orders": {
+            "name": "orders",
+            "resource_type": "model",
+            "config": {
+              "materialized": "table"
+            },
+            "database": "db",
+            "schema": "s",
+            "alias": "orders",
+            "relation_name": "\"db\".\"s\".\"orders\"",
+            "columns": {
+              "region": {
+                "name": "region",
+                "description": "地区",
+                "data_type": "varchar"
+              }
+            }
+          },
+          "model.sample.returns": {
+            "name": "returns",
+            "resource_type": "model",
+            "config": {
+              "materialized": "table"
+            },
+            "database": "db",
+            "schema": "s",
+            "alias": "returns",
+            "relation_name": "\"db\".\"s\".\"returns\"",
+            "columns": {
+              "region": {
+                "name": "region",
+                "description": "地区",
+                "data_type": "varchar"
+              }
+            }
+          }
+        },
+        "sources": {},
+        "parent_map": {
+          "metric.sample.net": [
+            "metric.sample.orders",
+            "metric.sample.returns"
+          ],
+          "metric.sample.orders": [
+            "semantic_model.sample.orders"
+          ]
+        },
+        "child_map": {
+          "metric.sample.orders": [
+            "metric.sample.net"
+          ]
+        }
+      }
+    },
+    {
+      "path": "/builds/{build_id}/resources/{resource_id}",
+      "value": {
+        "name": "orders",
+        "label": "展示 orders",
+        "type": "simple",
+        "type_params": {
+          "metric_aggregation_params": {
+            "semantic_model": "orders",
+            "agg": "sum"
+          }
+        },
+        "depends_on": {
+          "nodes": [
+            "semantic_model.sample.orders"
+          ]
+        }
+      }
+    },
+    {
+      "path": "/builds/{build_id}/resources/{resource_id}/{view}",
+      "value": {
+        "parent_map": {
+          "metric.sample.orders": [
+            "semantic_model.sample.orders"
+          ]
+        },
+        "child_map": {
+          "metric.sample.orders": [
+            "metric.sample.net"
+          ]
+        }
       }
     }
   ]

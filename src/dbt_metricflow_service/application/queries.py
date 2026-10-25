@@ -9,8 +9,7 @@ from uuid import UUID
 from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.application.builds import BuildService
 from dbt_metricflow_service.application.catalog import CatalogService
-from dbt_metricflow_service.models.artifacts import PublishedCatalog, PublishedResource
-from dbt_metricflow_service.models.payloads import AvailableDimensions, DimensionOption
+from dbt_metricflow_service.models.payloads import AvailableDimensions, DimensionOption, JsonObject
 from dbt_metricflow_service.models.queries import (
     AvailableDimensionsRequest,
     AvailableDimensionsView,
@@ -64,21 +63,19 @@ class QueryService:
         )
 
     @staticmethod
-    def _metrics(catalog: PublishedCatalog, selected: list[str]) -> dict[str, PublishedResource]:
-        indexed = {item.resource_id: item for item in catalog.resources}
-        if any(
-            key not in indexed or indexed[key].kind != strings.METRIC or strings.QUERY not in indexed[key].capabilities
-            for key in selected
-        ):
+    def _metrics(manifest: JsonObject, selected: list[str]) -> dict[str, JsonObject]:
+        metrics = cast(dict[str, JsonObject], manifest.get(strings.DBT_METRICS_FIELD, {}))
+        if any(key not in metrics for key in selected):
             raise ServiceError(strings.INVALID_METRIC_RESOURCE, METRIC_BUILD_CONFLICT_MESSAGE)
-        return indexed
+        return {**cast(dict[str, JsonObject], manifest.get(strings.DBT_NODES_FIELD, {})),
+                **cast(dict[str, JsonObject], manifest.get(strings.DBT_SOURCES_FIELD, {})), **metrics}
 
     def _available_dimensions(
-        self, build: StoredBuild, selected: list[str], catalog: PublishedCatalog,
+        self, build: StoredBuild, selected: list[str], catalog: JsonObject,
     ) -> tuple[AvailableDimensions, dict[str, DimensionBinding]]:
         indexed = self._metrics(catalog, selected)
-        native = self.discover_dimensions(build, tuple(indexed[key].name for key in selected))
-        return map_available_dimensions(build.build_id, selected, catalog, native)
+        native = self.discover_dimensions(build, tuple(cast(str, indexed[key][strings.NAME_FIELD]) for key in selected))
+        return map_available_dimensions(build.build_id, selected, native)
 
     def submit(self, build_id: UUID | str, request: QueryRequest, caller: str) -> QueryResult:
         build = self.builds.load(build_id)

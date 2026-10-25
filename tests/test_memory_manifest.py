@@ -9,10 +9,10 @@ from types import SimpleNamespace
 import pytest
 from dbt.cli.main import dbtRunner
 from dbt.contracts.graph.manifest import Manifest
-from dbt_common.utils.encoding import JSONEncoder
 
 from dbt_metricflow_service.execution.dbt import run_dbt
 from dbt_metricflow_service.execution.models import CommandSpec, JobStatus
+from dbt_metricflow_service.platform.manifest_capture import ManifestCapture
 from dbt_metricflow_service.runtime.executor import build_engine_environment
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.entities import ArtifactFile, ArtifactSet
@@ -89,25 +89,20 @@ async def test_failed_or_missing_manifest_cannot_provide_payload(tmp_path, monke
 async def test_real_docs_manifest_roundtrips_through_database_without_disk_capture(tmp_path, monkeypatch):
     project, profiles, _ = make_resource_project(tmp_path)
     environment = build_engine_environment(project, profiles, "main", "test")
-    received = []
-
-    def capture_manifest(manifest):
-        assert isinstance(manifest, Manifest)
-        payload = manifest.writable_manifest().to_dict(omit_none=False, context={"artifact": True})
-        received.append(json.dumps(payload, cls=JSONEncoder, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
-
     async def authorize():
         pass
 
-    for args in (("build",), ("docs", "generate")):
+    for args in (("parse",), ("compile",), ("build",), ("docs", "generate")):
+        capture = ManifestCapture(10 * 1024 * 1024)
         spec = CommandSpec(("dbt", *args, "--project-dir", str(project), "--profiles-dir", str(profiles)),
                            project, environment, args == ("build",))
         result = await run_dbt("memory", spec, 60, 1024, authorize,
-                               manifest_sink=capture_manifest if args[0] == "docs" else None)
+                               manifest_sink=capture)
         assert result.status == JobStatus.SUCCEEDED, result.stderr
-    assert len(received) == 1
+        assert capture.manifest.nodes
+    content = capture.content
     disk = project / "target/manifest.json"
-    assert json.loads(received[0]) == json.loads(disk.read_bytes())
+    assert json.loads(content) == json.loads(disk.read_bytes())
     original_open = Path.open
 
     def guarded_open(path, *args, **kwargs):
@@ -120,13 +115,20 @@ async def test_real_docs_manifest_roundtrips_through_database_without_disk_captu
         with db.transaction() as connection:
             connection.exec_driver_sql("INSERT INTO runtime_project(project_id) VALUES ('memory')")
         store = ArtifactStore(db)
-        identifier = store.capture("memory", project, kind="EXECUTION", manifest_json=received[0])
-        assert store.read_file(identifier, "target/manifest.json") == received[0]
+        identifier = store.capture("memory", project, kind="EXECUTION", manifest_json=content)
+        assert store.read_file(identifier, "target/manifest.json") == content
+        from dbt_metricflow_service.application.catalog import CatalogService
+
+        catalog = CatalogService(None, store).read_build(SimpleNamespace(
+            build_status="SUCCEEDED", output_set_id=identifier))
+        assert catalog["metrics"]
+        assert any(item["dimensions"] for item in catalog["semantic_models"].values())
+        assert catalog["parent_map"]
         with db.session() as session:
             file = session.get(ArtifactFile, (identifier, "target/manifest.json"))
             assert file.codec == "gzip"
             assert file.stored_size < file.raw_size
-            assert gzip.decompress(file.content) == received[0]
+            assert gzip.decompress(file.content) == content
 
 
 @pytest.mark.parametrize("payload,codec", [

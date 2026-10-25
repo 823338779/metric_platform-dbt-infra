@@ -7,7 +7,6 @@ import pytest
 from pydantic import ValidationError
 
 from dbt_metricflow_service.models.execution import SnapshotBuildRequest as BuildRequest
-from dbt_metricflow_service.platform.build import prepare_publication_project
 from dbt_metricflow_service.runtime.executor import RuntimeExecutor
 from tests.data_helpers import leased_job
 
@@ -22,11 +21,6 @@ def test_request_requires_fixed_schema(extra):
         BuildRequest.model_validate({**body, "execution": {**body["execution"], **extra}})
 
 
-def test_project_does_not_inject_run_alias(tmp_path):
-    prepare_publication_project(tmp_path, "analytics")
-    assert not (tmp_path / "macros/generate_alias_name.sql").exists()
-
-
 @pytest.mark.parametrize("input_set", [None, "source-snapshot"])
 async def test_cleanup_never_materializes_or_invokes_engine(tmp_path, monkeypatch, input_set):
     def forbidden(*args, **kwargs):
@@ -34,7 +28,7 @@ async def test_cleanup_never_materializes_or_invokes_engine(tmp_path, monkeypatc
 
     executor = RuntimeExecutor(SimpleNamespace(temp_root=tmp_path), None,
                                SimpleNamespace(materialize=forbidden))
-    monkeypatch.setattr(executor, "probe_query_capability", forbidden)
+    monkeypatch.setattr(executor, "_dbt", forbidden)
     job = leased_job(kind="RUN_CLEANUP", parent_run_id=str(uuid4()), input_set_id=input_set, schema_name="analytics")
     result = await executor.execute(job)
     assert result.output_set_id is None

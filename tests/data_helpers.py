@@ -70,7 +70,6 @@ def stored_build(**changes):
         "phase": "DONE",
         "cancel_requested": False,
         "output_set_id": "output",
-        "catalog_digest": None,
         "error_code": None,
         "version": 1,
         "created_at": now,

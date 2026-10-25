@@ -1,16 +1,9 @@
-"""Proof and write-policy flags must not gain truth through type coercion."""
+"""Native boolean fields reject ambiguous string and integer values."""
 
 import pytest
 from pydantic import ValidationError
 
 from dbt_metricflow_service.models.native import NativeNode
-from dbt_metricflow_service.platform.models import ProbeResult
-
-
-@pytest.mark.parametrize("value", ["true", "false", 1, 0])
-def test_query_proof_requires_an_actual_boolean(value):
-    with pytest.raises(ValidationError):
-        ProbeResult.model_validate({"queryCapability": value})
 
 
 @pytest.mark.parametrize("value", ["true", "false", 1, 0])

@@ -16,15 +16,13 @@ from dbt_metricflow_service import constants as strings
 
 from ..models.configuration import DbtProjectProfile, ExecutionProfile, ExecutionProfileOutput
 from ..models.execution import SNAPSHOT_TARGET, ExecutionSnapshot
-from ..models.native import NativeManifest
 from ..settings import Settings
 
 INVALID_DBT_PROFILE_NAME_MESSAGE: Final[str] = 'invalid dbt profile name'
-MODEL_OUTSIDE_EXECUTION_CATALOG_MESSAGE: Final[str] = 'model relation escapes execution catalog'
 
 UTF8 = strings.UTF8
 STARROCKS, POSTGRES, DUCKDB = strings.STARROCKS_ADAPTER, strings.POSTGRES_ADAPTER, strings.DUCKDB_ADAPTER
-PROFILES_FILE, PROJECT_FILE, MANIFEST_FILE = strings.DBT_PROFILES_FILE, strings.DBT_PROJECT_FILE, strings.MANIFEST_FILE
+PROFILES_FILE, PROJECT_FILE = strings.DBT_PROFILES_FILE, strings.DBT_PROJECT_FILE
 TARGET_UNVERIFIED = strings.EXECUTION_TARGET_UNVERIFIED
 CREDENTIAL_UNAVAILABLE = strings.CREDENTIAL_UNAVAILABLE
 SECRET_PATTERN = re.compile(r"DBT_ENV_SECRET_[A-Z0-9_]+\Z")
@@ -109,30 +107,3 @@ def materialized_profile(
         configuration = {profile_name: profile.model_dump(by_alias=True, exclude_unset=True)}
         (directory / PROFILES_FILE).write_text(yaml.safe_dump(configuration), encoding=UTF8)
         yield directory
-
-
-def validate_execution_manifest(target: Path, snapshot: ExecutionSnapshot) -> None:
-    """必须核验适配器 database 含义及显式 relation catalog，不能仅比较 schema。"""
-    from .build import validate_bound_manifest
-
-    validate_bound_manifest(target, snapshot.schema_name)
-    manifest = NativeManifest.model_validate_json((target / MANIFEST_FILE).read_text(encoding=UTF8))
-    starrocks = snapshot.connection.type == STARROCKS
-    # StarRocks 内置宏将节点 database 置空；物化宏另外读取 config.catalog/database。
-    databases = (None, snapshot.schema_name, snapshot.catalog) if starrocks else (snapshot.catalog,)
-    for node in manifest.nodes.values():
-        if (
-            node.resource_type != strings.DBT_MODEL_RESOURCE
-            or node.config.materialized == strings.DBT_EPHEMERAL_MATERIALIZATION
-        ):
-            continue
-        parts = [part.strip('`" ') for part in (node.relation_name or "").split(".")]
-        config = node.config
-        configured_catalog = (
-            config.catalog if strings.DBT_CATALOG_FIELD in config.model_fields_set else snapshot.catalog
-        )
-        if (node.database not in databases or len(parts) not in (2, 3)
-                or starrocks and configured_catalog != snapshot.catalog
-                or starrocks and config.database not in (None, snapshot.schema_name)
-                or len(parts) == 3 and parts[0] != snapshot.catalog):
-            raise ValueError(MODEL_OUTSIDE_EXECUTION_CATALOG_MESSAGE)

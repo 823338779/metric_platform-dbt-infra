@@ -86,3 +86,7 @@ def test_exchange_fixture_matches_actual_openapi(client):
     fixture = json.loads((Path(__file__).parent / "fixtures/contract.json").read_text(encoding="utf-8"))
     for item in fixture["examples"]:
         validate(item["value"], {"$ref": "#/components/schemas/" + item["model"], "components": document["components"]})
+
+    for item in fixture["nativeExamples"]:
+        schema = document["paths"][item["path"]]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+        validate(item["value"], {**schema, "components": document["components"]})

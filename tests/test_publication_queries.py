@@ -43,7 +43,7 @@ def test_available_dimensions_are_versioned_and_do_not_merge_paths(store, tmp_pa
     dimensions = service.fixture_available_dimensions.dimensions
     assert len({item.option_id for item in dimensions}) == 3
     assert all("token" not in item.model_dump() for item in dimensions)
-    assert next(item for item in dimensions if item.granularities).resource_id is None
+    assert next(item for item in dimensions if item.granularities).semantic_model_name is None
     assert next(item for item in dimensions if item.granularities).operators == []
     assert len({item.display_name for item in dimensions}) == 3
 

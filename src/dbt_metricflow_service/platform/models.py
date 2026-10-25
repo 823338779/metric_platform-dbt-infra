@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, StrictBool
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from dbt_metricflow_service import constants as strings
 
@@ -83,9 +83,3 @@ class DataQueryResult(Contract):
     rows: list[list[JsonValue]] = Field(default_factory=list)
     truncated: bool = False
     sql: str | None = None
-
-
-class ProbeResult(Contract):
-    """构建验收的真实查询能力证明。"""
-
-    query_capability: StrictBool

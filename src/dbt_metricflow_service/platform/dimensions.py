@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 from dbt_metricflow_service import constants as strings
 
-from ..models.artifacts import PublishedCatalog, ResourceKind
 from ..models.payloads import AvailableDimensions, DimensionOption
 from .models import DimensionQueryResult, NativeDimension
 
@@ -21,7 +20,7 @@ class DimensionBinding:
 
 
 def map_available_dimensions(
-    build_id: str, metric_ids: list[str], catalog: PublishedCatalog, native: DimensionQueryResult,
+    build_id: str, metric_ids: list[str], native: DimensionQueryResult,
 ) -> tuple[AvailableDimensions, dict[str, DimensionBinding]]:
     selected = sorted(set(metric_ids))
     output: list[DimensionOption] = []
@@ -46,20 +45,11 @@ def map_available_dimensions(
         option_id = hashlib.sha256(canonical.encode(strings.UTF8)).hexdigest()
         if option_id in mapping:
             continue
-        candidates = [item for item in catalog.resources
-                      if item.kind == ResourceKind.DIMENSION and item.name == entry.name]
-        if entry.semantic_model_name is not None:
-            dataset_ids = {
-                item.resource_id for item in catalog.resources
-                if item.kind == ResourceKind.SEMANTIC_MODEL and item.name == entry.semantic_model_name
-            }
-            candidates = [item for item in candidates if item.attributes.dataset_id in dataset_ids]
-        resource_id = candidates[0].resource_id if len(candidates) == 1 else None
-        label = candidates[0].display_name if resource_id else entry.name or token
+        label = entry.name or token
         if PATH_SEPARATOR in token and entry.name != METRIC_TIME:
             label += "（" + " → ".join(token.split(PATH_SEPARATOR)[:-1]) + "）"
         output.append(DimensionOption(
-            option_id=option_id, resource_id=resource_id, display_name=label,
+            option_id=option_id, name=entry.name, semantic_model_name=entry.semantic_model_name, display_name=label,
             dimension_type=entry.type, value_type=entry.value_type, granularities=list(entry.grain_tokens),
             operators=entry.operators if entry.operators is not None else native.allowed_filters,
         ))

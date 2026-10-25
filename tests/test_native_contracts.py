@@ -2,25 +2,19 @@
 import pytest
 from pydantic import ValidationError
 
-from dbt_metricflow_service.models.artifacts import MetricTimeConfig
-from dbt_metricflow_service.models.catalog import NativeCatalog
 from dbt_metricflow_service.models.native import NativeNode
 from dbt_metricflow_service.models.payloads import ResultColumn
 from dbt_metricflow_service.platform.models import (
     DataQueryResult,
     DimensionQueryResult,
     PlatformQueryRequest,
-    ProbeResult,
 )
 
 
 @pytest.mark.parametrize("model,payload", [
-    (NativeCatalog, {"resources": [], "dependencies": []}),
     (DimensionQueryResult, {}),
-    (ProbeResult, {"queryCapability": True}),
     (DataQueryResult, {}),
     (ResultColumn, {"name": "total", "type": "Decimal"}),
-    (MetricTimeConfig, {}),
 ])
 def test_owned_payloads_reject_extra_fields(model, payload):
     with pytest.raises(ValidationError):

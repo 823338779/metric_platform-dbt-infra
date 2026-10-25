@@ -92,8 +92,9 @@ def test_execution_file_selection_excludes_transient_build_outputs(tmp_path):
 
     (tmp_path / PROJECT_FILE).write_text(PROJECT_TEXT, encoding="utf-8")
     retained = [MODEL_PATH, "dbt_packages/example/dbt_project.yml", "dbt_packages/example/macros/test.sql",
-                "target/manifest.json", TARGET_PATH, "target/catalog.json", "target/published_catalog.json"]
-    transient = ["target/compiled/artifacts/orders.sql", "target/run/artifacts/orders.sql",
+                "target/manifest.json", TARGET_PATH, "target/catalog.json"]
+    transient = ["target/published_catalog.json", "target/compiled/artifacts/orders.sql",
+                 "target/run/artifacts/orders.sql",
                  "target/run_results.json", "target/sources.json", "target/publication_evidence.json",
                  "target/publication_state.json"]
     for relative in retained + transient:

@@ -51,7 +51,10 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
     git(repo, "init", "-b", "main")
     git(repo, "config", "user.name", "Test")
     git(repo, "config", "user.email", "test@example.invalid")
+    # 单次 build 的输入是依赖已准备好的完整工程；服务不再替用户运行 deps。
+    shutil.copytree(repo / "macros/local_pkg", repo / "dbt_packages/local_pkg")
     git(repo, "add", ".")
+    git(repo, "add", "-f", "dbt_packages")
     git(repo, "commit", "-m", "fixture")
     repository_url = "https://fixture.invalid/metrics.git"
     monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
@@ -146,9 +149,8 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
         assert {
             "target/manifest.json",
             "target/semantic_manifest.json",
-            "target/catalog.json",
-            "target/published_catalog.json",
         }.issubset(paths)
+        assert "target/catalog.json" not in paths
         assert not any(path.startswith(("target/compiled/", "target/run/")) for path in paths)
         assert not {
             "target/run_results.json",
@@ -157,9 +159,9 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
             "target/publication_state.json",
         }.intersection(paths)
         assert yaml.safe_load(project_file.read_text(encoding="utf-8"))["target-path"] == "custom-target"
-        resources = catalogs.list(first.build_id).items
-        metric = next(item.resource_id for item in resources if item.kind == "METRIC")
-        dataset = next(item.resource_id for item in resources if "PREVIEW" in item.capabilities)
+        resources = catalogs.list(first.build_id)
+        metric = next(iter(resources["metrics"]))
+        dataset = next(key for key, item in resources["nodes"].items() if item["resource_type"] == "model")
         result = await asyncio.to_thread(
             queries.available_dimensions,
             first.build_id,
@@ -185,10 +187,9 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
         git(repo, "commit", "-am", "semantic-change")
         semantic = await build()
         after = catalogs.read(semantic.build_id)[1]
-        assert {item.relation.identifier for item in after.relation_bindings} == {
-            item.relation.identifier for item in before.relation_bindings
+        assert {item["relation_name"] for item in after["nodes"].values() if item["resource_type"] == "model"} == {
+            item["relation_name"] for item in before["nodes"].values() if item["resource_type"] == "model"
         }
-        assert all(item.mode == "BUILT" for item in after.relation_bindings)
         completed = await asyncio.to_thread(
             queries.submit,
             first.build_id,
@@ -209,11 +210,11 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
         assert Decimal(
             str((await query(second.build_id, mode="QUERY", metricResourceIds=[metric])).rows[0][0])
         ) == Decimal("32.00")
-        # 非法模板必须在外部写入前失败，不能破坏活动部署或旧物理数据。
-        unsafe = repo / "macros" / "unsafe.sql"
-        unsafe.write_text("{{ run_query('drop table protected') }}")
+        # dbt 自己报告解析失败，服务记录失败且不切换当前部署。
+        invalid = repo / "models" / "invalid.sql"
+        invalid.write_text("{{ undefined_build_macro() }}")
         git(repo, "add", ".")
-        git(repo, "commit", "-m", "unsafe-candidate")
+        git(repo, "commit", "-m", "invalid-candidate")
         rejected = builds.submit_snapshot(
             BuildRequest(
                 repository=repository_url,
@@ -247,7 +248,7 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
                 ).first()
                 is not None
             )
-        assert catalogs.list(first.build_id).items
+        assert catalogs.list(first.build_id)["metrics"]
         assert catalogs.resource(first.build_id, dataset, "source").content
         with pytest.raises(ServiceError):
             await query(first.build_id, mode="QUERY", metricResourceIds=[metric])

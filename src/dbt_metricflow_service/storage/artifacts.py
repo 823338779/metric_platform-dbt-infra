@@ -96,7 +96,7 @@ EXCLUDED_PARTS = frozenset(
     }
 )
 TARGET_FILES = frozenset({
-    strings.MANIFEST_FILE, strings.SEMANTIC_MANIFEST_FILE, strings.CATALOG_FILE, strings.PUBLISHED_CATALOG_FILE,
+    strings.MANIFEST_FILE, strings.SEMANTIC_MANIFEST_FILE, strings.CATALOG_FILE,
 })
 DELETING = strings.DELETING
 LIVE_ATTEMPT_STATES = (strings.EXECUTING, strings.EXPIRED_UNCONFIRMED)
@@ -293,9 +293,6 @@ class ArtifactStore:
                 content_digest="",
                 file_count=len(files),
                 raw_bytes=total,
-                validation_json=metadata.validation_json.model_dump(
-                    mode=strings.JSON_MODE, by_alias=True, exclude_unset=True
-                ),
             )
             session.add(artifact_set)
             # 先写父集合，随后逐文件 flush，保持外键顺序与有界内存。

@@ -12,7 +12,6 @@ from metricflow_semantics.errors.error_classes import DimensionValueMappingError
 from dbt_metricflow_service.platform.metricflow import (
     execute_available_dimensions,
     execute_programmatic,
-    probe_query_capability,
 )
 from dbt_metricflow_service.platform.models import PlatformQueryRequest
 from tests.dimension_mapping_helpers import write_mapping_project
@@ -34,7 +33,6 @@ def test_dbt_to_service_mapping_and_raw_dimension_values(mapping_project):
     source = manifest["semantic_models"]["semantic_model.mapping_test.requests"]
     semantic_source = next(model for model in semantic["semantic_models"] if model["name"] == "requests")
     assert source["dimensions"][0]["value_mapping"] == semantic_source["dimensions"][0]["value_mapping"]
-    assert probe_query_capability(project, project).query_capability
     dimensions = execute_available_dimensions(project, project, ("requests_count",))
     assert {"raw_value", "display_value"}.isdisjoint(item.name for item in dimensions.dimensions)
     assert next(item for item in dimensions.dimensions if item.name == "status").semantic_model_name == "requests"
@@ -79,7 +77,7 @@ def test_dbt_to_service_mapping_and_raw_dimension_values(mapping_project):
     ]
 
 
-def test_saved_query_and_build_validator_use_native_configuration(mapping_project):
+def test_saved_query_and_native_mapping_validator_use_native_configuration(mapping_project):
     cfg = CLIConfiguration()
     cfg.setup(dbt_project_path=mapping_project, dbt_profiles_path=mapping_project, configure_file_logging=False)
     result = cfg.mf.query(MetricFlowQueryRequest.create(saved_query_name="status_summary"))
@@ -88,4 +86,5 @@ def test_saved_query_and_build_validator_use_native_configuration(mapping_projec
     with adapter.connection_named("bad_mapping_fixture"):
         adapter.execute("CREATE OR REPLACE VIEW status_codes AS SELECT NULL::INTEGER AS code, 'bad' AS label")
     with pytest.raises(DimensionValueMappingError, match="NULL"):
-        probe_query_capability(mapping_project, mapping_project)
+        from dbt_metricflow.cli.dbt_connectors.value_mapping_validation import validate_value_mapping_data
+        validate_value_mapping_data(cfg.semantic_manifest_lookup, adapter)

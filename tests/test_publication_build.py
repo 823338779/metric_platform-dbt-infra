@@ -1,237 +1,95 @@
-"""复用物理关系必须通过受控宏进入工具链，并验证最终原生产物。"""
+"""构建只调用 dbt build，捕获返回 Manifest，不执行外部验收。"""
 
 import json
-import os
-import subprocess
-import sys
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 import yaml
-from resource_helpers import make_resource_project
 
-from dbt_metricflow_service.models.native import NativeNode
-from dbt_metricflow_service.platform.build import (
-    execute_publication,
-    prepare_publication_project,
-    validate_bound_manifest,
-    validate_readonly_sql,
-)
-from dbt_metricflow_service.platform.models import ProbeResult
-from dbt_metricflow_service.storage.records import ArtifactValidation, JobRequest
+from dbt_metricflow_service.platform.build import execute_build
+from dbt_metricflow_service.runtime.executor import ExecutionError, RuntimeExecutor
+from dbt_metricflow_service.storage.records import JobRequest
 from tests.data_helpers import leased_job
 
 
 @pytest.fixture
 def publication_executor(tmp_path):
-    """工具链边界提供原生产物，发布验证和目录封存仍执行真实代码。"""
-    from dbt_metricflow_service.platform.catalog import CATALOG_SCHEMA, MANIFEST_SCHEMA
-    from dbt_metricflow_service.runtime.executor import RuntimeExecutor
-
     project = tmp_path / "project"
     project.mkdir()
-    (project / "dbt_project.yml").write_text("name: sample\nversion: '1.0'\n", encoding="utf-8")
-    target = project / "target"
-    target.mkdir()
+    (project / "dbt_project.yml").write_text("name: sample\nversion: '1.0'\ntarget-path: custom-target\n")
+    (project / "models").mkdir()
+    (project / "models/orders.sql").write_text("{{ config(schema='custom', pre_hook='select 1') }} select 1")
+    (project / "macros").mkdir()
+    macro = "{% macro generate_schema_name(custom_schema_name, node) %}{{ target.schema }}{% endmacro %}"
+    (project / "macros/generate_schema_name.sql").write_text(macro)
+    (project / "packages.yml").write_text("packages: []")
     job = leased_job(project_id="sample", request_json=JobRequest(build_id=str(uuid4())),
                      schema_name="candidate", profile_binding_id="test", toolchain_version="1")
-    alias = "orders"
-    manifest = {"metadata": {"dbt_schema_version": MANIFEST_SCHEMA, "adapter_type": "postgres"},
-                "nodes": {"model.sample.orders": {"resource_type": "model", "name": "orders",
-                          "config": {"materialized": "table"}, "database": "db", "schema": "candidate",
-                          "alias": alias, "relation_name": f'"candidate"."{alias}"', "compiled_code": "select 1"},
-                          "test.sample.orders": {"resource_type": "test", "config": {},
-                                                 "compiled_code": "select 1 where false"}}}
-    results = [{"unique_id": key, "status": "success"} for key in manifest["nodes"]]
-    physical = {"metadata": {"dbt_schema_version": CATALOG_SCHEMA},
-                "nodes": {"model.sample.orders": {"columns": {}}}}
-    captured = {}
+    calls, captured = [], {}
+    manifest = {"nodes": {}, "memory_build": True}
 
-    async def dbt(_job, spec, _phase, *, manifest_sink=None):
-        if spec.argv[1] in ("parse", "compile", "build"):
-            (target / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-            (target / "semantic_manifest.json").write_text('{"semantic_models": [], "metrics": []}')
-        if spec.argv[1] == "build":
-            (target / "run_results.json").write_text(json.dumps({"results": results}))
-        if spec.argv[1] == "docs":
-            (target / "catalog.json").write_text(json.dumps(physical))
-            (target / "run_results.json").write_text('{"results": []}')
-            # 最终命令内存内容与磁盘版本可区分，验证没有偷偷回退到读文件。
-            def to_dict(*, omit_none, context):
-                assert omit_none is False
-                assert context == {"artifact": True}
-                return {**manifest, "memory_final": True, "label": "指标"}
-
-            manifest_sink(SimpleNamespace(writable_manifest=lambda: SimpleNamespace(to_dict=to_dict)))
-
-    async def metricflow(*_args):
-        return ProbeResult(query_capability=True)
+    async def dbt(_job, spec, phase, *, manifest_sink=None):
+        calls.append((spec, phase))
+        assert spec.argv[1] == "build", "build must not run additional commands"
+        assert spec.write_operation
+        manifest_sink(SimpleNamespace(writable_manifest=lambda: SimpleNamespace(to_dict=lambda **_: manifest)))
 
     def capture(_project_id, _project, **kwargs):
         captured.update(kwargs)
         return "sealed-output"
 
     executor = SimpleNamespace(settings=SimpleNamespace(profiles_dir=tmp_path, max_artifact_file_bytes=1024 * 1024),
-                               _dbt=dbt, probe_query_capability=metricflow, _metadata=RuntimeExecutor._metadata,
-                               artifacts=SimpleNamespace(capture=capture))
-    return executor, job, project, results, physical, captured
+        _dbt=dbt, _metadata=RuntimeExecutor._metadata, artifacts=SimpleNamespace(capture=capture))
+    return executor, job, project, calls, captured
 
 
-async def test_publication_persists_catalog_file_and_minimum_validation_flags(publication_executor):
-    executor, job, project, _results, _physical, captured = publication_executor
-    await execute_publication(executor, job, project.parent, project)
+async def test_only_build_persists_memory_manifest_without_other_artifacts(publication_executor, monkeypatch):
+    executor, job, project, calls, captured = publication_executor
+    original_open = Path.open
 
-    catalog = json.loads((project / "target/published_catalog.json").read_text(encoding="utf-8"))
-    assert catalog["releaseId"] == job.request_json.build_id
-    assert catalog["relationBindings"][0]["mode"] == "BUILT"
-    assert not (project / "target/publication_evidence.json").exists()
-    assert captured["metadata"].validation_json == ArtifactValidation(
-        all_tests_passed=True, representative_query_passed=True, relations_verified=True,
-    )
-    assert not hasattr(captured["metadata"], "catalog_json")
-    assert json.loads(captured["manifest_json"])["memory_final"] is True
-    assert '"label":"指标"'.encode() in captured["manifest_json"]
-    assert b'": ' not in captured["manifest_json"]
+    def guarded_open(path, mode="r", *args, **kwargs):
+        if path.name in ("manifest.json", "run_results.json", "catalog.json", "sources.json") and "r" in mode:
+            raise AssertionError("build must not read artifact proof files")
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+    result = await execute_build(executor, job, project)
+    assert result.output_set_id == "sealed-output"
+    assert len(calls) == 1
+    assert calls[0][1] == "BUILDING"
+    assert json.loads(captured["manifest_json"])["memory_build"] is True
+    assert "validation_json" not in captured["metadata"].model_dump()
+    assert yaml.safe_load((project / "dbt_project.yml").read_text())["target-path"] == "target"
+    assert not (project / "target").exists()
 
 
-async def test_publication_rejects_missing_final_memory_manifest(publication_executor):
-    executor, job, project, _results, _physical, captured = publication_executor
-    original = executor._dbt
+async def test_build_preserves_project_macros_and_model_configuration(publication_executor):
+    executor, job, project, _calls, _captured = publication_executor
+    files = {path: path.read_bytes() for directory in ("models", "macros") for path in (project / directory).iterdir()}
+    await execute_build(executor, job, project)
+    assert all(path.read_bytes() == content for path, content in files.items())
+    assert set((project / "macros").iterdir()) == {project / "macros/generate_schema_name.sql"}
 
+
+async def test_missing_memory_manifest_cannot_publish(publication_executor):
+    executor, job, project, _calls, captured = publication_executor
     async def without_manifest(*args, **kwargs):
-        if "manifest_sink" in kwargs:
-            kwargs["manifest_sink"] = lambda _: None
-        return await original(*args, **kwargs)
-
+        pass
     executor._dbt = without_manifest
-    with pytest.raises(ValueError, match="final dbt manifest is unavailable"):
-        await execute_publication(executor, job, project.parent, project)
+    with pytest.raises(ValueError, match="manifest is unavailable"):
+        await execute_build(executor, job, project)
     assert not captured
 
 
-@pytest.mark.parametrize("missing", ["model.sample.orders", "test.sample.orders"])
-async def test_full_build_rejects_missing_model_or_test_execution(publication_executor, missing):
-    executor, job, project, results, _physical, captured = publication_executor
-    results[:] = [row for row in results if row["unique_id"] != missing]
-    with pytest.raises(ValueError, match="模型或必需测试执行不完整"):
-        await execute_publication(executor, job, project.parent, project)
+async def test_dbt_failure_propagates_without_artifact_capture(publication_executor):
+    executor, job, project, _calls, captured = publication_executor
+    failure = ExecutionError("COMMAND_FAILED", stopped=True)
+    async def fail(*args, **kwargs):
+        raise failure
+    executor._dbt = fail
+    with pytest.raises(ExecutionError) as error:
+        await execute_build(executor, job, project)
+    assert error.value is failure
     assert not captured
-
-
-async def test_full_build_rejects_missing_physical_relation(publication_executor):
-    executor, job, project, _results, physical, captured = publication_executor
-    physical["nodes"] = {}
-    with pytest.raises(ValueError, match="物理对象缺失"):
-        await execute_publication(executor, job, project.parent, project)
-    assert not captured
-
-
-@pytest.mark.parametrize(("freshness", "expected"), [
-    (None, False),
-    ({"warn_after": {"count": None, "period": None},
-      "error_after": {"count": None, "period": None}}, False),
-    ({"warn_after": {"count": 0, "period": "hour"}}, True),
-    ({"error_after": {"count": 2, "period": "day"}}, True),
-])
-def test_only_configured_freshness_thresholds_require_execution(freshness, expected):
-    """原生 manifest 的空阈值对象不是 freshness 规则，零阈值则是有效规则。"""
-    from dbt_metricflow_service.platform.build import requires_source_freshness
-
-    assert requires_source_freshness(NativeNode.model_validate({"freshness": freshness})) is expected
-
-
-def test_manifest_cannot_escape_fixed_schema(tmp_path):
-    prepare_publication_project(tmp_path, "candidate")
-    target = tmp_path / "target"
-    target.mkdir()
-    node = {"resource_type": "model", "config": {"materialized": "table"}, "database": "db",
-            "schema": "candidate", "alias": "orders", "relation_name": '"candidate"."orders"'}
-    path = target / "manifest.json"
-    path.write_text(json.dumps({"nodes": {"model.p.orders": node}}))
-    validate_bound_manifest(target, "candidate")
-    node.update(schema="other", relation_name='"other"."orders"')
-    path.write_text(json.dumps({"nodes": {"model.p.orders": node}}))
-    with pytest.raises(ValueError):
-        validate_bound_manifest(target, "candidate")
-
-
-@pytest.mark.parametrize("sql", [
-    "select 1; drop table active_model",
-    "with removed as (delete from active_model returning *) select * from removed",
-    "select * into active_model from source_table",
-])
-def test_compiled_model_cannot_escape_readonly_query(sql):
-    with pytest.raises(ValueError):
-        validate_readonly_sql(sql, "postgres")
-
-
-@pytest.mark.parametrize(("test_config", "writes"), [
-    ({}, False), ({"store_failures": False}, False), ({"store_failures": True}, True),
-    ({"store_failures_as": "ephemeral"}, False), ({"store_failures_as": "view"}, True),
-])
-def test_actual_dbt_tests_parse_under_publication_mapping(tmp_path, test_config, writes):
-    """dbt 普通测试自带 audit schema；允许解析，但写失败结果的测试仍须被发布边界拒绝。"""
-    project, profiles, _ = make_resource_project(tmp_path)
-    definition = project / "models/orders.yml"
-    document = yaml.safe_load(definition.read_text(encoding="utf-8"))
-    document["models"][1]["columns"][0]["data_tests"] = [
-        {"not_null": {"config": test_config}}]
-    definition.write_text(yaml.safe_dump(document, allow_unicode=True), encoding="utf-8")
-    prepare_publication_project(project, "main")
-    parsed = subprocess.run(
-        [sys.executable, "-m", "dbt.cli.main", "parse", "--no-partial-parse",
-         "--project-dir", str(project), "--profiles-dir", str(profiles)],
-        capture_output=True, text=True, encoding="utf-8", timeout=60,
-        env={**os.environ, "PYTHONUTF8": "1", "DBT_SEND_ANONYMOUS_USAGE_STATS": "false"})
-    assert parsed.returncode == 0, parsed.stdout + parsed.stderr
-    target = project / "target"
-    manifest = json.loads((target / "manifest.json").read_text(encoding="utf-8"))
-    tests = [node for node in manifest["nodes"].values() if node["resource_type"] == "test"]
-    assert tests and all(node["schema"] == "main" for node in tests)
-    models = [node for node in manifest["nodes"].values() if node["resource_type"] == "model"]
-    assert models and all(node["alias"] == node["name"] for node in models)
-    if writes:
-        with pytest.raises(ValueError, match="发布测试禁止写入失败结果表"):
-            validate_bound_manifest(target, "main")
-    else:
-        validate_bound_manifest(target, "main")
-def test_custom_target_directory_is_normalized_for_sealing(tmp_path):
-    """命令和封存使用同一输出目录，原始源码仍由输入快照保留。"""
-    import yaml
-
-    from dbt_metricflow_service.platform.build import prepare_publication_project
-
-    project_file = tmp_path / "dbt_project.yml"
-    project_file.write_text("name: sample\nversion: '1.0'\ntarget-path: custom-target\n", encoding="utf-8")
-    prepare_publication_project(tmp_path, "analytics")
-    config = yaml.safe_load(project_file.read_text(encoding="utf-8"))
-    assert config["target-path"] == "target"
-
-
-def test_repeated_dbt_build_overwrites_original_and_custom_alias_tables(tmp_path):
-    import duckdb
-
-    project, profiles, _ = make_resource_project(tmp_path)
-    model = project / "models/orders.sql"
-    source = model.read_text(encoding="utf-8")
-    model.write_text("{{ config(alias='sales_orders') }}\n" + source, encoding="utf-8")
-    prepare_publication_project(project, "main")
-    for value in (10, 20):
-        model.write_text(
-            "{{ config(alias='sales_orders') }}\n" + source.replace("10 as revenue", f"{value} as revenue"),
-            encoding="utf-8",
-        )
-        result = subprocess.run(
-            [sys.executable, "-m", "dbt.cli.main", "build", "--no-partial-parse",
-             "--project-dir", str(project), "--profiles-dir", str(profiles)],
-            capture_output=True, text=True, encoding="utf-8", timeout=60,
-            env={**os.environ, "PYTHONUTF8": "1", "DBT_SEND_ANONYMOUS_USAGE_STATS": "false"},
-        )
-        assert result.returncode == 0, result.stdout + result.stderr
-        validate_bound_manifest(project / "target", "main")
-        with duckdb.connect(str(tmp_path / "warehouse.duckdb")) as connection:
-            assert connection.execute("select revenue from main.sales_orders").fetchone() == (value,)
-            names = {row[0] for row in connection.execute("show tables").fetchall()}
-            assert "sales_orders" in names
-            assert all(not name.startswith("rv_") for name in names)

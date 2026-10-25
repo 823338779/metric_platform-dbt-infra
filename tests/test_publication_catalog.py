@@ -1,118 +1,112 @@
-"""发布前展示投影的身份、引用与失败边界。"""
+"""历史目录直接返回封存 Manifest，不重建统一资源与依赖。"""
 
-from copy import deepcopy
-from uuid import UUID
+import json
+from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
-from dbt_metricflow_service.models.artifacts import RelationBinding
-from dbt_metricflow_service.models.catalog import NativeCatalog
-from dbt_metricflow_service.models.native import SemanticManifest
-from dbt_metricflow_service.platform.sealed_catalog import build_published_catalog, write_publication_catalog
+from dbt_metricflow_service.application.catalog import CatalogService
+from dbt_metricflow_service.application.errors import ServiceError
 
-PROJECT = "catalog-test"
-RELEASE = UUID("00000000-0000-0000-0000-000000000001")
+MANIFEST_SCHEMA = "https://schemas.getdbt.com/dbt/manifest/v12.json"
 
 
 def package():
-    # 两个模型中的同名维度必须分别保留；派生指标引用两个数据集。
-    resources, bindings, semantic = [], [], {"semantic_models": [], "metrics": []}
+    manifest = {"metadata": {"dbt_schema_version": MANIFEST_SCHEMA}, "nodes": {},
+                "semantic_models": {}, "metrics": {}}
     for name in ("orders", "returns"):
         model_id, dataset_id = f"model.sample.{name}", f"semantic_model.sample.{name}"
-        model = {"name": name, "resource_type": "model"}
-        dataset = {"name": name, "dimensions": [{"name": "region", "type": "categorical"}],
-                   "entities": [], "measures": [], "depends_on": {"nodes": [model_id]}}
-        metric = {"name": name, "label": f"展示 {name}", "type": "simple",
-                  "type_params": {"metric_aggregation_params": {"semantic_model": name, "agg": "sum"}},
-                  "depends_on": {"nodes": [dataset_id]}}
-        for native_id, kind, definition in (
-            (model_id, "TABLE", model), (dataset_id, "SEMANTIC_MODEL", dataset),
-            (f"{dataset_id}.dimension.region", "DIMENSION", dataset["dimensions"][0]),
-            (f"metric.sample.{name}", "METRIC", metric),
-        ):
-            resources.append({"resourceId": native_id, "nativeId": native_id, "kind": kind,
-                              "name": definition["name"], "definition": definition,
-                              "semanticModelId": dataset_id, "queryable": True, "columns": {}})
-        bindings.append({"nativeId": model_id, "relation": {"database": "db", "schema": "s", "identifier": name},
-                         "creatorRunId": str(RELEASE), "mode": "BUILT", "definitionDigest": "a" * 64,
-                         "verifiedAt": "2026-09-30T00:00:00Z"})
-        semantic["semantic_models"].append(deepcopy(dataset))
-        semantic["metrics"].append(deepcopy(metric))
-    derived = {"name": "net", "type": "derived", "type_params": {
-        "expr": "orders - returns", "metrics": [{"name": "orders"}, {"name": "returns"}]}}
-    resources.append({"resourceId": "metric.sample.net", "nativeId": "metric.sample.net", "kind": "METRIC",
-                      "name": "net", "definition": derived, "queryable": True})
-    semantic["metrics"].append(deepcopy(derived))
-    return {"resources": resources, "dependencies": []}, semantic, bindings
+        manifest["nodes"][model_id] = {
+            "name": name, "resource_type": "model", "config": {"materialized": "table"},
+            "database": "db", "schema": "s", "alias": name, "relation_name": f'"db"."s"."{name}"',
+            "columns": {"region": {"name": "region", "description": "地区", "data_type": "varchar"}},
+        }
+        manifest["semantic_models"][dataset_id] = {
+            "name": name, "original_file_path": "models/orders.yml",
+            "dimensions": [{"name": "region", "type": "categorical"}],
+            "entities": [], "measures": [], "depends_on": {"nodes": [model_id]},
+        }
+        manifest["metrics"][f"metric.sample.{name}"] = {
+            "name": name, "label": f"展示 {name}", "type": "simple",
+            "type_params": {"metric_aggregation_params": {"semantic_model": name, "agg": "sum"}},
+            "depends_on": {"nodes": [dataset_id]},
+        }
+    manifest["metrics"]["metric.sample.net"] = {
+        "name": "net", "type": "derived", "type_params": {
+            "expr": "orders - returns", "metrics": [{"name": "orders"}, {"name": "returns"}]},
+    }
+    manifest["parent_map"] = {
+        "metric.sample.net": ["metric.sample.orders", "metric.sample.returns"],
+        "metric.sample.orders": ["semantic_model.sample.orders"],
+    }
+    manifest["child_map"] = {"metric.sample.orders": ["metric.sample.net"]}
+    return manifest
 
 
-def build(native=None, semantic=None, bindings=None):
-    defaults = package()
-    return build_published_catalog(
-        project_id=PROJECT, release_id=RELEASE,
-        native_catalog=NativeCatalog.model_validate(defaults[0] if native is None else native),
-        semantic_manifest=SemanticManifest.model_validate(defaults[1] if semantic is None else semantic),
-        relation_bindings=[RelationBinding.model_validate(item)
-                           for item in (defaults[2] if bindings is None else bindings)],
-    )
+
+def service_for(manifest):
+    stored = SimpleNamespace(build_status="SUCCEEDED", output_set_id="historical", run_id="run")
+    artifacts = SimpleNamespace(read_file=lambda *_: json.dumps(manifest).encode())
+    return CatalogService(SimpleNamespace(get=lambda _: stored), artifacts)
 
 
-def test_typed_catalog_is_complete():
-    result = build()
-    data = result.model_dump(mode="json", by_alias=True)
-    resources = {item["resourceId"]: item for item in data["resources"]}
-    assert data["schemaVersion"] == 1
-    assert data["releaseId"] == str(RELEASE)
-    assert len([item for item in resources.values() if item["kind"] == "DIMENSION"]) == 2
-    assert resources["metric.sample.orders"]["displayName"] == "展示 orders"
-    net = resources["metric.sample.net"]["attributes"]
-    assert net["inputMetricIds"] == ["metric.sample.orders", "metric.sample.returns"]
-    assert net["datasetIds"] == ["semantic_model.sample.orders", "semantic_model.sample.returns"]
-    assert "DATASET" not in {item["kind"] for item in resources.values()}
-    assert type(result).model_validate_json(result.model_dump_json()) == result
-    assert any(edge["upstreamResourceId"] == "metric.sample.orders" and
-               edge["downstreamResourceId"] == "metric.sample.net" for edge in data["relations"])
+def build(manifest=None):
+    return service_for(package() if manifest is None else manifest).read(uuid4())[1]
 
 
-@pytest.mark.parametrize("damage", ["duplicate", "missing-binding", "unknown-type", "dangling", "cycle", "mismatch"])
-def test_invalid_catalog_cannot_publish(damage):
-    native, semantic, bindings = package()
-    if damage == "duplicate":
-        native["resources"].append(native["resources"][0])
-    elif damage == "missing-binding":
-        bindings.pop()
-    elif damage == "unknown-type":
-        native["resources"][-1]["definition"]["type"] = "unknown"
-        semantic["metrics"][-1]["type"] = "unknown"
-    elif damage == "dangling":
-        native["resources"][-1]["definition"]["type_params"]["metrics"] = [{"name": "missing"}]
-        semantic["metrics"][-1] = deepcopy(native["resources"][-1]["definition"])
-    elif damage == "cycle":
-        native["resources"][-1]["definition"]["type_params"]["metrics"] = [{"name": "net"}]
-        semantic["metrics"][-1] = deepcopy(native["resources"][-1]["definition"])
-    else:
-        semantic["semantic_models"][0]["dimensions"] = []
-    with pytest.raises(ValueError):
-        build(native, semantic, bindings)
+def test_catalog_returns_native_sections_without_resource_translation():
+    manifest = package()
+    manifest["metrics"]["metric.sample.net"]["vendor_extension"] = {"raw_key": None}
+    manifest["macros"] = {"macro.sample.secret": {"macro_sql": "not catalog data"}}
+    result = service_for(manifest).list(uuid4())
+    assert result == {key: manifest.get(key, {}) for key in (
+        "metadata", "metrics", "semantic_models", "nodes", "sources", "parent_map", "child_map")}
+    assert result["metrics"]["metric.sample.net"] == manifest["metrics"]["metric.sample.net"]
+    assert "dimensions" not in result
+    assert result["semantic_models"]["semantic_model.sample.orders"]["dimensions"] == [{
+        "name": "region", "type": "categorical"}]
 
 
-def test_empty_catalog_requires_complete_native_structure():
-    empty = build({"resources": [], "dependencies": []}, {"semantic_models": [], "metrics": []}, [])
-    assert empty.resources == []
-    with pytest.raises(ValueError):
-        build({}, {}, [])
+def test_detail_and_native_details_return_exact_native_object():
+    manifest = package()
+    service = service_for(manifest)
+    for section in ("metrics", "nodes", "semantic_models"):
+        key = next(iter(manifest[section]))
+        assert service.resource(uuid4(), key) == manifest[section][key]
+        assert service.resource(uuid4(), key, "native-details") == manifest[section][key]
+    with pytest.raises(ServiceError) as error:
+        service.resource(uuid4(), "semantic_model.sample.orders.dimension.region")
+    assert error.value.status == 404
 
 
-def test_write_catalog_requires_matching_physical_binding(tmp_path):
-    import json
+def test_lineage_returns_native_maps_without_inference():
+    manifest = package()
+    manifest["parent_map"]["metric.sample.orders"] = ["semantic_model.sample.orders", "model.sample.ephemeral"]
+    service = service_for(manifest)
+    assert service.resource(uuid4(), "metric.sample.orders", "lineage") == {
+        "parent_map": {"metric.sample.orders": manifest["parent_map"]["metric.sample.orders"]},
+        "child_map": {"metric.sample.orders": ["metric.sample.net"]},
+    }
+    del manifest["parent_map"]["metric.sample.net"]
+    assert service.resource(uuid4(), "metric.sample.net", "lineage")["parent_map"] == {}
 
-    native, semantic, _ = package()
-    for resource in native["resources"]:
-        if resource["kind"] == "TABLE":
-            resource["definition"].update({"database": "db", "schema": "s", "alias": resource["name"]})
-    (tmp_path / "semantic_manifest.json").write_text(json.dumps(semantic))
-    result = write_publication_catalog(tmp_path, project_id=PROJECT, release_id=RELEASE, run_id=RELEASE,
-                                       native_catalog=NativeCatalog.model_validate(native))
-    assert (tmp_path / "published_catalog.json").exists()
-    assert result.project_id == PROJECT
-    assert len(result.relation_bindings) == 2
+
+def test_catalog_service_reads_only_saved_manifest():
+    calls = []
+    def read_file(set_id, path):
+        calls.append((set_id, path))
+        return json.dumps(package()).encode()
+    stored = SimpleNamespace(build_status="SUCCEEDED", output_set_id="historical")
+    service = CatalogService(None, SimpleNamespace(read_file=read_file))
+    assert service.read_build(stored) == package()
+    assert calls == [("historical", "target/manifest.json")]
+
+
+@pytest.mark.parametrize("content", [b"broken-json", b"[]", b"{}"])
+def test_catalog_service_rejects_corrupt_manifest(content):
+    stored = SimpleNamespace(build_status="SUCCEEDED", output_set_id="historical")
+    service = CatalogService(None, SimpleNamespace(read_file=lambda *_: content))
+    with pytest.raises(ServiceError) as error:
+        service.read_build(stored)
+    assert error.value.status == 503

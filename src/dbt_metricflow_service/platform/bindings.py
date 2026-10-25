@@ -28,7 +28,6 @@ INVALID_FETCHED_REVISION_MESSAGE: Final[str] = 'Git 版本无效'
 REQUESTED_COMMIT_MISMATCH_MESSAGE: Final[str] = 'Git did not return the requested commit'
 INVALID_PROJECT_INPUT_MESSAGE: Final[str] = 'dbt 项目输入无效'
 PROJECT_FILE_MISSING_MESSAGE: Final[str] = 'dbt_project.yml 缺失'
-DEPENDENCY_LOCK_REQUIRED_MESSAGE: Final[str] = '远端依赖必须提供固定 package-lock.yml'
 PROJECT_DIGEST_MISMATCH_MESSAGE: Final[str] = 'dbt 项目摘要不匹配'
 
 PROJECT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -186,6 +185,8 @@ def _resolve_revision(
             )
         )
         folders = [_prefix(value) for value in project_yaml.resource_paths()]
+        # 单次 build 不安装依赖；工程中已提交的安装目录必须随固定源码还原。
+        folders.append(_prefix(project_yaml.packages_install_path))
         # 本地依赖同属固定 Git 工程，允许受控根内路径，不能静默漏掉非模型目录。
         for filename in (strings.PACKAGES_FILE, strings.DEPENDENCIES_FILE):
             if filename not in entries:
@@ -199,8 +200,6 @@ def _resolve_revision(
             for package in dependencies.packages:
                 if package.local is not None:
                     folders.append(_prefix(package.local))
-                elif strings.PACKAGE_LOCK_FILE not in entries:
-                    raise ValueError(DEPENDENCY_LOCK_REQUIRED_MESSAGE)
         entries = {path: item for path, item in entries.items()
                    if path in ROOT_INPUTS or any(path.startswith(folder) for folder in folders)}
         digest = hashlib.sha256()

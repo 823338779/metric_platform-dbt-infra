@@ -57,6 +57,18 @@ async def test_structured_events_are_redacted_without_tail_truncation(tmp_path, 
     assert secret not in repr(captured)
 
 
+@pytest.mark.parametrize("exception", [SystemExit(2), KeyboardInterrupt()])
+async def test_returned_base_exception_cannot_escape_worker(tmp_path, monkeypatch, exception):
+    monkeypatch.setattr(dbtRunner, "invoke", lambda *_: SimpleNamespace(success=False, exception=exception))
+    captured = []
+    record = await run_dbt("project", CommandSpec(("dbt", "build"), tmp_path, {}, True),
+                           5, 1024, authorize, log_sink=captured.append)
+    assert record.status == JobStatus.FAILED
+    assert record.exit_code == 2
+    assert record.stderr == type(exception).__name__
+    assert captured[-1].event_name == "DbtInvocationError"
+
+
 @pytest.mark.parametrize("success", [False, True])
 async def test_log_sink_failure_does_not_change_dbt_result(tmp_path, monkeypatch, caplog, success):
     def invoke(self, args):
@@ -76,3 +88,23 @@ async def test_log_sink_failure_does_not_change_dbt_result(tmp_path, monkeypatch
     assert "still available in stdout" in record.stdout
     assert "RuntimeError" in caplog.text
     assert "private database" not in caplog.text
+
+
+@pytest.mark.parametrize("raises", [False, True])
+async def test_sdk_exception_without_events_is_logged_and_redacted(tmp_path, monkeypatch, raises):
+    secret = "private-build-password"
+    monkeypatch.setenv("DBT_ENV_SECRET_TEST_PASSWORD", secret)
+    captured = []
+    def invoke(self, args):
+        error = RuntimeError("invalid model: " + secret)
+        if raises:
+            raise error
+        return SimpleNamespace(success=False, exception=error)
+    monkeypatch.setattr(dbtRunner, "invoke", invoke)
+    record = await run_dbt("project", CommandSpec(("dbt", "build"), tmp_path, {}, True),
+                           5, 1024, authorize, log_sink=captured.append)
+    assert record.status == JobStatus.FAILED
+    assert captured and captured[-1].level == "error"
+    assert "invalid model: ***" in captured[-1].message
+    assert "invalid model: ***" in record.stdout
+    assert secret not in repr(captured)

@@ -13,7 +13,8 @@ JsonObject: TypeAlias = dict[str, JsonValue]
 
 class DimensionOption(Contract):
     option_id: str
-    resource_id: str | None
+    name: str | None = None
+    semantic_model_name: str | None = None
     display_name: str
     dimension_type: str
     value_type: str

@@ -4,7 +4,7 @@
 
 **Goal:** Persist the final dbt Manifest from memory without rereading its JSON file during capture.
 
-**Architecture:** Add an optional Manifest field to dbtRunnerResult. Serialize only when the final docs invocation requests a callback; feed those bytes into ArtifactStore.capture, retaining existing sealing and lease checks.
+**Architecture:** Add an optional Manifest field to dbtRunnerResult. Capture each relevant command independently through platform/manifest_capture.py, then feed the final docs bytes into ArtifactStore.capture, retaining existing sealing and lease checks. The capture class handles the original dbt Manifest; existing service projections are created by build validation from memory bytes.
 
 **Tech Stack:** Python, vendored dbt, SQLAlchemy, PostgreSQL, pytest.
 
@@ -16,7 +16,7 @@
 - Failed/missing-manifest calls must not provide success payloads.
 - Keep raw manifest content out of JobRecord diagnostics and logs.
 - Memory payload must obey file/set limits and checksum validation.
-- Preserve local files for existing validation and keep other artifacts unchanged.
+- Preserve local files for dbt/MetricFlow internals and historical restoration; service build manifest validation uses memory bytes. Keep other artifacts unchanged.
 
 ## Tasks
 
@@ -36,3 +36,5 @@ Independent review identified custom target-path handling; added two failing reg
 Follow-up requested by user: manifest_sink now receives the Manifest object unchanged. Serialization and size checking belong to capture_manifest in platform/build.py, still invoked before the engine environment exits. Object-identity and publication tests failed before the move, then 69 focused tests passed (memory manifest, publication, embedded engine and logs); Ruff and whitespace checks passed.
 
 Compression follow-up: compact UTF-8 JSON is serialized in capture_manifest; ArtifactStore stores gzip level 6 (mtime=0) for the memory manifest when smaller, retaining raw for tiny/incompressible payloads. Original byte limits, SHA-256 and collection digest remain based on uncompressed content; stored_size reflects stored bytes. Existing read_file/materialize decoding handles both codecs, with no rewrite of old records. Observed failing compression/compactness tests before implementation; final 73 tests passed (2 library warnings) covering memory manifests, publication, artifact corruption/limits/roundtrips and historical catalogs. Ruff/whitespace checks passed; independent review found no blockers.
+
+Module extraction follow-up: ManifestCapture lives in platform/manifest_capture.py and accepts/retains dbt.contracts.graph.manifest.Manifest unchanged. It only serializes compact JSON and checks byte size, without defining or converting a replacement manifest model. Each command has its own capture. Existing NativeManifest validation projections are created from captured bytes in build.py, and catalog construction accepts the validated projection without rereading manifest.json. Tests cover original object identity, independent phases, missing-stage rejection, forbidden manifest disk reads and the real SDK-to-database path. Independent review found no blockers.

@@ -18,7 +18,6 @@ from dbt_metricflow_service.storage.jobs import JobStore
 from dbt_metricflow_service.storage.paging import read_cursor, write_cursor
 from dbt_metricflow_service.storage.records import (
     ArtifactMetadata,
-    ArtifactValidation,
     JobErrorDetail,
     JobRequest,
     StoredArtifactFile,
@@ -55,9 +54,6 @@ def test_record_converts_nested_json_and_rejects_unknown_fields():
         JobRequest.model_validate({"execution": {**snapshot.model_dump(by_alias=True), "unknown": True}})
     with pytest.raises(ValidationError, match="extra_forbidden"):
         ArtifactMetadata.model_validate({"validation_json": {"allTestsPassed": True, "unknown": True}})
-    for non_boolean in (1, "true"):
-        with pytest.raises(ValidationError):
-            ArtifactValidation.model_validate({"allTestsPassed": non_boolean})
 
 
 def test_sql_projection_returns_a_declared_record():
@@ -90,10 +86,6 @@ def test_typed_json_keeps_existing_field_names_and_empty_requests():
     detail = JobErrorDetail(external_outcome_unknown=True, submitted_at=datetime(2026, 1, 1, tzinfo=timezone.utc))
     assert detail.model_dump(mode="json", by_alias=True, exclude_unset=True) == {
         "externalOutcomeUnknown": True, "submitted_at": "2026-01-01T00:00:00Z",
-    }
-    validation = ArtifactValidation(all_tests_passed=True, representative_query_passed=True, relations_verified=True)
-    assert validation.model_dump(mode="json", by_alias=True, exclude_unset=True) == {
-        "allTestsPassed": True, "representativeQueryPassed": True, "relationsVerified": True,
     }
 
 

@@ -8,7 +8,7 @@ import pytest
 
 from dbt_metricflow_service.storage.jobs import CleanupBlocked, JobStore, ProjectBusy, StoreConflict
 from dbt_metricflow_service.storage.postgres import Database
-from dbt_metricflow_service.storage.records import ArtifactMetadata, ArtifactValidation, JobRequest
+from dbt_metricflow_service.storage.records import ArtifactMetadata, JobRequest
 from tests.test_execution_snapshot_storage import request, snapshot
 
 DSN_ENV = "SERVICE_TEST_DATABASE_URL"
@@ -146,7 +146,7 @@ def test_deadline_expires_queued_build_before_claim(store):
 
 
 
-@pytest.mark.parametrize("failure", ["lease_lost", "seal_error", "wrong_attempt", "missing_catalog"])
+@pytest.mark.parametrize("failure", ["lease_lost", "seal_error", "wrong_attempt", "missing_manifest"])
 def test_finish_rolls_back_artifacts_and_job_on_failure(store, tmp_path, failure):
     from dbt_metricflow_service.storage.artifacts import ArtifactStore
 
@@ -172,13 +172,11 @@ def test_finish_rolls_back_artifacts_and_job_on_failure(store, tmp_path, failure
     target.mkdir()
     for filename in ("manifest.json", "semantic_manifest.json", "catalog.json"):
         (target / filename).write_text("{}", encoding="utf-8")
-    if failure != "missing_catalog":
-        (target / "published_catalog.json").write_text("{}", encoding="utf-8")
+    if failure == "missing_manifest":
+        (target / "manifest.json").unlink()
     output = artifacts.capture(
         name, tmp_path, producer_attempt_id=attempt.attempt_id, kind="EXECUTION",
-        metadata=ArtifactMetadata(validation_json=ArtifactValidation(
-            all_tests_passed=True, representative_query_passed=True, relations_verified=True,
-        )),
+        metadata=ArtifactMetadata(),
     )
 
     def broken_seal(set_id, connection):
@@ -195,7 +193,7 @@ def test_finish_rolls_back_artifacts_and_job_on_failure(store, tmp_path, failure
     elif failure == "seal_error":
         with pytest.raises(ValueError, match="injected"):
             store.finish(row.job_id, attempt.lease_token, output_set_id=output, seal=broken_seal)
-    elif failure == "missing_catalog":
+    elif failure == "missing_manifest":
         with pytest.raises(ValueError, match="missing required native artifacts"):
             store.finish(row.job_id, attempt.lease_token, output_set_id=output)
     else:
@@ -211,7 +209,6 @@ def test_finish_rolls_back_artifacts_and_job_on_failure(store, tmp_path, failure
         build = session.get(Build, build_id)
         assert build.build_status == "RUNNING"
         assert build.output_set_id is None
-        assert build.catalog_digest is None
 
 
 def test_cleanup_uses_parent_versions_and_can_clean_failed_build(store):
@@ -233,7 +230,7 @@ def test_sealed_set_cannot_be_demoted_or_rewritten(store, tmp_path):
     (tmp_path / "model.sql").write_text("select 1", encoding="utf-8")
     (tmp_path / "dbt_project.yml").write_text("name: immutable_test\n", encoding="utf-8")
     set_id = ArtifactStore(store.db).capture(name, tmp_path)
-    for change in ("state='STAGING'", "validation_json='{\"changed\":true}'::jsonb"):
+    for change in ("state='STAGING'", "project_digest='changed'"):
         with pytest.raises(IntegrityError), store.db.transaction() as connection:
             connection.exec_driver_sql("UPDATE runtime_artifact_set SET " + change + " WHERE set_id=%s", (set_id,))
 

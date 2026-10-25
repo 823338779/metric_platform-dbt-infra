@@ -147,9 +147,13 @@ def test_missing_data_result_is_an_error(tmp_path, engine_context):
 @pytest.mark.parametrize("rows,truncated", [([], False), ([(1,), (2,)], True)])
 def test_preview_uses_adapter_and_preserves_empty_columns(tmp_path, monkeypatch, engine_context, rows, truncated):
     engine, configuration, calls = engine_context
-    monkeypatch.setattr(metricflow, "catalog_from_artifacts", lambda _: SimpleNamespace(resources=[
-        SimpleNamespace(resource_id="table.orders", kind="TABLE", relation='"fixed"."orders"'),
-    ]))
+    import json
+
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "manifest.json").write_text(json.dumps({"nodes": {"table.orders": {
+        "resource_type": "model", "config": {"materialized": "table"}, "relation_name": '\"fixed\".\"orders\"',
+    }}}))
     configuration.dbt_artifacts.adapter.connection_named = lambda _: nullcontext()
 
     def execute(sql, fetch):
@@ -171,15 +175,8 @@ def test_preview_uses_adapter_and_preserves_empty_columns(tmp_path, monkeypatch,
     assert result.columns[0].type == ("int" if rows else "unknown")
 
 
-def test_probe_has_a_separate_entry_point(tmp_path, engine_context):
-    result = metricflow.probe_query_capability(tmp_path, tmp_path)
-    assert result.query_capability is True
-    assert not hasattr(result, "rows")
-    assert engine_context[2][-1][1].limit == 1
-
-
 @pytest.mark.parametrize("operation", [
-    "execute_available_dimensions", "execute_programmatic", "probe_query_capability",
+    "execute_available_dimensions", "execute_programmatic",
 ])
 def test_starrocks_uses_adapter_backed_engine(tmp_path, monkeypatch, engine_context, operation):
     engine, configuration, _ = engine_context
@@ -206,18 +203,4 @@ def test_starrocks_uses_adapter_backed_engine(tmp_path, monkeypatch, engine_cont
         metricflow.execute_programmatic(tmp_path, tmp_path, PlatformQueryRequest(
             runId=uuid4(), mode="QUERY", metrics=["orders"],
         ))
-    else:
-        metricflow.probe_query_capability(tmp_path, tmp_path)
     assert clients == [client]
-
-
-@pytest.mark.parametrize("missing_metrics", [True, False])
-def test_probe_preserves_failure_and_missing_result_semantics(tmp_path, engine_context, missing_metrics):
-    engine = engine_context[0]
-    if missing_metrics:
-        engine.list_metrics = lambda **_: []
-        with pytest.raises(ValueError, match=metricflow.QUERYABLE_METRICS_MISSING_MESSAGE):
-            metricflow.probe_query_capability(tmp_path, tmp_path)
-    else:
-        engine.query = lambda _: SimpleNamespace(result_df=None)
-        assert metricflow.probe_query_capability(tmp_path, tmp_path).query_capability is False

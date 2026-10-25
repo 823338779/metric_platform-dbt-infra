@@ -15,6 +15,8 @@ from .models import CommandSpec, JobRecord, JobStatus
 
 UNSUPPORTED_ENGINE_COMMAND: Final[str] = "unsupported engine command"
 MISSING_MANIFEST: Final[str] = "successful dbt command did not return a manifest"
+ERROR_LEVEL: Final[str] = "error"
+INVOCATION_ERROR_EVENT: Final[str] = "DbtInvocationError"
 
 
 if TYPE_CHECKING:
@@ -60,15 +62,23 @@ def _invoke_dbt(
             def capture(event: EventMsg) -> None:
                 capture_text(EngineLog.from_dbt(event))
 
-            result = dbtRunner(callbacks=[capture]).invoke(list(command.argv[1:]))
-            exit_code = 0 if result.success else (2 if result.exception is not None else 1)
-            if result.exception is not None:
-                error_type = type(result.exception).__name__
-            if result.success and manifest_sink is not None:
-                if result.manifest is None:
-                    raise ValueError(MISSING_MANIFEST)
-                # 在引擎环境退出前交给调用方处理，Manifest 不进入诊断或日志。
-                manifest_sink(result.manifest)
+            try:
+                result = dbtRunner(callbacks=[capture]).invoke(list(command.argv[1:]))
+                exit_code = 0 if result.success else (2 if result.exception is not None else 1)
+                if result.exception is not None:
+                    error_type = type(result.exception).__name__
+                    capture_text(EngineLog(datetime.now(UTC), ERROR_LEVEL,
+                        f"{error_type}: {result.exception}", event_name=INVOCATION_ERROR_EVENT))
+                elif result.success and manifest_sink is not None:
+                    if result.manifest is None:
+                        raise ValueError(MISSING_MANIFEST)
+                    # 在引擎环境退出前交给调用方处理，Manifest 不进入诊断或日志。
+                    manifest_sink(result.manifest)
+            except Exception as error:
+                # SDK 不一定发出失败事件；在环境恢复前经统一入口脱敏并记录异常。
+                capture_text(EngineLog(datetime.now(UTC), ERROR_LEVEL,
+                    f"{type(error).__name__}: {error}", event_name=INVOCATION_ERROR_EVENT))
+                raise
     except Exception as error:
         # 不公开可能包含连接凭据的原始异常文本。
         exit_code = 2
