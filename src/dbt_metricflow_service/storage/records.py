@@ -151,7 +151,6 @@ class StoredBuild(StoredRecord):
     commit_sha: str | None  # 实际解析并固定的源码版本。
     build_status: str  # 构建状态，与部署状态独立。
     phase: str  # 当前执行阶段。
-    cancel_requested: bool  # 是否持久化了取消意图。
     output_set_id: str | None  # 完整构建产物集合。
     error_code: str | None  # 稳定错误码。
     version: int  # 构建事实版本。
@@ -185,7 +184,7 @@ class StoredDeploymentAttempt(StoredRecord):
     caller: str  # 可信调用来源。
     idempotency_key: str  # 本次操作的幂等键。
     request_digest: str  # 本次请求摘要。
-    operation: str  # 自动部署或独立部署操作。
+    operation: str  # 历史部署来源；新意图统一由构建创建。
     deployment_status: str  # 部署状态。
     reason: str | None  # 失败或过期原因。
     version: int  # 意图事实版本。

@@ -94,8 +94,8 @@ uv run --frozen dbt-metricflow-service
 dbt 命令通过 `dbtRunner.invoke()` 直接执行，MetricFlow 查询调用 Python API，均不启动引擎 CLI 子进程。
 这些调用在线程中运行并共用进程级串行锁，避免 dbt 全局配置和连接相互影响；HTTP 和租约心跳保持异步。
 `WORKER_CONCURRENCY` 控制任务槽位，不能使同一进程中的引擎调用并行。Git 源码操作仍使用 Git 工具。
-取消后，服务等待当前调用真正退出才释放锁和清理工作目录，不强制终止 Python 线程；
-若底层驱动长时间不返回，取消完成和服务关闭也会等待。外部写结果无法确认时仍保留 `OUTCOME_UNKNOWN` 保护。
+停机或失租中断后，服务等待当前调用真正退出才释放锁和清理工作目录，不强制终止 Python 线程；
+若底层驱动长时间不返回，中断处理和服务关闭也会等待。外部写结果无法确认时仍保留 `OUTCOME_UNKNOWN` 保护。
 
 | 配置 | 用途 |
 | --- | --- |
@@ -131,15 +131,17 @@ dbt 命令通过 `dbtRunner.invoke()` 直接执行，MetricFlow 查询调用 Pyt
 
 同仓库、可信调用方、操作类型下同幂等键恢复原身份；输入不同返回 409。新键同 SHA 产生新构建。构建成功与部署成功独立，`initialDeployment` 描述随构建附带的意图。
 
-`ON_SUCCESS` 受理时即分配 generation；较新意图即使失败，也不会恢复较旧待处理意图。独立部署使用 `POST /deployments`，传入 `buildId/branchName/expectedTargetVersion/idempotencyKey`。目标自然键是 repository/environmentId/branchName。切换前重新核对远端 head、构建可用性和目标版本；真实 ref 消失停用指针，网络失败只标记 UNKNOWN。
+`ON_SUCCESS` 受理时即分配 generation；较新意图即使失败，也不会恢复较旧待处理意图。部署意图仅由 `POST /builds` 的 `deploymentPolicy=ON_SUCCESS` 创建；需要再次部署时提交新构建。目标自然键是 repository/environmentId/branchName。切换前重新核对远端 head、构建可用性和目标版本；真实 ref 消失停用指针，网络失败只标记 UNKNOWN。
 
 构建还原完整工程并生成临时 profile，只执行一次 `dbt build`，直接持久化该次调用返回的内存 Manifest。解析、编译、宏、schema/alias、物化、hook 和模型测试均遵循 dbt 原生行为；服务不再注入宏或预先校验模板、SQL、目标及结果，不运行独立的 parse、compile、source freshness、docs generate 或 MetricFlow 查询探测。成功仅表示 dbt build 成功。
 
-构建执行上下文准备好环境、日志回调和租约后，直接调用 `DbtClient.build()`；成功返回的原生 Manifest 交给 `ManifestCapture` 序列化并持久化。执行层不再使用 `CommandSpec` 或通用命令转发。取消仍等待引擎退出、日志落库后才释放环境。
+构建执行上下文准备好环境、日志回调和租约后，直接调用 `DbtClient.build()`；成功返回的原生 Manifest 交给 `ManifestCapture` 序列化并持久化。执行层不再使用 `CommandSpec` 或通用命令转发。停机或失租中断仍等待引擎退出、日志落库后才释放环境。
 
 服务不运行 `dbt deps`。有依赖的工程应包含已安装并提交的 `dbt_packages`（或自定义 packages-install-path）；缺少依赖时由 dbt 报错。Git 快照和产物恢复会保留该目录。租约、并发、连接配置、日志脱敏及产物完整性检查继续生效。SDK 失败事件及异常详情写入 `runtime_execution_log`，可按构建查看。
 
-取消先持久化意图。已确认取消返回 CANCELLED；外部写执行无法确认时返回 OUTCOME_UNKNOWN，保留保护引用且不自动重跑。
+不再支持主动取消构建。停机或失去租约时仍等待引擎退出；外部写执行无法确认时保留 OUTCOME_UNKNOWN、保护引用且不自动重跑。历史 CANCELLED 构建仍可读取。
+
+已移除 `GET /builds/{buildId}/resources/{resourceId}/native-details` 和 `POST /builds/{buildId}/cancel`（404），以及 `POST /deployments`（405；GET 仍保留）。构建响应不再包含 `cancelRequested`。调用方应使用普通资源详情接口读取原生节点。升级时先停止旧 worker，再启动新版；既有数据库可保留 `cancel_requested` 列，新代码不读写该列，新库不再创建该列。历史部署 operation 保留用于识别旧记录，新意图统一为 BUILD；不清空已有构建、部署和产物。
 
 管理构建使用同一应用用例：
 
@@ -153,10 +155,9 @@ uv run --frozen dbt-service-admin build --file build-request.json
 | --- | --- |
 | `GET /builds`、`GET /builds/{buildId}` | environmentId 必填，repository/branchName/buildStatus 可选；固定身份读取 |
 | `GET /builds/{buildId}/execution-logs` | 按构建增量读取结构化 dbt 详细日志，支持 cursor、limit；[前端对接说明](docs/build-execution-logs-api.md) |
-| `POST /builds/{buildId}/cancel` | 取消构建 |
 | `GET /deployments/current`、`GET /deployments` | 自然键当前观察、意图历史 |
 | `GET /builds/{buildId}/catalog` | 返回 Manifest 原生指标、语义模型、节点与依赖映射 |
-| `GET /builds/{buildId}/resources/{resourceId}` | 按 dbt unique_id 返回原生节点；另有 `/source`、`/native-details` |
+| `GET /builds/{buildId}/resources/{resourceId}` | 按 dbt unique_id 返回原生节点；`/source` 返回源码快照 |
 | `GET /builds/{buildId}/lineage?selector=...` | 用 dbt 原生 selector 查询血缘，返回 `dbt ls --output json` 的节点数组 |
 | `POST /query/available-dimensions?build_id={build_id}` | build_id 为独立 URL 参数，请求体指定 metrics，200 同步返回可用的 dimensions 列表，包含时间粒度和允许的过滤操作 |
 | `POST /query?build_id={build_id}` | build_id 为独立 URL 参数，同步执行 QUERY、EXPLAIN、PREVIEW、DIMENSION_VALUES，直接返回本次结果，最多 8 MiB |
@@ -165,7 +166,7 @@ uv run --frozen dbt-service-admin build --file build-request.json
 
 其他列表默认 50、最多 200，统一 `items/nextCursor`。错误统一为 `error`，包含 `code/message/retryable/phase/buildId`。完整协议以 `/openapi.json` 为准；健康及版本接口仍是 `/health/live`、`/health/ready`、`/versions`。
 
-只有构建、部署及其取消流程使用异步状态。两个查询接口均通过必填的 URL 参数 `build_id` 指定构建，请求体不包含 buildId。可用维度接口请求体只接收 `metrics`，不需要幂等键或任务编号，响应列表字段为 `dimensions`。查询接口在原请求内完成并返回本次结果，相同请求也会重新执行。查询和可用维度不缓存，不写入任务、attempt 或结果表，响应不包含 `queryId`、执行状态和分页字段。原 builds 下的 query-options、available-dimensions、queries 路由及 GET results 路由已移除。失败直接返回结构化 HTTP 错误，不返回 QUEUED/RUNNING；可用维度和查询的状态轮询路由已移除。查询不产生任务记录，也不持有数据库清理锁。后台 worker 只执行构建，不自动重试查询。服务不按执行时长判定超时，等待引擎返回真实结果或错误。worker 心跳租约仍然生效。调用方可自行设置 HTTP 等待时长。
+只有构建及其自动部署流程使用异步状态。两个查询接口均通过必填的 URL 参数 `build_id` 指定构建，请求体不包含 buildId。可用维度接口请求体只接收 `metrics`，不需要幂等键或任务编号，响应列表字段为 `dimensions`。查询接口在原请求内完成并返回本次结果，相同请求也会重新执行。查询和可用维度不缓存，不写入任务、attempt 或结果表，响应不包含 `queryId`、执行状态和分页字段。原 builds 下的 query-options、available-dimensions、queries 路由及 GET results 路由已移除。失败直接返回结构化 HTTP 错误，不返回 QUEUED/RUNNING；可用维度和查询的状态轮询路由已移除。查询不产生任务记录，也不持有数据库清理锁。后台 worker 只执行构建，不自动重试查询。服务不按执行时长判定超时，等待引擎返回真实结果或错误。worker 心跳租约仍然生效。调用方可自行设置 HTTP 等待时长。
 
 ## 初始化与运维
 
@@ -202,7 +203,7 @@ result = metricflow.query(request)
 
 资源目录接口仅读取对应构建的 `target/manifest.json`，不生成或存储 `published_catalog.json`，也不再创建统一资源模型。`GET /builds/{buildId}/catalog` 返回 dbt SDK 的完整原生 artifact，包括 `metadata`、`metrics`、`semantic_models`、`nodes`、`sources` 和依赖映射等；字段与扩展支持以当前 dbt SDK 为准。维度直接位于 `semantic_models[unique_id].dimensions`，不存在服务生成的独立维度资源 ID。表列来自 `nodes` / `sources` 中的 YAML 声明，不代表数据库实际列清单。构建不运行 docs generate，不依赖 `catalog.json`。
 
-此次目录接口返回格式有变化：移除 `items`、`nextCursor`、kind 筛选和搜索分页，以及资源的 `attributes`、`capabilities`、`nativeDetails` 包装。资源详情与 `/native-details` 均直接返回原生节点；`/builds/{buildId}/lineage?selector=...` 透传原生节点数组（包含 `unique_id`、`depends_on` 等），替代旧 `/resources/{resourceId}/lineage` 和 `parent_map/child_map` 返回结构，服务不读取 Manifest 中的依赖字段，也不自行推导或折叠 ephemeral 节点。`/source` 通过产物集合 ID 和工程内相对文件名读取数据库源码快照，不访问原构建目录。历史 Manifest 无需迁移。 新捕获的 Manifest 不保存临时执行地址；既有历史快照保持原有内容，不自动回写。
+此次目录接口返回格式有变化：移除 `items`、`nextCursor`、kind 筛选和搜索分页，以及资源的 `attributes`、`capabilities`、`nativeDetails` 包装。资源详情直接返回原生节点；`/builds/{buildId}/lineage?selector=...` 透传原生节点数组（包含 `unique_id`、`depends_on` 等），替代旧 `/resources/{resourceId}/lineage` 和 `parent_map/child_map` 返回结构，服务不读取 Manifest 中的依赖字段，也不自行推导或折叠 ephemeral 节点。`/source` 通过产物集合 ID 和工程内相对文件名读取数据库源码快照，不访问原构建目录。历史 Manifest 无需迁移。 新捕获的 Manifest 不保存临时执行地址；既有历史快照保持原有内容，不自动回写。
 
 血缘复用 dbt 已有的 `ls` 命令，没有自定义 dbt `lineage` 命令。`+orders+` 选择当前节点及所有上游、下游；`1+orders+1` 限制为一层；也可使用 `metric:revenue` 等原生 selector。HTTP query string 中的 `+` 必须编码为 `%2B`，例如 `/builds/{buildId}/lineage?selector=1%2Borders%2B1`。不匹配返回空数组。
 
@@ -256,7 +257,7 @@ uv run --frozen pytest -q tests/integration/test_publication_proxy_flow.py
 
 环境由指标平台等调用方管理。本服务不提供环境配置 CRUD 或环境注册表；每次 `POST /builds` 必须携带 repository、branchName、idempotencyKey 和完整 execution 快照。execution 包含 environmentId、configVersion、connection、credentialRef、catalog、schema、threads、businessTimezone。branchName 与环境无绑定，main 和 feature 分支使用相同规则。configVersion 是外部版本，worker 匹配仍使用 SERVICE_CONFIG_VERSION。
 
-`GET /builds` 必须携带 environmentId；可选 repository、branchName、buildStatus、cursor、limit。详情、详细日志和取消位于 `/builds/{buildId}`、`/execution-logs`、`/cancel`。阶段、状态、错误码从构建详情读取，旧 `/logs` 接口已删除。`/deployments` 与 `/current` 以 repository/environmentId/branchName 定位部署。目录与查询使用固定 buildId，内部按该 build 的快照创建临时 profile。
+`GET /builds` 必须携带 environmentId；可选 repository、branchName、buildStatus、cursor、limit。详情和详细日志位于 `/builds/{buildId}`、`/builds/{buildId}/execution-logs`。阶段、状态、错误码从构建详情读取，旧 `/logs` 接口已删除。`/deployments` 与 `/current` 以 repository/environmentId/branchName 定位部署。目录与查询使用固定 buildId，内部按该 build 的快照创建临时 profile。
 
 部署配置示例（可在服务 YAML 中写映射，也可用同名环境变量写 JSON）：
 
@@ -296,7 +297,7 @@ uv run --frozen pytest -q -s tests/integration/test_execution_environment_isolat
 - `bootstrap.py`：依赖组装与服务启停，持有查询执行器和后台 worker。
 - `execution/build.py`：`BuildExecutor` 准备源码、获取目标租约，直接调用 dbt 并保存 Manifest。
 - `execution/query.py`：`QueryExecutor` 执行查询、维度获取和血缘查询。
-- `workers/build.py`：任务领取、心跳、取消和终态提交；显式接收配置、存储和实例身份。
+- `workers/build.py`：任务领取、心跳、停机/失租中断和终态提交；显式接收配置、存储和实例身份。
 - `execution/environment.py`、`workspace.py`、`threads.py`：共用环境、临时目录和取消安全的线程等待。
 - `execution/dbt.py`、`logs.py`、`log_writer.py`：dbt 诊断上下文、事件结构和日志批量写入。
 - `execution/errors.py`、`models.py`、`toolchain.py`：共用执行错误、结果类型和工具链标识。

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime
-from typing import Final, cast
+from typing import Final
 from uuid import UUID, uuid4
 
 from pydantic import JsonValue
@@ -27,13 +27,9 @@ IDEMPOTENCY_INPUT_CONFLICT_MESSAGE: Final = "idempotency key already binds anoth
 IMMUTABLE_COMMIT_MESSAGE: Final = "commitSha is immutable after resolution"
 INVALID_CURSOR_MESSAGE: Final = strings.INVALID_CURSOR_MESSAGE
 MISSING_ENVIRONMENT_MESSAGE: Final = "environmentId is required"
-TERMINAL_BUILD_MESSAGE: Final = "terminal build cannot be cancelled"
 
 JSON_MODE = strings.JSON_MODE
 PROJECT_PREFIX = strings.ENGINE_IDEMPOTENCY_PREFIX
-QUEUED = strings.QUEUED
-FAILED = strings.FAILED
-CANCELLED = strings.CANCELLED
 JSONB_CONCAT = "||"
 
 # 构建快照直接读取持久构建记录。
@@ -150,11 +146,6 @@ class BuildStore:
                 DeploymentStore(self.db).accept_in_transaction(
                     session,
                     row,
-                    caller,
-                    strings.BUILD_IDEMPOTENCY_PREFIX + build_id,
-                    fingerprint,
-                    cast(str, request.branch_name),
-                    operation=strings.BUILD,
                 )
             return row
 
@@ -226,33 +217,3 @@ class BuildStore:
             )
             return entity_record(result, StoredBuild)
 
-    def cancel(self, build_id: UUID | str) -> int:
-        row = self.get(build_id)
-        if row is None:
-            raise KeyError(build_id)
-        with self.db.fact_session() as session:
-            # 先锁任务行再写取消意图，保持与执行完成路径相同的锁顺序。
-            job = session.get(RuntimeJob, row.run_id, with_for_update=True)
-            if job.error_code == CANCELLED:
-                return 200
-            if job.status not in {strings.QUEUED, strings.RUNNING}:
-                raise StoreConflict(TERMINAL_BUILD_MESSAGE)
-            session.execute(
-                update(Build)
-                .where(Build.build_id == str(build_id))
-                .values(
-                    cancel_requested=True,
-                    version=Build.version + 1,
-                    updated_at=func.clock_timestamp(),
-                )
-            )
-            session.execute(
-                update(RuntimeJob)
-                .where(RuntimeJob.job_id == row.run_id, RuntimeJob.status == QUEUED)
-                .values(
-                    status=FAILED,
-                    error_code=CANCELLED,
-                    finished_at=func.clock_timestamp(),
-                )
-            )
-            return 202

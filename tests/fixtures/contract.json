@@ -45,7 +45,6 @@
         "createdAt": "2026-10-10T00:00:00Z",
         "updatedAt": "2026-10-10T00:00:00Z",
         "finishedAt": null,
-        "cancelRequested": false,
         "catalogAvailable": false,
         "error": {
           "code": "INVALID_DEFINITION",
@@ -71,16 +70,6 @@
           "threads": 2,
           "businessTimezone": "Asia/Shanghai"
         }
-      }
-    },
-    {
-      "name": "deploy",
-      "model": "DeploymentRequest",
-      "value": {
-        "buildId": "12345678-1234-4234-8234-123456789abc",
-        "branchName": "feature/revenue",
-        "expectedTargetVersion": 0,
-        "idempotencyKey": "deploy-1"
       }
     },
     {
@@ -613,18 +602,12 @@
       }
     },
     {
-      "path": "/builds/{build_id}/resources/{resource_id}/{view}",
+      "path": "/builds/{build_id}/resources/{resource_id}/source",
       "value": {
-        "parent_map": {
-          "metric.sample.orders": [
-            "semantic_model.sample.orders"
-          ]
-        },
-        "child_map": {
-          "metric.sample.orders": [
-            "metric.sample.net"
-          ]
-        }
+        "buildId": "12345678-1234-4234-8234-123456789abc",
+        "resourceId": "model.sample.orders",
+        "path": "models/orders.sql",
+        "content": "select 1"
       }
     }
   ]

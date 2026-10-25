@@ -69,13 +69,13 @@ def test_missing_ref_disables_but_network_error_does_not(store):
     assert missing.source_state == "MISSING"
 
 
-def test_independent_deploy_retry_and_recreated_branch_require_new_intent(store, tmp_path):
+def test_auto_deploy_retry_and_recreated_branch_require_new_build(store, tmp_path):
     from dbt_metricflow_service.application.deployments import DeploymentService
-    from dbt_metricflow_service.models.deployments import DeploymentKey, DeploymentRequest
+    from dbt_metricflow_service.models.deployments import DeploymentKey
     from dbt_metricflow_service.storage.deployments import DeploymentStore
     from tests.test_catalog_queries import ready_build
 
-    app, build, jobs, artifacts = ready_build(store, tmp_path)
+    app, build, jobs, artifacts = ready_build(store, tmp_path, deploymentPolicy="ON_SUCCESS")
     observed = [build.commit_sha]
     deploy = DeploymentService(
         DeploymentStore(store.db), lambda *_: observed[0], builds=app, catalogs=CatalogService(app.store, artifacts)
@@ -83,12 +83,10 @@ def test_independent_deploy_retry_and_recreated_branch_require_new_intent(store,
     key = DeploymentKey(
         repository=build.repository, environment=str(build.execution.environment_id), branchName=build.branch_name
     )
-    body = DeploymentRequest(
-        buildId=build.build_id, branchName=build.branch_name, expectedTargetVersion=0, idempotencyKey=uuid4().hex
-    )
-    attempt = deploy.submit(body, CALLER)
+    attempt = build.initial_deployment
     assert deploy.reconcile(key, attempt.generation).deployment_status == "DEPLOYED"
-    assert deploy.submit(body, CALLER).generation == attempt.generation
+    body = app.store.get(build.build_id).request_json
+    assert app.submit_snapshot(body, CALLER).initial_deployment.generation == attempt.generation
     # GET current 的 head 观察不使业务 CAS 版本变化。
     version = deploy.current(key).version
     assert deploy.current(key).version == version
@@ -98,22 +96,21 @@ def test_independent_deploy_retry_and_recreated_branch_require_new_intent(store,
     assert deploy.current(key).active_build_id is None
     assert deploy.reconcile(key, attempt.generation).deployment_status == "DEPLOYED"
     assert deploy.current(key).active_build_id is None
-    renewed = deploy.submit(
-        body.model_copy(
-            update={"expected_target_version": deploy.current(key).version, "idempotency_key": uuid4().hex}
-        ),
-        CALLER,
+    _, renewed_build, _, _ = ready_build(
+        store, tmp_path, branchName=build.branch_name, execution=build.execution, deploymentPolicy="ON_SUCCESS",
     )
+    renewed = renewed_build.initial_deployment
+    assert renewed_build.build_id != build.build_id
     assert deploy.reconcile(key, renewed.generation).deployment_status == "DEPLOYED"
 
 
 def test_deploy_allows_historical_toolchain(store, tmp_path):
     from dbt_metricflow_service.application.deployments import DeploymentService
-    from dbt_metricflow_service.models.deployments import DeploymentKey, DeploymentRequest
+    from dbt_metricflow_service.models.deployments import DeploymentKey
     from dbt_metricflow_service.storage.deployments import DeploymentStore
     from tests.test_catalog_queries import ready_build
 
-    app, build, jobs, artifacts = ready_build(store, tmp_path)
+    app, build, jobs, artifacts = ready_build(store, tmp_path, deploymentPolicy="ON_SUCCESS")
     app.toolchain = "unavailable"
     deploy = DeploymentService(
         DeploymentStore(store.db),
@@ -121,14 +118,30 @@ def test_deploy_allows_historical_toolchain(store, tmp_path):
         builds=app,
         catalogs=CatalogService(app.store, artifacts),
     )
-    attempt = deploy.submit(
-        DeploymentRequest(
-            buildId=build.build_id, branchName=build.branch_name, expectedTargetVersion=0, idempotencyKey=uuid4().hex
-        ),
-        CALLER,
-    )
+    attempt = build.initial_deployment
     key = DeploymentKey(
         repository=build.repository, environment=str(build.execution.environment_id), branchName=build.branch_name
     )
     assert deploy.reconcile(key, attempt.generation).deployment_status == "DEPLOYED"
     assert str(deploy.current(key).active_build_id) == str(build.build_id)
+
+
+def test_legacy_independent_deployment_remains_readable(store, tmp_path):
+    from dbt_metricflow_service.models.deployments import DeploymentKey
+    from tests.test_catalog_queries import ready_build
+
+    app, build, _, _ = ready_build(store, tmp_path, deploymentPolicy="ON_SUCCESS")
+    # 模拟旧版已受理的独立部署；它不能被误认为构建附带的初始部署。
+    with store.db.transaction() as connection:
+        connection.exec_driver_sql(
+            "UPDATE engine_deployment_attempt SET operation='DEPLOYMENT',idempotency_key='legacy-deploy' "
+            "WHERE build_id=%s", (str(build.build_id),)
+        )
+    assert app.snapshot_view(build.build_id).initial_deployment is None
+    deploy = deployment_service(store, build.commit_sha)
+    key = DeploymentKey(
+        repository=build.repository, environment=str(build.execution.environment_id), branchName=build.branch_name
+    )
+    assert deploy.reconcile(key, build.initial_deployment.generation).deployment_status == "DEPLOYED"
+    assert deploy.current(key).active_build_id == build.build_id
+    assert deploy.history(key, cursor=None, limit=20).items[0].build_id == build.build_id

@@ -13,10 +13,10 @@ from tests.test_build_acceptance import CALLER, request, service
 from tests.test_publication_storage import store as store
 
 
-def ready_build(store, tmp_path, before_finish=None):
+def ready_build(store, tmp_path, before_finish=None, **build_changes):
     app = service(store)
     app.toolchain = uuid4().hex
-    build = app.submit_snapshot(request(branchName="feature/" + uuid4().hex), CALLER)
+    build = app.submit_snapshot(request(**{"branchName": "feature/" + uuid4().hex, **build_changes}), CALLER)
     jobs = JobStore(store.db)
     run = app.store.get(build.build_id).run_id
     job = jobs.claim(str(uuid4()), toolchain_version=app.toolchain)
@@ -27,6 +27,8 @@ def ready_build(store, tmp_path, before_finish=None):
     target = directory / "target"
     target.mkdir(parents=True)
     (directory / "dbt_project.yml").write_text("name: sample\nversion: '1.0'\nprofile: sample\n", encoding="utf-8")
+    (directory / "models").mkdir()
+    (directory / "models" / "orders.yml").write_text("models: []", encoding="utf-8")
     artifacts = ArtifactStore(store.db)
     evidence = {
         "source_commit_sha": build.commit_sha,
@@ -71,20 +73,30 @@ def test_completion_rejects_output_from_other_source(store, tmp_path):
         ready_build(store, tmp_path, mismatch)
 
 
-def test_cancel_before_finish_has_one_terminal_state(store, tmp_path):
-    def cancel(app, build, job, output):
-        assert app.cancel_snapshot(build.build_id, CALLER)[1] == 202
+def test_legacy_cancel_flag_does_not_override_completion(tmp_path):
+    from types import SimpleNamespace
 
-    app, build, jobs, artifacts = ready_build(store, tmp_path, cancel)
-    assert app.snapshot_view(build.build_id).build_status == "CANCELLED"
-    assert app.snapshot_view(build.build_id).catalog_available is False
-    assert app.cancel_snapshot(build.build_id, CALLER)[1] == 200
+    from tests.schema_helpers import isolated_database
 
+    # 升级保留旧列，但运行时代码不能再读取取消意图或改变构建终态。
+    with isolated_database() as db:
+        db.initialize()
+        with db.transaction() as connection:
+            connection.exec_driver_sql(
+                "ALTER TABLE engine_build ADD COLUMN cancel_requested boolean NOT NULL DEFAULT false"
+            )
 
+        def legacy_cancel(app, build, job, output):
+            with db.transaction() as connection:
+                connection.exec_driver_sql(
+                    "UPDATE engine_build SET cancel_requested=true WHERE build_id=%s", (str(build.build_id),)
+                )
 
-
-
-
+        app, build, jobs, artifacts = ready_build(SimpleNamespace(db=db), tmp_path, legacy_cancel)
+        detail = app.snapshot_view(build.build_id)
+        assert detail.build_status == "SUCCEEDED"
+        assert detail.catalog_available is True
+        assert "cancelRequested" not in detail.model_dump(by_alias=True)
 
 
 def test_option_scope_includes_build_and_metric_set(store, tmp_path):

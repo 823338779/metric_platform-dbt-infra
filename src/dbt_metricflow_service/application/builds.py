@@ -21,7 +21,6 @@ INCOMPLETE_EXECUTION_MESSAGE: Final = "engine execution did not complete"
 MISSING_BUILD_MESSAGE: Final = strings.BUILD_NOT_FOUND_MESSAGE
 
 
-
 class BuildService:
     def __init__(self, store: BuildStore, toolchain: str, config_version: str | None=None) -> None:
         # 具体 Store 和固定执行参数足够，不传入整个 Runtime。
@@ -45,13 +44,6 @@ class BuildService:
         initial = DeploymentStore(self.store.db).initial(row.build_id)
         return self.view(row, initial)
 
-    def cancel_snapshot(self, build_id: UUID | str, caller: str) -> tuple[SnapshotBuildView, int]:
-        self.load(build_id)
-        try:
-            status = self.store.cancel(str(build_id))
-        except StoreConflict as error:
-            raise ServiceError(strings.BUILD_TERMINAL, str(error), 409, build_id=str(build_id)) from error
-        return self.snapshot_view(build_id), status
 
     def list_by_environment(
         self, environment_id: UUID, repository: str | None = None, branch_name: str | None = None,
@@ -104,7 +96,6 @@ class BuildService:
             created_at=row.created_at,
             updated_at=row.updated_at,
             finished_at=row.finished_at,
-            cancel_requested=row.cancel_requested,
             catalog_available=catalog,
             initial_deployment=attempt_view(initial) if initial else None,
             error=ErrorView(

@@ -1,9 +1,8 @@
 """新环境部署门面复用部署事实，不创建环境配置。"""
 
-from collections.abc import Awaitable, Callable
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Query
 
 from dbt_metricflow_service import constants as strings
 
@@ -13,20 +12,13 @@ from ..models.builds import Page
 from ..models.deployments import (
     DeploymentAttemptView,
     DeploymentKey,
-    DeploymentRequest,
     DeploymentTargetView,
 )
 from ..storage.deployments import attempt_view
 
 
-def router(service: DeploymentService, guard: Callable[..., Awaitable[str]]) -> APIRouter:
+def router(service: DeploymentService) -> APIRouter:
     routes = APIRouter(prefix="")
-    dependency = Depends(guard)
-
-    @routes.post(strings.ROUTE_DEPLOYMENTS, response_model=DeploymentAttemptView, status_code=202)
-    def submit(request: DeploymentRequest, caller: str = dependency) -> DeploymentAttemptView:
-        return service.submit(request, caller)
-
     @routes.get(strings.ROUTE_DEPLOYMENTS_CURRENT, response_model=DeploymentTargetView)
     def current(repository: str, environmentId: UUID, branchName: str) -> DeploymentTargetView:
         return service.current(DeploymentKey(repository=repository, environment=str(environmentId),

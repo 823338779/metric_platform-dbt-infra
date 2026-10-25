@@ -74,7 +74,7 @@ def create_app(settings: Settings) -> FastAPI:
     app.add_middleware(RequestBodyLimitMiddleware)
     register_exception_handlers(app)
     guard = mutation_guard(settings)
-    for routes in (builds.router(build_service, guard, settings), deployments.router(deployment_service, guard),
+    for routes in (builds.router(build_service, guard, settings), deployments.router(deployment_service),
                    catalog.router(catalog_service, runtime.queries.lineage), queries.router(query_service, guard)):
         app.include_router(routes)
 

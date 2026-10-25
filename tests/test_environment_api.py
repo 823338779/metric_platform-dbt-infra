@@ -35,12 +35,18 @@ def test_environment_history_includes_failed_unpublished_builds(client):
     environment = snapshot()
     first = submit(client, execution=environment)
     second = submit(client, execution=environment, branchName="feature/test")
-    assert client.post(f"/builds/{second['buildId']}/cancel", headers=AUTH).status_code in (200, 202)
+    # 直接模拟失败任务事实，环境历史仍包含没有部署的失败构建。
+    with client.app.state.runtime.db.transaction() as connection:
+        connection.exec_driver_sql(
+            "UPDATE runtime_job SET status='FAILED',error_code='TEST_FAILURE' "
+            "WHERE job_id=(SELECT run_id FROM engine_build WHERE build_id=%s)", (second["buildId"],)
+        )
     response = client.get("/builds", params={"environmentId": str(environment.environment_id)})
     assert response.status_code == 200
     rows = response.json()["items"]
     assert {row["buildId"] for row in rows} == {first["buildId"], second["buildId"]}
     assert all(row["initialDeployment"] is None for row in rows)
+    assert next(row for row in rows if row["buildId"] == second["buildId"])["buildStatus"] == "FAILED"
 
 
 def test_cursor_is_bound_to_environment_and_filters(client):
@@ -84,7 +90,7 @@ def test_v3_cancel_rejects_snapshot_before_mutation(client):
     response = client.post(f"/v3/builds/{result['buildId']}/cancel", headers=AUTH)
     assert response.status_code == 404
     after = client.get(f"/builds/{result['buildId']}").json()
-    assert after["cancelRequested"] == result["cancelRequested"]
+    assert "cancelRequested" not in after
     assert after["buildStatus"] == result["buildStatus"]
 
 

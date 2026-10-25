@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Final
+from typing import Final, cast
 from uuid import UUID
 
 from sqlalchemy import func, select, tuple_, update
@@ -13,22 +13,18 @@ from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
 from dbt_metricflow_service import constants as strings
-from dbt_metricflow_service.models.deployments import DeploymentAttemptView, DeploymentKey, DeploymentRequest
+from dbt_metricflow_service.models.deployments import DeploymentAttemptView, DeploymentKey
 from dbt_metricflow_service.storage.postgres import Database
 from dbt_metricflow_service.storage.records import StoredBuild, StoredDeploymentAttempt, StoredDeploymentTarget
 
 from .entities import Build, DeploymentAttempt, DeploymentTarget, RuntimeJob
-from .jobs import StoreConflict
 from .paging import HISTORY_CURSOR_VERSION, read_cursor, write_cursor
 from .rows import entity_record
 
-DEPLOYMENT_INPUT_CONFLICT_MESSAGE: Final = "deployment key already binds another input"
-DEPLOYMENT_VERSION_CONFLICT_MESSAGE: Final = "deployment target version changed"
 INVALID_CURSOR_IDENTITY_MESSAGE: Final = "invalid cursor identity"
 INVALID_CURSOR_MESSAGE: Final = strings.INVALID_CURSOR_MESSAGE
 
 BUILD_OPERATION = strings.BUILD
-DEPLOYMENT_OPERATION = strings.DEPLOYMENT
 BUILD_KEY_PREFIX = strings.BUILD_IDEMPOTENCY_PREFIX
 SUCCEEDED = strings.SUCCEEDED
 PENDING = strings.PENDING
@@ -68,12 +64,9 @@ class DeploymentStore:
         self,
         session: Session,
         build: StoredBuild,
-        caller: str,
-        key: str,
-        fingerprint: str,
-        branch: str,
-        operation: str = DEPLOYMENT_OPERATION,
     ) -> StoredDeploymentAttempt:
+        # 自动部署与构建受理共用事务，身份和幂等证据只来自该构建。
+        branch = cast(str, build.branch_name)
         natural_key = (build.repository, build.environment, branch)
         session.execute(
             pg_insert(DeploymentTarget)
@@ -91,11 +84,11 @@ class DeploymentStore:
             branch_name=branch,
             generation=target.desired_generation,
             build_id=build.build_id,
-            caller=caller,
-            idempotency_key=key,
-            request_digest=fingerprint,
+            caller=build.caller,
+            idempotency_key=BUILD_KEY_PREFIX + build.build_id,
+            request_digest=build.request_digest,
             deployment_status=PENDING if build.build_status == SUCCEEDED else WAITING_FOR_BUILD,
-            operation=operation,
+            operation=BUILD_OPERATION,
         )
         session.add(attempt)
         session.flush()
@@ -125,49 +118,6 @@ class DeploymentStore:
             row = session.get(DeploymentAttempt, (*natural(key), generation))
             return entity_record(row, StoredDeploymentAttempt)
 
-    def by_key(self, repository: str, caller: str, key: str) -> StoredDeploymentAttempt | None:
-        with self.db.session() as session:
-            row = session.scalar(
-                select(DeploymentAttempt).where(
-                    DeploymentAttempt.repository == repository,
-                    DeploymentAttempt.caller == caller,
-                    DeploymentAttempt.operation == DEPLOYMENT_OPERATION,
-                    DeploymentAttempt.idempotency_key == key,
-                )
-            )
-            return entity_record(row, StoredDeploymentAttempt)
-
-    def submit(
-        self, build: StoredBuild, caller: str, request: DeploymentRequest, fingerprint: str
-    ) -> StoredDeploymentAttempt:
-        with self.db.fact_session() as session:
-            # 使用同一 advisory lock 键序列化部署幂等受理，不依赖构建层的 SQL 常量。
-            scope = build.repository + caller + request.idempotency_key
-            session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(scope, 0))))
-            prior = session.scalar(
-                select(DeploymentAttempt).where(
-                    DeploymentAttempt.repository == build.repository,
-                    DeploymentAttempt.caller == caller,
-                    DeploymentAttempt.operation == DEPLOYMENT_OPERATION,
-                    DeploymentAttempt.idempotency_key == request.idempotency_key,
-                )
-            )
-            if prior:
-                if prior.request_digest != fingerprint:
-                    raise StoreConflict(DEPLOYMENT_INPUT_CONFLICT_MESSAGE)
-                return entity_record(prior, StoredDeploymentAttempt)
-            key = (build.repository, build.environment, request.branch_name)
-            session.execute(
-                pg_insert(DeploymentTarget)
-                .values(repository=key[0], environment=key[1], branch_name=key[2])
-                .on_conflict_do_nothing()
-            )
-            current = session.get(DeploymentTarget, key, with_for_update=True)
-            if current.version != request.expected_target_version:
-                raise StoreConflict(DEPLOYMENT_VERSION_CONFLICT_MESSAGE)
-            return self.accept_in_transaction(
-                session, build, caller, request.idempotency_key, fingerprint, request.branch_name
-            )
 
     def observe(
         self,

@@ -217,7 +217,6 @@ class Build(Base):
         server_default=text(strings.SQL_QUEUED), comment="构建终态，不代表部署成功"
     )
     phase: Mapped[str] = mapped_column(server_default=text(strings.SQL_RESOLVING_SOURCE), comment="执行进度阶段")
-    cancel_requested: Mapped[bool] = mapped_column(server_default=text(strings.SQL_FALSE), comment="持久取消意图")
     output_set_id: Mapped[StringUUID | None] = mapped_column(comment="可靠封存产物引用")
     error_code: Mapped[str | None] = mapped_column(comment="脱敏稳定错误码")
     version: Mapped[BigInt] = mapped_column(server_default=text(strings.SQL_ONE), comment="对象递增版本")
@@ -262,7 +261,7 @@ class DeploymentAttempt(Base):
     idempotency_key: Mapped[str] = mapped_column(comment="调用方稳定请求键")
     request_digest: Mapped[str] = mapped_column(comment="规范化输入摘要")
     operation: Mapped[str] = mapped_column(
-        server_default=text(strings.SQL_DEPLOYMENT), comment="自动部署与独立部署的幂等操作域"
+        server_default=text(strings.SQL_BUILD), comment="历史部署来源；新意图固定为构建自动部署 BUILD"
     )
     deployment_status: Mapped[str] = mapped_column(comment="部署意图状态")
     reason: Mapped[str | None] = mapped_column(comment="稳定状态原因")

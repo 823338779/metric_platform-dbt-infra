@@ -65,7 +65,6 @@ def stored_build(**changes):
         "commit_sha": None,
         "build_status": "SUCCEEDED",
         "phase": "DONE",
-        "cancel_requested": False,
         "output_set_id": "output",
         "error_code": None,
         "version": 1,

@@ -33,15 +33,6 @@ class DeploymentKey(Contract):
         return str(UUID(value))
 
 
-
-class DeploymentRequest(Contract):
-    build_id: UUID = Field(description="已成功构建的版本")
-    branch_name: str = Field(description="来源核对及部署目标分支")
-    expected_target_version: int = Field(ge=0, description="受理前观察到的目标版本")
-    idempotency_key: str = Field(min_length=1, max_length=256, description="部署请求幂等键")
-    _branch = field_validator(strings.BRANCH_NAME_FIELD)(validate_branch)
-
-
 class DeploymentAttemptView(DeploymentKey):
     generation: int = Field(ge=1, description="受理顺序，不按完成时间分配")
     build_id: UUID = Field(description="该意图请求的构建")

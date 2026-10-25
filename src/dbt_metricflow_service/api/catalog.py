@@ -30,12 +30,11 @@ def router(
         return execute_lineage(build, selector)
 
     @routes.get(strings.ROUTE_BUILD_ID_RESOURCES_RESOURCE_ID, response_model=JsonObject)
-    def resource(build_id: UUID, resource_id: str) -> JsonObject | ResourceSourceView:
+    def resource(build_id: UUID, resource_id: str) -> JsonObject:
         return service.resource(build_id, resource_id)
 
-    @routes.get(strings.ROUTE_BUILD_ID_RESOURCES_RESOURCE_ID_VIEW,
-                response_model=ResourceSourceView | JsonObject)
-    def detail(build_id: UUID, resource_id: str, view: str) -> JsonObject | ResourceSourceView:
-        return service.resource(build_id, resource_id, view)
+    @routes.get(strings.ROUTE_BUILD_ID_RESOURCES_RESOURCE_ID_SOURCE, response_model=ResourceSourceView)
+    def source(build_id: UUID, resource_id: str) -> ResourceSourceView:
+        return service.source(build_id, resource_id)
 
     return routes

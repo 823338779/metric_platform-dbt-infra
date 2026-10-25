@@ -84,7 +84,7 @@ def test_catalog_returns_dbt_sdk_serialization():
         omit_none=False, context={"artifact": True})
 
 
-def test_detail_and_native_details_return_exact_native_object():
+def test_detail_returns_exact_native_object():
     from dbt_metricflow_service.delegates.clients.dbt_client import DbtClient
     manifest = package()
     service = service_for(manifest)
@@ -92,7 +92,6 @@ def test_detail_and_native_details_return_exact_native_object():
     for section in ("metrics", "nodes", "semantic_models"):
         key = next(iter(manifest[section]))
         assert service.resource(uuid4(), key) == native.expect(key).to_dict(omit_none=False)
-        assert service.resource(uuid4(), key, "native-details") == native.expect(key).to_dict(omit_none=False)
     with pytest.raises(ServiceError) as error:
         service.resource(uuid4(), "semantic_model.sample.orders.dimension.region")
     assert error.value.status == 404
@@ -128,7 +127,7 @@ def test_source_lookup_uses_database_snapshot_relative_path_without_local_io(mon
     ))
     service = CatalogService(builds, SimpleNamespace(read_file=read_file))
     monkeypatch.setattr(Path, "open", forbidden)
-    source = service.resource(uuid4(), "model.sample.orders", "source")
+    source = service.source(uuid4(), "model.sample.orders")
     assert source.path == "models/orders.yml"
     assert source.content == "models: []"
     assert calls == [("output", "target/manifest.json"), ("source", "models/orders.yml")]

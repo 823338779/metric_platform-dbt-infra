@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 from uuid import UUID
 
 from sqlalchemy.exc import DBAPIError as DatabaseError
@@ -19,7 +19,7 @@ from dbt_metricflow_service.platform.execution_profile import ExecutionConfigura
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.jobs import JobStore
-from dbt_metricflow_service.storage.records import JobErrorDetail, LeasedJob, StoredBuild
+from dbt_metricflow_service.storage.records import JobErrorDetail, LeasedJob
 
 TARGET_RELEASE_DEFERRED: Final[str] = "target release deferred to persisted attempt evidence"
 
@@ -106,16 +106,11 @@ class Worker:
         except asyncio.CancelledError:
             execution.cancel()
             await asyncio.gather(execution, return_exceptions=True)
-            # 尚未开始外部命令时可确认取消；外部写入仍保持未知及引用保护。
+            # 停机或失租时等待引擎退出；未确认的外部写入继续保留引用保护。
             external = await asyncio.to_thread(self.jobs.external_started, job.attempt_id)
-            cancelled = False
-            if job.request_json.build_id:
-                from ..storage.builds import BuildStore
-
-                build = await asyncio.to_thread(BuildStore(self.jobs.db).get, job.request_json.build_id)
-                cancelled = cast(StoredBuild, build).cancel_requested
-            code = strings.CANCELLED if cancelled and not external else INTERRUPTED
-            await self._fail(job, code, detail=JobErrorDetail(external_outcome_unknown=external), stopped=not external)
+            await self._fail(
+                job, INTERRUPTED, detail=JobErrorDetail(external_outcome_unknown=external), stopped=not external,
+            )
             if self._stopping:
                 raise
         except ExecutionConfigurationError as error:
@@ -161,14 +156,7 @@ class Worker:
         while not execution.done():
             await asyncio.sleep(self.settings.heartbeat_seconds)
             try:
-                # 请求取消只是意图；未知外部写入继续保留引用保护。
-                if job.request_json.build_id:
-                    from ..storage.builds import BuildStore
-
-                    build = await asyncio.to_thread(BuildStore(self.jobs.db).get, job.request_json.build_id)
-                    if cast(StoredBuild, build).cancel_requested:
-                        execution.cancel()
-                        return
+                # 仅续租决定执行权限，不再轮询用户取消意图。
                 valid = await asyncio.to_thread(
                     self.jobs.heartbeat, job.job_id, job.lease_token,
                 )

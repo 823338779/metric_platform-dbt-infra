@@ -78,3 +78,9 @@ COMMIT;
 `remove_run_cleanup.sql` 移除旧清理生命周期字段和触发器依赖，只允许新建构建任务；保留历史清理任务，未完成的清理任务以 `CLEANUP_REMOVED` 结束。停止全部服务和 worker 后，在目标 schema 的事务内执行，再启动服务。
 
 任务 `kind` 字段已移除，执行器直接构建；产物集合的 `SOURCE/EXECUTION` 类型保留。已有数据库停服后在目标服务 schema 的事务内执行 `remove_job_kind.sql`；若仍存在旧清理生命周期字段，先执行 `remove_run_cleanup.sql`。迁移保留任务和 attempt 历史，将未完成的旧清理任务标记失败，避免当作构建领取。
+
+## 退役管理入口后的存储边界
+
+部署意图只在构建受理事务中由 `ON_SUCCESS` 创建，不再提供独立部署提交、目标版本 CAS 输入或独立幂等键受理。部署 generation、并发切换保护、历史 operation 与查询继续保留。新意图的身份和幂等证据来自构建。
+
+构建模型和新库 schema 不再定义 `cancel_requested`。既有数据库中的同名列可保留，新代码不读写它；旧 CANCELLED 终态仍可读取。上线时停止旧 worker 后启动新版，无需为这次接口删除清空数据库。停机或失租导致的执行中断、未知写入保护与恢复扫描继续有效。

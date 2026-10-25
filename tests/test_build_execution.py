@@ -43,11 +43,12 @@ def test_pinned_sha_survives_remote_advance(store):
         app.store.pin_source(build.build_id, "b" * 40, job.lease_token)
 
 
-def test_cancel_queued_is_idempotent(store):
+def test_queued_build_has_no_cancellation_command(store):
     app = service(store)
     build = app.submit_snapshot(request(), CALLER)
-    assert app.cancel_snapshot(build.build_id, CALLER)[0].build_status == "CANCELLED"
-    assert app.cancel_snapshot(build.build_id, CALLER)[1] == 200
+    assert not hasattr(app, "cancel_snapshot")
+    assert not hasattr(app.store, "cancel")
+    assert app.snapshot_view(build.build_id).build_status == "QUEUED"
 
 
 def test_unknown_write_is_not_reexecuted(store):
@@ -70,7 +71,12 @@ def test_cancelled_execution_state_is_available_in_build_detail(store):
     app = service(store)
     build = app.submit_snapshot(request(), CALLER)
     assert app.snapshot_view(build.build_id).build_status == "QUEUED"
-    app.cancel_snapshot(build.build_id, CALLER)
+    # 旧版本持久化的取消结果仍须可读；新版本没有产生该意图的入口。
+    with store.db.transaction() as connection:
+        connection.exec_driver_sql(
+            "UPDATE runtime_job SET status='FAILED',error_code='CANCELLED' WHERE job_id=%s",
+            (app.store.get(build.build_id).run_id,),
+        )
     detail = app.snapshot_view(build.build_id)
     assert detail.build_status == "CANCELLED"
     assert detail.error.code == "CANCELLED"

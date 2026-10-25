@@ -8,7 +8,6 @@ from typing import Final, cast
 from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.application.builds import BuildService
 from dbt_metricflow_service.application.catalog import CatalogService
-from dbt_metricflow_service.models.deployments import DeploymentRequest
 from dbt_metricflow_service.storage.deployments import DeploymentStore
 from dbt_metricflow_service.storage.records import StoredBuild, StoredDeploymentAttempt, StoredDeploymentTarget
 
@@ -18,18 +17,10 @@ from ..models.deployments import (
     DeploymentKey,
     DeploymentTargetView,
 )
-from ..storage.builds import digest
 from ..storage.deployments import TERMINAL, attempt_view
-from ..storage.jobs import StoreConflict
 from .errors import ServiceError
 
-DEPLOYMENT_INPUT_CONFLICT_MESSAGE: Final = "deployment input differs"
-DEPLOYMENT_SOURCE_CONFLICT_MESSAGE: Final = "deployment branch differs from build source"
-MISSING_BUILD_MESSAGE: Final = strings.BUILD_NOT_FOUND_MESSAGE
 MISSING_DEPLOYMENT_INTENT_MESSAGE: Final = "deployment intent does not exist"
-REQUIRED_SUCCESSFUL_BUILD_MESSAGE: Final = "a successful build with source evidence is required"
-
-JSON_MODE = strings.JSON_MODE
 
 
 class DeploymentService:
@@ -49,24 +40,6 @@ class DeploymentService:
         self.head_reader = head_reader
         self.ancestry_reader = ancestry_reader
 
-    def submit(self, request: DeploymentRequest, caller: str) -> DeploymentAttemptView:
-        build = self.builds.get(str(request.build_id))
-        if not build:
-            raise ServiceError(strings.BUILD_NOT_FOUND, MISSING_BUILD_MESSAGE, 404)
-        fingerprint = digest(request.model_dump(mode=JSON_MODE, by_alias=True))
-        prior = self.store.by_key(build.repository, caller, request.idempotency_key)
-        if prior:
-            if prior.request_digest != fingerprint:
-                raise ServiceError(strings.IDEMPOTENCY_CONFLICT, DEPLOYMENT_INPUT_CONFLICT_MESSAGE, 409)
-            return attempt_view(prior)
-        if build.build_status != strings.SUCCEEDED:
-            raise ServiceError(strings.BUILD_NOT_READY, REQUIRED_SUCCESSFUL_BUILD_MESSAGE, 409)
-        if build.branch_name and request.branch_name != build.branch_name:
-            raise ServiceError(strings.SOURCE_MISMATCH, DEPLOYMENT_SOURCE_CONFLICT_MESSAGE)
-        try:
-            return attempt_view(self.store.submit(build, caller, request, fingerprint))
-        except StoreConflict as error:
-            raise ServiceError(strings.TARGET_CONFLICT, str(error), 409) from error
 
     def current(self, key: DeploymentKey) -> DeploymentTargetView:
         model = DeploymentTargetView

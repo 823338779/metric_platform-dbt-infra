@@ -43,29 +43,20 @@ async def test_worker_completes_with_artifact_identity_without_result_payload():
     assert completed == [(job.job_id, job.lease_token, output, seal)]
 
 
-async def test_runtime_reconciles_explicit_deployments(store, tmp_path):
+async def test_runtime_reconciles_build_deployments(store, tmp_path):
     from dbt_metricflow_service.application.catalog import CatalogService
     from dbt_metricflow_service.application.deployments import DeploymentService
     from dbt_metricflow_service.bootstrap import Runtime
-    from dbt_metricflow_service.models.deployments import DeploymentKey, DeploymentRequest
+    from dbt_metricflow_service.models.deployments import DeploymentKey
     from dbt_metricflow_service.storage.deployments import DeploymentStore
     from tests.test_catalog_queries import ready_build
 
-    builds, build, jobs, artifacts = ready_build(store, tmp_path)
+    builds, build, jobs, artifacts = ready_build(store, tmp_path, deploymentPolicy="ON_SUCCESS")
     deployments = DeploymentService(
         DeploymentStore(store.db),
         lambda *_: build.commit_sha,
         builds=builds,
         catalogs=CatalogService(builds.store, artifacts),
-    )
-    deployments.submit(
-        DeploymentRequest(
-            buildId=build.build_id,
-            branchName=build.branch_name,
-            expectedTargetVersion=0,
-            idempotencyKey=uuid4().hex,
-        ),
-        "worker-test",
     )
     key = DeploymentKey(
         repository=build.repository, environment=str(build.execution.environment_id), branchName=build.branch_name

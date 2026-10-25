@@ -107,10 +107,9 @@ def test_build_acceptance_and_observation_have_consistent_lock_order(store, monk
 def test_failed_new_intent_fences_inflight_old_switch(store, tmp_path, monkeypatch):
     from dbt_metricflow_service.application.catalog import CatalogService
     from dbt_metricflow_service.application.deployments import DeploymentService
-    from dbt_metricflow_service.models.deployments import DeploymentRequest
     from tests.test_catalog_queries import ready_build
 
-    app, build, jobs, artifacts = ready_build(store, tmp_path)
+    app, build, jobs, artifacts = ready_build(store, tmp_path, deploymentPolicy="ON_SUCCESS")
     deployments = DeploymentStore(store.db)
     deploy = DeploymentService(
         deployments, lambda *_: build.commit_sha, builds=app, catalogs=CatalogService(app.store, artifacts)
@@ -118,12 +117,7 @@ def test_failed_new_intent_fences_inflight_old_switch(store, tmp_path, monkeypat
     key = DeploymentKey(
         repository=build.repository, environment=str(build.execution.environment_id), branchName=build.branch_name
     )
-    old = deploy.submit(
-        DeploymentRequest(
-            buildId=build.build_id, branchName=build.branch_name, expectedTargetVersion=0, idempotencyKey=uuid4().hex
-        ),
-        CALLER,
-    )
+    old = build.initial_deployment
     switching, continue_switch = Event(), Event()
     settle = deployments.settle
 

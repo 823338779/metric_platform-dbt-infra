@@ -33,7 +33,11 @@ def test_catalog_http_preserves_native_keys_and_nested_dimensions(store, tmp_pat
     assert catalog["semantic_models"]["semantic_model.sample.returns"]["dimensions"][0]["name"] == "region"
     resource_path = base + "/resources/metric.revenue"
     assert client.get(resource_path).json() == metric
-    assert client.get(resource_path + "/native-details").json() == metric
+    source = client.get(resource_path + "/source")
+    assert source.status_code == 200
+    assert source.json()["path"] == "models/orders.yml"
+    assert source.json()["content"] == "models: []"
+    assert client.get(resource_path + "/native-details").status_code == 404
     lineage_path = base + "/lineage"
     response = client.get(lineage_path, params={"selector": "1+metric:revenue+1"})
     assert response.status_code == 200, response.text
@@ -44,6 +48,6 @@ def test_catalog_http_preserves_native_keys_and_nested_dimensions(store, tmp_pat
     assert invalid.status_code == 422
     assert invalid.json()["error"]["code"] == "INVALID_QUERY"
     assert client.get(lineage_path).status_code == 422
-    assert client.get(resource_path + "/lineage").status_code == 422
+    assert client.get(resource_path + "/lineage").status_code == 404
     assert client.get(lineage_path, params={"selector": "+orders+"}).status_code == 200
-    assert client.get(resource_path + "/unknown").status_code == 422
+    assert client.get(resource_path + "/unknown").status_code == 404

@@ -5,7 +5,6 @@ from typing import Final
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
-from fastapi.responses import JSONResponse
 
 from dbt_metricflow_service import constants as strings
 
@@ -51,10 +50,5 @@ def router(service: BuildService, guard: Callable[..., Awaitable[str]], settings
     ) -> ExecutionLogPage:
         """读取持久化 dbt 详细日志；空页仍返回游标，供前端增量轮询。"""
         return service.execution_logs(build_id, cursor, limit)
-
-    @routes.post(strings.ROUTE_BUILDS_BUILD_ID_CANCEL, response_model=SnapshotBuildView, status_code=202)
-    def cancel(build_id: UUID, caller: str = dependency) -> JSONResponse:
-        view, status = service.cancel_snapshot(build_id, caller)
-        return JSONResponse(view.model_dump(mode=strings.JSON_MODE, by_alias=True), status_code=status)
 
     return routes

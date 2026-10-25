@@ -23,7 +23,6 @@ RESOURCE_BUILD_CONFLICT_MESSAGE: Final = "resource does not belong to this build
 UNAVAILABLE_CATALOG_MESSAGE: Final = "sealed manifest is unavailable"
 UNAVAILABLE_SOURCE_MESSAGE: Final = "sealed source is unavailable"
 UNREADABLE_CATALOG_MESSAGE: Final = "sealed manifest cannot be read"
-UNSUPPORTED_RESOURCE_VIEW_MESSAGE: Final = "unsupported resource view"
 
 
 class CatalogService:
@@ -56,9 +55,10 @@ class CatalogService:
         except Exception as error:
             raise ServiceError(strings.ARTIFACT_UNAVAILABLE, UNREADABLE_CATALOG_MESSAGE, 503) from error
 
-    def resource(
-        self, build_id: UUID | str, resource_id: str, view: str | None = None,
-    ) -> JsonObject | ResourceSourceView:
+    def _resource(
+        self, build_id: UUID | str, resource_id: str,
+    ) -> tuple[StoredBuild, DbtClient, JsonObject]:
+        """详情和源码共用固定构建节点校验，不提供通用视图分派。"""
         build, manifest = self.read(build_id)
         client = DbtClient(manifest)
         try:
@@ -67,16 +67,20 @@ class CatalogService:
             raise ServiceError(strings.RESOURCE_NOT_FOUND, RESOURCE_BUILD_CONFLICT_MESSAGE, 404) from error
         except Exception as error:
             raise ServiceError(strings.ARTIFACT_UNAVAILABLE, UNREADABLE_CATALOG_MESSAGE, 503) from error
-        if view == strings.CATALOG_SOURCE_VIEW:
-            path = client.source_path(resource_id)
-            job = self.builds.jobs.get(build.run_id)
-            if not path or not job or not job.input_set_id:
-                raise ServiceError(strings.SOURCE_UNAVAILABLE, UNAVAILABLE_SOURCE_MESSAGE, 404)
-            try:
-                content = self.artifacts.read_file(job.input_set_id, path).decode(strings.UTF8)
-            except (ValueError, KeyError) as error:
-                raise ServiceError(strings.SOURCE_UNAVAILABLE, UNAVAILABLE_SOURCE_MESSAGE, 503) from error
-            return ResourceSourceView(build_id=build_id, resource_id=resource_id, path=path, content=content)
-        if view not in (None, strings.CATALOG_NATIVE_DETAILS_VIEW):
-            raise ServiceError(strings.INVALID_RESOURCE_VIEW, UNSUPPORTED_RESOURCE_VIEW_MESSAGE)
+        return build, client, resource
+
+    def resource(self, build_id: UUID | str, resource_id: str) -> JsonObject:
+        _, _, resource = self._resource(build_id, resource_id)
         return resource
+
+    def source(self, build_id: UUID | str, resource_id: str) -> ResourceSourceView:
+        build, client, _ = self._resource(build_id, resource_id)
+        path = client.source_path(resource_id)
+        job = self.builds.jobs.get(build.run_id)
+        if not path or not job or not job.input_set_id:
+            raise ServiceError(strings.SOURCE_UNAVAILABLE, UNAVAILABLE_SOURCE_MESSAGE, 404)
+        try:
+            content = self.artifacts.read_file(job.input_set_id, path).decode(strings.UTF8)
+        except (ValueError, KeyError) as error:
+            raise ServiceError(strings.SOURCE_UNAVAILABLE, UNAVAILABLE_SOURCE_MESSAGE, 503) from error
+        return ResourceSourceView(build_id=build_id, resource_id=resource_id, path=path, content=content)

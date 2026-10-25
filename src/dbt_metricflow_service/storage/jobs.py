@@ -29,7 +29,6 @@ from dbt_metricflow_service.storage.rows import entity_record
 from .entities import (
     ArtifactFile,
     ArtifactSet,
-    Build,
     RuntimeAttempt,
     RuntimeJob,
     RuntimeProject,
@@ -479,30 +478,6 @@ class JobStore:
                     return False
                 if output_set_id is None:
                     raise ValueError(REQUIRED_BUILD_OUTPUT_MESSAGE)
-                # 命令已明确结束，若取消意图先提交，则只确认取消、不发布成功或部署。
-                cancelled = session.scalar(select(Build.cancel_requested).where(Build.run_id == str(job_id)))
-                if cancelled:
-                    session.execute(
-                        update(RuntimeAttempt)
-                        .where(RuntimeAttempt.attempt_id == job.attempt_id)
-                        .values(
-                            state=FAILED,
-                            stop_confirmed_at=func.clock_timestamp(),
-                            finished_at=func.clock_timestamp(),
-                        )
-                    )
-                    session.execute(
-                        update(RuntimeJob)
-                        .where(RuntimeJob.job_id == str(job_id))
-                        .values(
-                            status=FAILED,
-                            error_code=strings.CANCELLED,
-                            error_detail={},
-                            finished_at=func.clock_timestamp(),
-                        )
-                    )
-                    self._release_project(session, job_id)
-                    return True
                 output = session.get(ArtifactSet, output_set_id, with_for_update=True, populate_existing=True)
                 if not output or output.producer_attempt_id != job.attempt_id or output.kind != EXECUTION:
                     raise ValueError(OUTPUT_ATTEMPT_CONFLICT_MESSAGE)

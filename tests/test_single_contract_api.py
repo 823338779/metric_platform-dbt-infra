@@ -12,7 +12,7 @@ API_ROOT = ""
 OLD_BUILD = "/v3/builds"
 OLD_VERSION = "/v1/versions"
 LEGACY_FIELDS = ("environment", "executionBinding", "configVersion", "schemaName")
-WRITE_PATHS = ("/builds", "/deployments", "/builds/id/cancel", "/query", "/query/available-dimensions")
+WRITE_PATHS = ("/builds", "/query", "/query/available-dimensions")
 
 
 def test_only_unversioned_business_routes_are_registered(client):

@@ -62,7 +62,6 @@ CREATE TABLE engine_build (
     commit_sha text,
     build_status text DEFAULT 'QUEUED'::text NOT NULL,
     phase text DEFAULT 'RESOLVING_SOURCE'::text NOT NULL,
-    cancel_requested boolean DEFAULT false NOT NULL,
     output_set_id uuid,
     error_code text,
     version bigint DEFAULT 1 NOT NULL,
@@ -108,8 +107,6 @@ COMMENT ON COLUMN engine_build.build_status IS '构建终态，不代表部署�
 
 COMMENT ON COLUMN engine_build.phase IS '执行进度阶段';
 
-COMMENT ON COLUMN engine_build.cancel_requested IS '持久取消意图';
-
 COMMENT ON COLUMN engine_build.output_set_id IS '可靠封存产物引用';
 
 COMMENT ON COLUMN engine_build.error_code IS '脱敏稳定错误码';
@@ -131,7 +128,7 @@ CREATE TABLE engine_deployment_attempt (
     caller text NOT NULL,
     idempotency_key text NOT NULL,
     request_digest text NOT NULL,
-    operation text DEFAULT 'DEPLOYMENT'::text NOT NULL,
+    operation text DEFAULT 'BUILD'::text NOT NULL,
     deployment_status text NOT NULL,
     reason text,
     version bigint DEFAULT 1 NOT NULL,
@@ -156,7 +153,7 @@ COMMENT ON COLUMN engine_deployment_attempt.idempotency_key IS '调用方稳定�
 
 COMMENT ON COLUMN engine_deployment_attempt.request_digest IS '规范化输入摘要';
 
-COMMENT ON COLUMN engine_deployment_attempt.operation IS '自动部署与独立部署的幂等操作域';
+COMMENT ON COLUMN engine_deployment_attempt.operation IS '历史部署来源；新意图固定为构建自动部署 BUILD';
 
 COMMENT ON COLUMN engine_deployment_attempt.deployment_status IS '部署意图状态';
 
