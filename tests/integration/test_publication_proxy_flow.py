@@ -246,8 +246,8 @@ async def test_build_history_and_all_query_modes(tmp_path, monkeypatch):
                 is not None
             )
         assert catalogs.list(first.build_id)["metrics"]
-        assert catalogs.source(first.build_id, next(key for key, item in resources["nodes"].items()
-            if item["name"] == dataset)).content
+        assert catalogs.resource(first.build_id, next(key for key, item in resources["nodes"].items()
+            if item["name"] == dataset)).source.content
         assert (await query(first.build_id, mode="QUERY", metrics=[metric])).rows
         assert (await query(second.build_id, mode="QUERY", metrics=[metric])).rows
     finally:

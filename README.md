@@ -157,7 +157,7 @@ uv run --frozen dbt-service-admin build --file build-request.json
 | `GET /builds/{buildId}/execution-logs` | 按构建增量读取结构化 dbt 详细日志，支持 cursor、limit；[前端对接说明](docs/build-execution-logs-api.md) |
 | `GET /deployments/current`、`GET /deployments` | 自然键当前观察、意图历史 |
 | `GET /builds/{buildId}/catalog` | 返回 Manifest 原生指标、语义模型、节点与依赖映射 |
-| `GET /builds/{buildId}/resources/{resourceId}` | 按 dbt unique_id 返回原生节点；`/source` 返回源码快照 |
+| `GET /builds/{buildId}/resources/{resourceId}` | 一次返回原生节点 resource 与源码文件 source，不提供 view 入参或独立 /source 路由 |
 | `GET /builds/{buildId}/lineage?selector=...` | 用 dbt 原生 selector 查询血缘，返回 `dbt ls --output json` 的节点数组 |
 | `POST /query/available-dimensions?build_id={build_id}` | build_id 为独立 URL 参数，请求体指定 metrics，200 同步返回可用的 dimensions 列表，包含时间粒度和允许的过滤操作 |
 | `POST /query?build_id={build_id}` | build_id 为独立 URL 参数，同步执行 QUERY、EXPLAIN、PREVIEW、DIMENSION_VALUES，直接返回本次结果，最多 8 MiB |
@@ -203,7 +203,7 @@ result = metricflow.query(request)
 
 资源目录接口仅读取对应构建的 `target/manifest.json`，不生成或存储 `published_catalog.json`，也不再创建统一资源模型。`GET /builds/{buildId}/catalog` 返回 dbt SDK 的完整原生 artifact，包括 `metadata`、`metrics`、`semantic_models`、`nodes`、`sources` 和依赖映射等；字段与扩展支持以当前 dbt SDK 为准。维度直接位于 `semantic_models[unique_id].dimensions`，不存在服务生成的独立维度资源 ID。表列来自 `nodes` / `sources` 中的 YAML 声明，不代表数据库实际列清单。构建不运行 docs generate，不依赖 `catalog.json`。
 
-此次目录接口返回格式有变化：移除 `items`、`nextCursor`、kind 筛选和搜索分页，以及资源的 `attributes`、`capabilities`、`nativeDetails` 包装。资源详情直接返回原生节点；`/builds/{buildId}/lineage?selector=...` 透传原生节点数组（包含 `unique_id`、`depends_on` 等），替代旧 `/resources/{resourceId}/lineage` 和 `parent_map/child_map` 返回结构，服务不读取 Manifest 中的依赖字段，也不自行推导或折叠 ephemeral 节点。`/source` 通过产物集合 ID 和工程内相对文件名读取数据库源码快照，不访问原构建目录。历史 Manifest 无需迁移。 新捕获的 Manifest 不保存临时执行地址；既有历史快照保持原有内容，不自动回写。
+此次目录接口返回格式有变化：移除 `items`、`nextCursor`、kind 筛选和搜索分页，以及资源的 `attributes`、`capabilities`、`nativeDetails` 包装。资源详情统一返回 `{buildId, resourceId, resource, source}`，`resource` 保留完整原生节点；`/builds/{buildId}/lineage?selector=...` 透传原生节点数组（包含 `unique_id`、`depends_on` 等），替代旧 `/resources/{resourceId}/lineage` 和 `parent_map/child_map` 返回结构，服务不读取 Manifest 中的依赖字段，也不自行推导或折叠 ephemeral 节点。资源详情中的 `source` 通过产物集合 ID 和工程内相对文件名读取数据库源码快照，不访问原构建目录；有源码时为 `{path, content}`（整个文件），无源码路径或输入快照时为 null，已有快照读取失败仍返回 SOURCE_UNAVAILABLE/503。独立 `/source` 路由已删除，返回 404；不支持通过 view 入参切换返回内容。调用方需要从响应的 `resource` 读取原生节点，从 `source` 读取源码。历史 Manifest 无需迁移。 新捕获的 Manifest 不保存临时执行地址；既有历史快照保持原有内容，不自动回写。
 
 血缘复用 dbt 已有的 `ls` 命令，没有自定义 dbt `lineage` 命令。`+orders+` 选择当前节点及所有上游、下游；`1+orders+1` 限制为一层；也可使用 `metric:revenue` 等原生 selector。HTTP query string 中的 `+` 必须编码为 `%2B`，例如 `/builds/{buildId}/lineage?selector=1%2Borders%2B1`。不匹配返回空数组。
 

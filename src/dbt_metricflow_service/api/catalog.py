@@ -11,7 +11,7 @@ from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.application.catalog import CatalogService
 from dbt_metricflow_service.storage.records import StoredBuild
 
-from ..models.catalog import ResourceSourceView
+from ..models.catalog import ResourceView
 from ..models.payloads import JsonObject
 
 
@@ -29,12 +29,8 @@ def router(
         build, _ = service.read(build_id)
         return execute_lineage(build, selector)
 
-    @routes.get(strings.ROUTE_BUILD_ID_RESOURCES_RESOURCE_ID, response_model=JsonObject)
-    def resource(build_id: UUID, resource_id: str) -> JsonObject:
+    @routes.get(strings.ROUTE_BUILD_ID_RESOURCES_RESOURCE_ID, response_model=ResourceView)
+    def resource(build_id: UUID, resource_id: str) -> ResourceView:
         return service.resource(build_id, resource_id)
-
-    @routes.get(strings.ROUTE_BUILD_ID_RESOURCES_RESOURCE_ID_SOURCE, response_model=ResourceSourceView)
-    def source(build_id: UUID, resource_id: str) -> ResourceSourceView:
-        return service.source(build_id, resource_id)
 
     return routes

@@ -70,7 +70,9 @@ def package():
 def service_for(manifest):
     stored = SimpleNamespace(build_status="SUCCEEDED", output_set_id="historical", run_id="run")
     artifacts = SimpleNamespace(read_file=lambda *_: json.dumps(manifest).encode())
-    return CatalogService(SimpleNamespace(get=lambda _: stored), artifacts)
+    return CatalogService(SimpleNamespace(get=lambda _: stored, jobs=SimpleNamespace(
+        get=lambda _: SimpleNamespace(input_set_id=None),
+    )), artifacts)
 
 
 def build(manifest=None):
@@ -91,7 +93,12 @@ def test_detail_returns_exact_native_object():
     native = DbtClient(json.dumps(manifest).encode())._manifest
     for section in ("metrics", "nodes", "semantic_models"):
         key = next(iter(manifest[section]))
-        assert service.resource(uuid4(), key) == native.expect(key).to_dict(omit_none=False)
+        build_id = uuid4()
+        detail = service.resource(build_id, key)
+        assert detail.build_id == build_id
+        assert detail.resource_id == key
+        assert detail.resource == native.expect(key).to_dict(omit_none=False)
+        assert detail.source is None
     with pytest.raises(ServiceError) as error:
         service.resource(uuid4(), "semantic_model.sample.orders.dimension.region")
     assert error.value.status == 404
@@ -127,7 +134,9 @@ def test_source_lookup_uses_database_snapshot_relative_path_without_local_io(mon
     ))
     service = CatalogService(builds, SimpleNamespace(read_file=read_file))
     monkeypatch.setattr(Path, "open", forbidden)
-    source = service.source(uuid4(), "model.sample.orders")
+    detail = service.resource(uuid4(), "model.sample.orders")
+    source = detail.source
+    assert detail.resource["name"] == "orders"
     assert source.path == "models/orders.yml"
     assert source.content == "models: []"
     assert calls == [("output", "target/manifest.json"), ("source", "models/orders.yml")]
@@ -140,3 +149,47 @@ def test_catalog_service_rejects_corrupt_manifest(content):
     with pytest.raises(ServiceError) as error:
         service.list(uuid4())
     assert error.value.status == 503
+
+
+@pytest.mark.parametrize("source_content", [b"", b"models: []"])
+def test_combined_resource_includes_source_content(source_content):
+    content = json.dumps(package()).encode()
+    stored = SimpleNamespace(build_status="SUCCEEDED", output_set_id="output", run_id="run")
+    builds = SimpleNamespace(get=lambda _: stored, jobs=SimpleNamespace(
+        get=lambda _: SimpleNamespace(input_set_id="source"),
+    ))
+    service = CatalogService(builds, SimpleNamespace(
+        read_file=lambda set_id, _: content if set_id == "output" else source_content,
+    ))
+    detail = service.resource(uuid4(), "model.sample.orders")
+    assert detail.resource["name"] == "orders"
+    assert detail.source.content == source_content.decode()
+
+
+def test_resource_without_source_path_keeps_native_definition(monkeypatch):
+    from dbt_metricflow_service.delegates.clients.dbt_client import DbtClient
+
+    monkeypatch.setattr(DbtClient, "source_path", lambda *_: "")
+    detail = service_for(package()).resource(uuid4(), "model.sample.orders")
+    assert detail.resource["name"] == "orders"
+    assert detail.source is None
+
+
+@pytest.mark.parametrize("error", [KeyError("missing"), ValueError("digest mismatch")])
+def test_combined_resource_does_not_hide_unreadable_snapshot(error):
+    content = json.dumps(package()).encode()
+    stored = SimpleNamespace(build_status="SUCCEEDED", output_set_id="output", run_id="run")
+    builds = SimpleNamespace(get=lambda _: stored, jobs=SimpleNamespace(
+        get=lambda _: SimpleNamespace(input_set_id="source"),
+    ))
+
+    def read_file(set_id, path):
+        if set_id == "output":
+            return content
+        raise error
+
+    service = CatalogService(builds, SimpleNamespace(read_file=read_file))
+    with pytest.raises(ServiceError) as failure:
+        service.resource(uuid4(), "model.sample.orders")
+    assert failure.value.status == 503
+    assert failure.value.error.code == "SOURCE_UNAVAILABLE"

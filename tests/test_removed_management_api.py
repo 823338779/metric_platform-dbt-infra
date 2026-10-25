@@ -12,7 +12,7 @@ def test_removed_management_contracts_are_absent(client):
     assert "post" not in paths["/deployments"]
     assert "/builds/{build_id}/cancel" not in paths
     assert "/builds/{build_id}/resources/{resource_id}/{view}" not in paths
-    assert "/builds/{build_id}/resources/{resource_id}/source" in paths
+    assert "/builds/{build_id}/resources/{resource_id}/source" not in paths
     assert "DeploymentRequest" not in document["components"]["schemas"]
     assert "cancelRequested" not in document["components"]["schemas"]["SnapshotBuildView"]["properties"]
 

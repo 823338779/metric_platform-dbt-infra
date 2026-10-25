@@ -268,10 +268,61 @@
       "name": "source",
       "model": "ResourceSourceView",
       "value": {
-        "buildId": "12345678-1234-4234-8234-123456789abc",
-        "resourceId": "metric.revenue",
         "path": "models/metrics.yml",
         "content": "metrics: []\n"
+      }
+    },
+    {
+      "name": "resource-with-source",
+      "model": "ResourceView",
+      "value": {
+        "buildId": "12345678-1234-4234-8234-123456789abc",
+        "resourceId": "metric.sample.orders",
+        "resource": {
+          "name": "orders",
+          "label": "展示 orders",
+          "type": "simple",
+          "type_params": {
+            "metric_aggregation_params": {
+              "semantic_model": "orders",
+              "agg": "sum"
+            }
+          },
+          "depends_on": {
+            "nodes": [
+              "semantic_model.sample.orders"
+            ]
+          }
+        },
+        "source": {
+          "path": "models/orders.sql",
+          "content": "select 1"
+        }
+      }
+    },
+    {
+      "name": "resource-without-source",
+      "model": "ResourceView",
+      "value": {
+        "buildId": "12345678-1234-4234-8234-123456789abc",
+        "resourceId": "metric.sample.orders",
+        "resource": {
+          "name": "orders",
+          "label": "展示 orders",
+          "type": "simple",
+          "type_params": {
+            "metric_aggregation_params": {
+              "semantic_model": "orders",
+              "agg": "sum"
+            }
+          },
+          "depends_on": {
+            "nodes": [
+              "semantic_model.sample.orders"
+            ]
+          }
+        },
+        "source": null
       }
     }
   ],
@@ -585,29 +636,28 @@
     {
       "path": "/builds/{build_id}/resources/{resource_id}",
       "value": {
-        "name": "orders",
-        "label": "展示 orders",
-        "type": "simple",
-        "type_params": {
-          "metric_aggregation_params": {
-            "semantic_model": "orders",
-            "agg": "sum"
+        "buildId": "12345678-1234-4234-8234-123456789abc",
+        "resourceId": "metric.sample.orders",
+        "resource": {
+          "name": "orders",
+          "label": "展示 orders",
+          "type": "simple",
+          "type_params": {
+            "metric_aggregation_params": {
+              "semantic_model": "orders",
+              "agg": "sum"
+            }
+          },
+          "depends_on": {
+            "nodes": [
+              "semantic_model.sample.orders"
+            ]
           }
         },
-        "depends_on": {
-          "nodes": [
-            "semantic_model.sample.orders"
-          ]
+        "source": {
+          "path": "models/orders.sql",
+          "content": "select 1"
         }
-      }
-    },
-    {
-      "path": "/builds/{build_id}/resources/{resource_id}/source",
-      "value": {
-        "buildId": "12345678-1234-4234-8234-123456789abc",
-        "resourceId": "model.sample.orders",
-        "path": "models/orders.sql",
-        "content": "select 1"
       }
     }
   ]

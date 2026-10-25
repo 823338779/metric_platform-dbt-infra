@@ -349,7 +349,6 @@ ROUTE_BUILDS_BUILD_ID_EXECUTION_LOGS: Final[str] = "/builds/{build_id}/execution
 ROUTE_BUILD_ID_CATALOG: Final[str] = "/{build_id}/catalog"
 ROUTE_BUILD_ID_LINEAGE: Final[str] = "/{build_id}/lineage"
 ROUTE_BUILD_ID_RESOURCES_RESOURCE_ID: Final[str] = "/{build_id}/resources/{resource_id}"
-ROUTE_BUILD_ID_RESOURCES_RESOURCE_ID_SOURCE: Final[str] = "/{build_id}/resources/{resource_id}/source"
 ROUTE_DEPLOYMENTS: Final[str] = "/deployments"
 ROUTE_DEPLOYMENTS_CURRENT: Final[str] = "/deployments/current"
 ROUTE_HEALTH_LIVE: Final[str] = "/health/live"

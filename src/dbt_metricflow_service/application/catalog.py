@@ -9,7 +9,7 @@ from dbt_common.exceptions import DbtInternalError
 
 from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.delegates.clients.dbt_client import DbtClient
-from dbt_metricflow_service.models.catalog import ResourceSourceView
+from dbt_metricflow_service.models.catalog import ResourceSourceView, ResourceView
 from dbt_metricflow_service.models.payloads import JsonObject
 from dbt_metricflow_service.platform.manifest_capture import ManifestCapture
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
@@ -55,32 +55,25 @@ class CatalogService:
         except Exception as error:
             raise ServiceError(strings.ARTIFACT_UNAVAILABLE, UNREADABLE_CATALOG_MESSAGE, 503) from error
 
-    def _resource(
-        self, build_id: UUID | str, resource_id: str,
-    ) -> tuple[StoredBuild, DbtClient, JsonObject]:
-        """详情和源码共用固定构建节点校验，不提供通用视图分派。"""
+    def resource(self, build_id: UUID | str, resource_id: str) -> ResourceView:
+        # 一次读取固定构建的 Manifest，取得完整节点和对应源码路径。
         build, manifest = self.read(build_id)
         client = DbtClient(manifest)
         try:
             resource = client.resource(resource_id)
+            path = client.source_path(resource_id)
         except DbtInternalError as error:
             raise ServiceError(strings.RESOURCE_NOT_FOUND, RESOURCE_BUILD_CONFLICT_MESSAGE, 404) from error
         except Exception as error:
             raise ServiceError(strings.ARTIFACT_UNAVAILABLE, UNREADABLE_CATALOG_MESSAGE, 503) from error
-        return build, client, resource
 
-    def resource(self, build_id: UUID | str, resource_id: str) -> JsonObject:
-        _, _, resource = self._resource(build_id, resource_id)
-        return resource
-
-    def source(self, build_id: UUID | str, resource_id: str) -> ResourceSourceView:
-        build, client, _ = self._resource(build_id, resource_id)
-        path = client.source_path(resource_id)
-        job = self.builds.jobs.get(build.run_id)
-        if not path or not job or not job.input_set_id:
-            raise ServiceError(strings.SOURCE_UNAVAILABLE, UNAVAILABLE_SOURCE_MESSAGE, 404)
-        try:
-            content = self.artifacts.read_file(job.input_set_id, path).decode(strings.UTF8)
-        except (ValueError, KeyError) as error:
-            raise ServiceError(strings.SOURCE_UNAVAILABLE, UNAVAILABLE_SOURCE_MESSAGE, 503) from error
-        return ResourceSourceView(build_id=build_id, resource_id=resource_id, path=path, content=content)
+        # 无源码证据时仍返回节点；已有快照读取失败则保留明确错误，不掩盖损坏。
+        source = None
+        job = self.builds.jobs.get(build.run_id) if path else None
+        if job and job.input_set_id:
+            try:
+                content = self.artifacts.read_file(job.input_set_id, path).decode(strings.UTF8)
+            except (ValueError, KeyError) as error:
+                raise ServiceError(strings.SOURCE_UNAVAILABLE, UNAVAILABLE_SOURCE_MESSAGE, 503) from error
+            source = ResourceSourceView(path=path, content=content)
+        return ResourceView(build_id=build_id, resource_id=resource_id, resource=resource, source=source)

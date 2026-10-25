@@ -32,11 +32,14 @@ def test_catalog_http_preserves_native_keys_and_nested_dimensions(store, tmp_pat
     assert catalog["semantic_models"]["semantic_model.sample.orders"]["dimensions"][0]["name"] == "region"
     assert catalog["semantic_models"]["semantic_model.sample.returns"]["dimensions"][0]["name"] == "region"
     resource_path = base + "/resources/metric.revenue"
-    assert client.get(resource_path).json() == metric
-    source = client.get(resource_path + "/source")
-    assert source.status_code == 200
-    assert source.json()["path"] == "models/orders.yml"
-    assert source.json()["content"] == "models: []"
+    detail_response = client.get(resource_path)
+    assert detail_response.status_code == 200
+    detail = detail_response.json()
+    assert detail == {
+        "buildId": str(build.build_id), "resourceId": "metric.revenue", "resource": metric,
+        "source": {"path": "models/orders.yml", "content": "models: []"},
+    }
+    assert client.get(resource_path + "/source").status_code == 404
     assert client.get(resource_path + "/native-details").status_code == 404
     lineage_path = base + "/lineage"
     response = client.get(lineage_path, params={"selector": "1+metric:revenue+1"})
@@ -51,3 +54,14 @@ def test_catalog_http_preserves_native_keys_and_nested_dimensions(store, tmp_pat
     assert client.get(resource_path + "/lineage").status_code == 404
     assert client.get(lineage_path, params={"selector": "+orders+"}).status_code == 200
     assert client.get(resource_path + "/unknown").status_code == 404
+
+
+def test_resource_contract_has_one_route_and_no_view_parameter(client):
+    document = client.get("/openapi.json").json()
+    path = "/builds/{build_id}/resources/{resource_id}"
+    assert path + "/source" not in document["paths"]
+    operation = document["paths"][path]["get"]
+    assert {p["name"] for p in operation["parameters"]} == {"build_id", "resource_id"}
+    assert operation["responses"]["200"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/ResourceView",
+    }
