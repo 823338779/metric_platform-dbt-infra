@@ -104,7 +104,7 @@ class Settings:
 
     # 物理实例身份与地址别名，仅为基础设施准入，不含环境落点配置。
     execution_instances: dict[str, ExecutionInstance] = field(default_factory=dict)
-    # 允许使用的凭据引用到受保护环境变量名的映射，不包含明文值。
+    # 允许使用的凭据引用到配置文件账号和密码的映射；repr 隐藏凭据。
     execution_credentials: dict[str, ExecutionCredential] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:

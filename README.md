@@ -103,7 +103,7 @@ dbt 命令通过 `dbtRunner.invoke()` 直接执行，MetricFlow 查询调用 Pyt
 | 配置 | 用途 |
 | --- | --- |
 | `SERVICE_DATABASE_URL` | PostgreSQL 元数据库；必需 |
-| `EXECUTION_INSTANCES` / `EXECUTION_CREDENTIALS` | 可信物理实例清单和凭据环境变量引用 |
+| `EXECUTION_INSTANCES` / `EXECUTION_CREDENTIALS` | 可信物理实例清单和数据库账号、密码 |
 | `SERVICE_TEMP_ROOT` | 可丢弃执行目录 |
 | `SERVICE_CONFIG_VERSION` | 本 worker 可执行的配置版本，默认 1 |
 | `SERVICE_TOOLCHAIN_VERSION` | 工具链标识；默认按依赖版本及源码计算 |
@@ -268,11 +268,11 @@ EXECUTION_INSTANCES:
     port: 9030
 EXECUTION_CREDENTIALS:
   warehouse-readwrite:
-    userEnv: DBT_ENV_SECRET_WAREHOUSE_USER
-    passwordEnv: DBT_ENV_SECRET_WAREHOUSE_PASSWORD
+    user: root
+    password: ""
 ```
 
-secret 值通过受保护的环境变量注入。profile 只写 dbt `env_var` 引用，执行后销毁且不封存。实例清单不含环境、catalog/schema；不得为同一物理实例登记多个不同 instanceId，否则无法证明跨别名的物理隔离。
+账号和密码直接在服务 YAML 的 `EXECUTION_CREDENTIALS` 中填写，不需要凭据环境变量；空密码必须显式填写 `""`。临时 profile 在执行后销毁且不封存，执行日志继续脱敏。实例清单不含环境、catalog/schema；不得为同一物理实例登记多个不同 instanceId，否则无法证明跨别名的物理隔离。
 
 StarRocks 的 profile.catalog 指定 catalog，profile.schema 指定 database；profile.database 留空，避免 source 继承后被误识别成外部 catalog。模型的 catalog/database/schema 覆盖由 dbt 与适配器解释，服务不再限制节点必须属于 profile 中的 schema。PostgreSQL 的 catalog 映射为 dbname，DuckDB 的 catalog 必须等于清单中绝对文件路径的文件名（去后缀）。不存在或不可写的外部 catalog 会导致构建失败；不能把更换 catalog 字段当成已验证的适配器写入能力。
 

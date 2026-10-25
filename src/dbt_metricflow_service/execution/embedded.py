@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from typing import TypeVar, cast
 
 from dbt_metricflow_service import constants as strings
+from dbt_metricflow_service.platform.execution_profile import PROFILE_SECRETS
 
 from .logs import EngineLog
 from .output import REDACTION_MARKER, SECRET_ENVIRONMENT_PREFIX, _RedactingTailBuffer
@@ -99,6 +100,7 @@ async def run_serialized(
 def create_output(max_output_bytes: int) -> _RedactingTailBuffer:
     """为一次引擎调用创建有界且已登记环境秘密的日志缓冲区。"""
     secrets = [value for name, value in os.environ.items() if name.startswith(SECRET_ENVIRONMENT_PREFIX) and value]
+    secrets.extend(PROFILE_SECRETS.get())
     return _RedactingTailBuffer(max_output_bytes, secrets)
 
 
@@ -118,6 +120,7 @@ def engine_environment(
     original_events = get_event_manager()
     event_lock = threading.Lock()
     secrets = {value for name, value in os.environ.items() if name.startswith(SECRET_ENVIRONMENT_PREFIX) and value}
+    secrets.update(PROFILE_SECRETS.get())
     runtime_paths = {
         spelling
         for name in (PROJECT_ENV, PROFILES_ENV, strings.DBT_TARGET_PATH)

@@ -10,16 +10,16 @@ SERVICE_DATABASE_URL: "postgresql:///?user=data_agent&password=data_agent_local_
 
 # 可信物理实例清单；请求中的 instanceId、类型、主机和端口必须与之匹配。
 EXECUTION_INSTANCES:
-  warehouse:
+  local-starrocks:
     type: starrocks
     hosts: [localhost, 127.0.0.1]
     port: 9030
 
-# 凭据只保存受保护环境变量的名称；实际值由部署环境注入。
+# 数据库凭据直接在本文件中填写；本地 StarRocks 使用空密码。
 EXECUTION_CREDENTIALS:
-  warehouse-readwrite:
-    userEnv: DBT_ENV_SECRET_WAREHOUSE_USER
-    passwordEnv: DBT_ENV_SECRET_WAREHOUSE_PASSWORD
+  local-starrocks:
+    user: root
+    password: ""
 
 # PostgreSQL 模式可丢弃的实例工作目录；使用短路径避免 Windows 的 260 字符限制。
 # 多副本必须使用各自独立目录。

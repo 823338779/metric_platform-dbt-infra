@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import shutil
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -39,6 +40,12 @@ def attempt_workspace(temp_root: Path, job_id: str, attempt_id: str) -> Iterator
                 or directory.resolve().parent != root / job_name):
             raise ValueError(WORKSPACE_PATH_CHANGED)
         shutil.rmtree(directory)
+        # 仅删除已空的任务目录；并发 attempt 仍在使用时保留父目录。
+        try:
+            parent.rmdir()
+        except OSError as error:
+            if error.errno not in {errno.ENOTEMPTY, errno.EEXIST, errno.ENOENT}:
+                raise
 
 
 @contextmanager

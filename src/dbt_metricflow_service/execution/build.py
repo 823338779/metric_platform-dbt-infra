@@ -56,7 +56,7 @@ class BuildExecutor:
         raw = job.request_json.execution
         if not raw:
             raise ExecutionError(strings.EXECUTION_SNAPSHOT_REQUIRED)
-        job = await self._prepare_build_source(job)
+        job = await self._prepare_build_source(job, attempt)
         project = attempt / PROJECT_DIRECTORY
         await run_in_thread(self.artifacts.materialize, cast(str, job.input_set_id), project)
 
@@ -71,7 +71,7 @@ class BuildExecutor:
         with profile as profiles:
             return await execute_build(self, job, project, profiles=profiles)
 
-    async def _prepare_build_source(self, job: LeasedJob) -> LeasedJob:
+    async def _prepare_build_source(self, job: LeasedJob, attempt: Path) -> LeasedJob:
         """受理之后获取固定源码；所有慢 I/O 均在短事务之外。"""
         import shutil
 
@@ -86,13 +86,13 @@ class BuildExecutor:
         try:
             sha = body.commit_sha
             if not sha:
-                sha = await run_in_thread(remote_head, body.repository, body.branch_name, self.settings.temp_root)
+                sha = await run_in_thread(remote_head, body.repository, body.branch_name, attempt)
                 if sha is None:
                     raise ValueError(SOURCE_BRANCH_MISSING)
             await run_in_thread(builds.pin_source, body.build_id, sha, job.lease_token)
             await run_in_thread(self.jobs.phase, job.job_id, job.lease_token, strings.FETCHING_SOURCE)
             binding = ProjectBinding(job.project_id, body.repository, ".", cast(str, job.profile_binding_id))
-            directory, digest = await run_in_thread(resolve_commit, binding, sha, self.settings.temp_root)
+            directory, digest = await run_in_thread(resolve_commit, binding, sha, attempt)
             try:
                 source = await run_in_thread(
                     self.artifacts.capture, job.project_id, directory, metadata=ArtifactMetadata(

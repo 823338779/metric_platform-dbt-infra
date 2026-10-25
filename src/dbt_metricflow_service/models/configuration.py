@@ -19,8 +19,9 @@ class ExecutionInstance(ConfigurationModel):
 
 
 class ExecutionCredential(ConfigurationModel):
-    user_env: str = Field(alias=strings.CREDENTIAL_USER_ENV_ALIAS)
-    password_env: str = Field(alias=strings.CREDENTIAL_PASSWORD_ENV_ALIAS)
+    # 服务配置直接提供账号和密码，空密码也是有效配置。
+    user: str = Field(min_length=1, repr=False)
+    password: str = Field(repr=False)
 
 
 EXECUTION_INSTANCES_ADAPTER = TypeAdapter(dict[str, ExecutionInstance])

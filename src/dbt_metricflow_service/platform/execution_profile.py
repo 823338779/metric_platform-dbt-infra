@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import os
 import re
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Final
 
@@ -25,8 +25,9 @@ STARROCKS, POSTGRES, DUCKDB = strings.STARROCKS_ADAPTER, strings.POSTGRES_ADAPTE
 PROFILES_FILE, PROJECT_FILE = strings.DBT_PROFILES_FILE, strings.DBT_PROJECT_FILE
 TARGET_UNVERIFIED = strings.EXECUTION_TARGET_UNVERIFIED
 CREDENTIAL_UNAVAILABLE = strings.CREDENTIAL_UNAVAILABLE
-SECRET_PATTERN = re.compile(r"DBT_ENV_SECRET_[A-Z0-9_]+\Z")
 PROFILE_PATTERN = re.compile(strings.IDENTIFIER_PATTERN)
+# 将当前 profile 的凭据传给日志脱敏边界，不依赖进程环境变量。
+PROFILE_SECRETS: ContextVar[tuple[str, ...]] = ContextVar("profile_secrets", default=())
 
 
 class ExecutionConfigurationError(ValueError):
@@ -55,19 +56,14 @@ def validate_execution_target(snapshot: ExecutionSnapshot, settings: Settings) -
         raise ExecutionConfigurationError(TARGET_UNVERIFIED)
 
 
-def _secret_template(reference: str) -> str:
-    if not isinstance(reference, str) or not SECRET_PATTERN.fullmatch(reference) or reference not in os.environ:
-        raise ExecutionConfigurationError(CREDENTIAL_UNAVAILABLE)
-    return strings.JINJA_ENV_VAR_OPEN + reference + "') }}"
-
-
 @contextmanager
 def materialized_profile(
     snapshot: ExecutionSnapshot, root: Path, settings: Settings, project: Path | None = None,
 ) -> Iterator[Path]:
-    """secret 通过 dbt 受保护环境引用使用，不将明文写入临时 YAML 或产物。"""
+    """从服务配置生成临时 profile；执行结束后销毁，凭据不写入构建产物。"""
     validate_execution_target(snapshot, settings)
     connection = snapshot.connection
+    secrets: tuple[str, ...] = ()
     if connection.type == DUCKDB:
         output = ExecutionProfileOutput(
             type=connection.type, schema_name=snapshot.schema_name, threads=snapshot.threads, path=connection.path,
@@ -76,8 +72,9 @@ def materialized_profile(
         credential = settings.execution_credentials.get(snapshot.credential_ref)
         if credential is None:
             raise ExecutionConfigurationError(CREDENTIAL_UNAVAILABLE)
-        user = _secret_template(credential.user_env)
-        password = _secret_template(credential.password_env)
+        user = credential.user
+        password = credential.password
+        secrets = tuple(value for value in (user, password) if value)
         if connection.type == STARROCKS:
             # schema 承载 StarRocks database；target.database 必须留空，避免 source 被误当外部 catalog。
             output = ExecutionProfileOutput(
@@ -106,4 +103,8 @@ def materialized_profile(
         profile = ExecutionProfile(target=SNAPSHOT_TARGET, outputs={SNAPSHOT_TARGET: output})
         configuration = {profile_name: profile.model_dump(by_alias=True, exclude_unset=True)}
         (directory / PROFILES_FILE).write_text(yaml.safe_dump(configuration), encoding=UTF8)
-        yield directory
+        token = PROFILE_SECRETS.set(secrets)
+        try:
+            yield directory
+        finally:
+            PROFILE_SECRETS.reset(token)
