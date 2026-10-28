@@ -30,6 +30,12 @@ class SelectedDimension(Contract):
     grain: str | None = Field(default=None, description="引擎支持的时间粒度")
 
 
+class BoundDimension(Contract):
+    name: str = Field(pattern=r"^[a-z][a-z0-9_]{0,62}$", description="对齐后的公共输出列名")
+    bindings: dict[str, SelectedDimension] = Field(min_length=1, max_length=100,
+                                                  description="指标名到该单指标维度选项的绑定")
+
+
 class SelectedFilter(Contract):
     option_id: str
     operator: FilterOperator
@@ -69,8 +75,21 @@ class MetricSelection(AvailableDimensionsRequest):
 
 class MetricQueryRequest(MetricSelection):
     mode: Literal[QueryMode.QUERY, QueryMode.EXPLAIN]
-    group_by: list[SelectedDimension] = Field(default_factory=list, max_length=100)
+    group_by: list[SelectedDimension | BoundDimension] = Field(default_factory=list, max_length=100)
     order_by: list[SelectedOrder] = Field(default_factory=list, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_bindings(self) -> Self:
+        names = set(self.metrics)
+        for group in self.group_by:
+            if not isinstance(group, BoundDimension):
+                continue
+            if set(group.bindings) != set(self.metrics):
+                raise ValueError("bindings must cover exactly the selected metrics")
+            if group.name in names:
+                raise ValueError("bound dimension names must be unique and must not match metrics")
+            names.add(group.name)
+        return self
 
 
 class DimensionValuesRequest(MetricSelection):

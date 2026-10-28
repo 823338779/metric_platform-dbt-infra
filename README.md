@@ -75,7 +75,7 @@ MetricFlow 在完成原始值的筛选、分组、计算、排序和 LIMIT 后�
 `ApplyDimensionValueMappingsNode` 生成最外层 LEFT JOIN；每个映射维度各自 JOIN。
 404、502 都显示为“失败”时仍保留两行；列名及列顺序不变。缺失映射或显示值为 NULL
 时返回原始值的文本，原始 NULL 仍为 NULL，空显示字符串有效。
-指标查询和 explain 使用这条原生链路，服务不替换单元格，也不包装 SQL。
+普通（未使用 `bindings` 的）指标查询和 explain 使用这条原生链路，服务不替换单元格，也不包装 SQL。
 
 可用维度仅展示业务维度；映射表内部字段不会作为计算维度出现。维度值查询和筛选使用
 原始代码及原始类型，PREVIEW 仍显示物理数据。旧配置无需迁移；该字段是本项目的协议扩展，
@@ -214,6 +214,47 @@ result = metricflow.query(request)
 查询请求改用 `metrics`，直接传 MetricFlow 指标名（例如 `["revenue"]`），不再接受 `metricResourceIds` 或从 dbt unique_id 映射名称。排序的指标 `fieldId` 同样使用指标名。`available-dimensions` 每次从指定 build 的已封存产物读取 `manifest.json` 原文并传给 MetricFlowClient，在内存中转换语义模型与初始化引擎；不创建临时目录、不读写本地项目或 profiles、不运行 dbt debug，也不连接数据仓库。时间粒度仍通过对应 SQL 方言的 explain 计划验证。保留按构建、指标集合和路径确定的 `optionId`；维度选项的 `name`、`semanticModelName` 来自引擎结果。
 
 PREVIEW 改用 `selector` 参数（例如 `"orders"`），交给 `dbt show` 原生选择和执行，必须匹配一个非 seed 节点。它执行已保存模型的 SQL，而不是读取既有物化表；服务不再拼接 `select * from relation`。seed 被排除，避免 dbt SeedRunner 的物化行为。旧 `datasetResourceId` 不再接受。
+
+### 每个指标指定维度通路
+
+`QUERY` 和 `EXPLAIN` 的 `groupBy` 可以使用 `name + bindings`，将不同指标的维度通路对齐为一个输出列。例如销售额、订单数走买家国家，退款额走卖家国家：
+
+```json
+{
+  "mode": "QUERY",
+  "metrics": ["sales_amount", "order_count", "refund_amount"],
+  "groupBy": [{
+    "name": "country",
+    "bindings": {
+      "sales_amount": {"optionId": "销售额单指标维度列表中的买家国家选项ID"},
+      "order_count": {"optionId": "订单数单指标维度列表中的买家国家选项ID"},
+      "refund_amount": {"optionId": "退款额单指标维度列表中的卖家国家选项ID"}
+    }
+  }],
+  "orderBy": [{"fieldId": "country", "direction": "ASC"}],
+  "limit": 1000
+}
+```
+
+先对同一 build 调用 `/query/available-dimensions`，每次只传一个指标，取得各自完整路径的选项 ID。
+`bindings` 必须恰好覆盖请求指标；`name` 为小写字母开头的字母、数字、下划线标识符（最多 63 字符），不得与其他输出维度或指标重名。
+同一输出维度的各绑定必须类型一致；时间维度必须显式指定相同 `grain`。
+调用方负责声明这些键在业务上的等价性，并保证其数据库类型兼容；服务不按显示标签对齐或强制转换键类型。
+绑定查询的分组列返回原始键，即使来源维度配置了 `value_mapping`，也不使用显示标签替代键。
+这样可避免不同键映射成相同标签时产生重复关联；普通非绑定查询的显示映射行为不变。
+
+原有 `{optionId, grain}` 可与绑定项混用，共享项及 `filters` 的选项仍来自完整指标集合。
+筛选与 `startTime/endTime` 作用于每个子查询；未新增每指标独立筛选接口。
+排序字段使用绑定项的 `name`、共享项的 `optionId` 或指标名。
+
+服务按所有分组维度的完整路径、类型和粒度归组，不按指标个数或事实表数量拆分。
+优先将整个候选组交给 MetricFlow 编译；只有原生查询校验拒绝组合时才按稳定指标顺序贪心切分，并保留可以共同编译的指标。
+这会尽量减少分组，不承诺任意兼容关系下的全局最优切分。
+
+每组只生成 SQL，**所有子查询最终组合为一条完整 SQL，只执行一次数据库取数**，不在服务内存中合并结果。
+数据库以各组公共键的去重集合进行空值安全关联：保留任一组出现的键，相同 NULL 键对齐，缺失指标保留 NULL。
+单组不增加结果关联；最终只投影公共分组键与请求指标。排序和 `limit` 只作用于最终结果，读取 `limit + 1` 行判定 `resultTruncated`，不截断子查询。
+`EXPLAIN` 返回完整合并 SQL，不取数；未使用 `bindings` 的查询保留原行为。
 
 历史查询只需要保存的 `manifest.json` 提供业务定义。`DbtClient` 和 `MetricFlowClient` 保留在服务内作为薄适配层：委托 dbt 原生 Manifest 加载及语义转换器、MetricFlow 原生上下文与查询引擎解释内容，不自行解析资源或推导依赖。维度发现与数据查询共享该 Client 的内存语义上下文，不生成或读取 `semantic_manifest.json`，也不重新 parse 业务 YAML。dbt `show` 显式注入从历史 artifact 恢复的 Manifest。工程配置、连接 profile、适配器及数据库仍是执行前提；不需要重新读取原来的业务 YAML/SQL 定义。
 

@@ -43,6 +43,27 @@ class NativeDimension(Contract):
     grain_tokens: dict[str, str] = Field(default_factory=dict)
 
 
+class BoundGroupBy(BaseModel):
+    name: str
+    token: str
+    dimension_type: str
+    grain: str | None = None
+
+
+class BoundQueryGroup(BaseModel):
+    query: CompiledQuery
+    dimensions: list[BoundGroupBy]
+
+
+class BoundQueryPlan(BaseModel):
+    mode: QueryMode
+    metrics: list[str]
+    group_by: list[str]
+    groups: list[BoundQueryGroup]
+    order_by: list[str]
+    limit: int
+
+
 class NativeTimeDimension(Contract):
     token: str
     granularity: str

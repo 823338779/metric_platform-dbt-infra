@@ -11,6 +11,7 @@ from metricflow_semantics.errors.error_classes import DimensionValueMappingError
 
 from dbt_metricflow_service import constants as strings
 
+from ..application.bound_query_plan import compile_bound_query
 from ..application.errors import ServiceError
 from ..application.query_plan import compile_query, resolve_dimensions
 from ..engines import InvalidDimensionsRequest
@@ -19,7 +20,7 @@ from ..engines.metricflow import MetricFlowClient
 from ..engines.models import DataQueryResult, DimensionQueryResult
 from ..models.contracts import JsonObject
 from ..models.execution import SNAPSHOT_TARGET
-from ..models.queries import DimensionValuesRequest, PreviewRequest, QueryRequest
+from ..models.queries import BoundDimension, DimensionValuesRequest, MetricQueryRequest, PreviewRequest, QueryRequest
 from ..platform.execution_profile import ExecutionConfigurationError, materialized_profile
 from ..platform.manifest_capture import ManifestCapture
 from ..settings import Settings
@@ -59,6 +60,19 @@ class QueryExecutor:
                         request.selector, project=project, profiles=profiles, limit=request.limit,
                     )
                 client = MetricFlowClient(manifest, project=project, profiles=profiles)
+                if isinstance(request, MetricQueryRequest) and any(
+                    isinstance(group, BoundDimension) for group in request.group_by
+                ):
+                    per_metric = {
+                        metric: resolve_dimensions(build.build_id, [metric], client.available_dimensions((metric,)))
+                        for metric in request.metrics
+                    }
+                    common = {}
+                    if request.filters or any(not isinstance(group, BoundDimension) for group in request.group_by):
+                        common = resolve_dimensions(
+                            build.build_id, request.metrics, client.available_dimensions(tuple(request.metrics)),
+                        )
+                    return client.query_bound(compile_bound_query(request, common, per_metric))
                 dimensions = {}
                 if isinstance(request, DimensionValuesRequest) or request.group_by or request.filters:
                     native = client.available_dimensions(tuple(request.metrics))
