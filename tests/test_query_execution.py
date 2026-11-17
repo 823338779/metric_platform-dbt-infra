@@ -139,3 +139,81 @@ def test_workspace_damage_is_a_service_error_without_private_details(monkeypatch
     assert caught.value.status == 503
     assert "private" not in caught.value.error.model_dump_json()
     assert not ENGINE_LOCK.locked()
+
+
+def test_executor_calls_one_native_query_for_bound_request(monkeypatch, settings):
+    from dbt_metricflow_service.application.query_plan import resolve_dimensions
+    from dbt_metricflow_service.engines.metricflow import MetricFlowClient
+    from dbt_metricflow_service.models.queries import MetricQueryRequest
+
+    build = SimpleNamespace(build_id="00000000-0000-0000-0000-000000000001")
+    native_dimensions = DimensionQueryResult(dimensions=[
+        NativeDimension(token="buyer__country", type="categorical"),
+    ])
+    metrics = ["revenue", "refunds"]
+    bindings = {metric: {"optionId": next(iter(resolve_dimensions(build.build_id, [metric], native_dimensions)))}
+                for metric in metrics}
+    common_id = next(iter(resolve_dimensions(build.build_id, metrics, native_dimensions)))
+    request = MetricQueryRequest.model_validate({
+        "mode": "QUERY", "metrics": metrics, "limit": 1,
+        "groupBy": [{"name": "country", "bindings": bindings}, {"optionId": common_id},
+                    {"name": "other_country", "bindings": bindings}],
+        "orderBy": [{"fieldId": common_id, "direction": "DESC"}],
+    })
+    calls = []
+
+    class Engine:
+        def query(self, native):
+            calls.append(native)
+            return SimpleNamespace(result_df=SimpleNamespace(
+                column_descriptions=[SimpleNamespace(column_name="country", column_type=str)],
+                rows=[("CN",), ("US",)],
+            ))
+
+    client = MetricFlowClient(b"{}")
+    client.__dict__["_engine"] = Engine()
+    monkeypatch.setattr(client, "available_dimensions", lambda metrics: native_dimensions)
+    monkeypatch.setattr("dbt_metricflow_service.execution.query.MetricFlowClient", lambda *a, **k: client)
+    executor = QueryExecutor(settings, object())
+
+    @contextmanager
+    def context(*args):
+        yield b"{}", settings.temp_root, settings.temp_root
+
+    monkeypatch.setattr(executor, "_engine_context", context)
+    result = executor.execute_query(build, request)
+    assert result.rows == [["CN"]] and result.truncated
+    assert len(calls) == 1
+    native = calls[0]
+    assert native.limit == 2 and native.order_by_names == ["-buyer__country"]
+    assert not native.group_by_names
+    first, shared, last = native.bound_group_by
+    assert first.name == "country" and last.name == "other_country"
+    assert [(item.metric_name, item.parameter.name) for item in first.bindings] == [
+        ("revenue", "buyer__country"), ("refunds", "buyer__country"),
+    ]
+    assert shared.name == "buyer__country"
+    assert "optionId" not in repr(native.bound_group_by)
+
+
+def test_old_group_by_still_uses_old_native_parameters():
+    from dbt_metricflow_service.engines.metricflow import MetricFlowClient
+    from dbt_metricflow_service.engines.models import CompiledQuery
+    from dbt_metricflow_service.models.queries import QueryMode
+
+    calls = []
+
+    class Engine:
+        def explain(self, request):
+            calls.append(request)
+            return SimpleNamespace(sql_statement=SimpleNamespace(sql="select 1"))
+
+    client = MetricFlowClient(b"{}")
+    client.__dict__["_engine"] = Engine()
+    result = client.query(CompiledQuery(mode=QueryMode.EXPLAIN, metrics=["revenue"],
+                                        group_by=["buyer__country"], limit=3))
+    assert result.sql == "select 1"
+    assert len(calls) == 1
+    assert calls[0].group_by_names == ["buyer__country"]
+    assert calls[0].bound_group_by is None
+    assert calls[0].limit == 4

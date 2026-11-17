@@ -11,7 +11,7 @@ from metricflow_semantics.specs.bound_group_by_parameter import BoundGroupByPara
 from metricflow_semantics.specs.query_param_implementations import DimensionOrEntityParameter, TimeDimensionParameter
 from test_sdk_integration import write_project
 
-from dbt_metricflow_service.application.bound_query_plan import compile_bound_query
+from dbt_metricflow_service.application.query_bindings import resolve_query_bindings
 from dbt_metricflow_service.application.query_plan import resolve_dimensions
 from dbt_metricflow_service.engines.dbt import DbtClient
 from dbt_metricflow_service.engines.metricflow import MetricFlowClient
@@ -152,7 +152,7 @@ def native_request(metric_paths, *, time=False, **kwargs):
 @pytest.mark.parametrize("passthrough", [False, True], ids=["dfs", "passthrough"])
 @pytest.mark.parametrize("level", [SqlOptimizationLevel.O4, SqlOptimizationLevel.O5], ids=["subquery", "cte"])
 @pytest.mark.parametrize("scenario", ["independent", "common", "filtered", "derived"])
-def test_native_results_match_legacy_oracle(warehouse, monkeypatch, passthrough, level, scenario):
+def test_native_and_service_results_match_fixed_expectations(warehouse, monkeypatch, passthrough, level, scenario):
     paths = {"revenue": "buyer__country", "refunds": "seller__country"}
     if scenario == "common":
         paths["refunds"] = "buyer__country"
@@ -171,8 +171,8 @@ def test_native_results_match_legacy_oracle(warehouse, monkeypatch, passthrough,
                     filters=[{"optionId": time_id, "operator": ">=", "value": "2024-01-01"}])
         kwargs.update(time_constraint_start=datetime(2024, 1, 1), time_constraint_end=datetime(2024, 1, 31),
                       where_constraints=["{{ Dimension('metric_time') }} >= '2024-01-01'"])
-    plan = compile_bound_query(MetricQueryRequest.model_validate(body), common, per_metric)
-    legacy = client.query_bound(plan)
+    plan = resolve_query_bindings(MetricQueryRequest.model_validate(body), common, per_metric)
+    service = client.query(plan)
     calls = []
     query = client._sql_client.query
 
@@ -189,42 +189,57 @@ def test_native_results_match_legacy_oracle(warehouse, monkeypatch, passthrough,
     assert result.result_df is not None
     native = serialize_rows(result.result_df, limit=100)
     keys = ("country", "metric_time__month")
-    assert normalized_rows(native, keys) == normalized_rows(legacy, keys)
+    actual = normalized_rows(native, keys)
+    assert actual == normalized_rows(service, keys)
+    january, february = "2024-01-01T00:00:00", "2024-02-01T00:00:00"
+    if scenario == "common":
+        expected = {("CN", january): (30, 3), ("US", february): (40, 4), (None, february): (30, 3)}
+    else:
+        expected = {("CN", january): (30, None), ("US", january): (None, 1),
+                    ("JP", january): (None, 2), ("US", february): (40, None),
+                    ("DE", february): (None, 4), (None, february): (30, 3)}
+        if scenario == "filtered":
+            expected = {key: value for key, value in expected.items() if key[1] == january}
+    assert {key: (row["revenue"], row["refunds"]) for key, row in actual.items()} == expected
+    if scenario == "derived":
+        assert {key: (row["double_revenue"], row["average_revenue"], row["net_revenue"])
+                for key, row in actual.items()} == {
+            ("CN", january): (None, None, 27), ("US", january): (20, 10, None),
+            ("JP", january): (40, 20, None), ("US", february): (None, None, 36),
+            ("DE", february): (80, 40, None), (None, february): (60, 30, 27),
+        }
     if scenario == "derived":
         january = normalized_rows(native, keys)[("CN", "2024-01-01T00:00:00")]
         assert january["revenue"] == 30 and january["net_revenue"] == 27
         assert january["double_revenue"] is None
     # Service's lookahead row detects truncation; native limit itself remains exact.
     body.update(limit=1, orderBy=[{"fieldId": "country", "direction": "ASC"}])
-    limited_plan = compile_bound_query(MetricQueryRequest.model_validate(body), common, per_metric)
-    limited_legacy = client.query_bound(limited_plan)
+    limited_plan = resolve_query_bindings(MetricQueryRequest.model_validate(body), common, per_metric)
+    limited_service = client.query(limited_plan)
     limited = client._engine.query(native_request(paths, time=True, order_by_names=["country"], limit=2, **kwargs))
     assert limited.result_df is not None and len(limited.result_df.rows) == 2
     limited_native = serialize_rows(limited.result_df, limit=1)
-    assert limited_native.truncated == limited_legacy.truncated is True
-    assert normalized_rows(limited_native, keys) == normalized_rows(limited_legacy, keys)
+    assert limited_native.truncated == limited_service.truncated is True
+    assert normalized_rows(limited_native, keys) == normalized_rows(limited_service, keys)
 
 
-def test_real_engine_groups_four_metrics_into_two_queries_and_aligns_results(warehouse, monkeypatch):
+def test_real_engine_executes_one_bound_query_and_aligns_results(warehouse, monkeypatch):
     client, body, common, per_metric = prepare(warehouse)
     request = MetricQueryRequest.model_validate(body)
-    plan = compile_bound_query(request, common, per_metric)
+    plan = resolve_query_bindings(request, common, per_metric)
     executed_sql = []
     query = client._sql_client.query
 
-    def execute_once(sql):
+    def execute_once(sql, **kwargs):
         executed_sql.append(sql)
-        return query(sql)
+        return query(sql, **kwargs)
 
     monkeypatch.setattr(client._sql_client, "query", execute_once)
-    explained = client.query_bound(plan.model_copy(update={"mode": QueryMode.EXPLAIN}))
+    explained = client.query(plan.model_copy(update={"mode": QueryMode.EXPLAIN}))
     assert executed_sql == []
-    assert "mf_group_0 AS" in explained.sql and "mf_group_1 AS" in explained.sql
-    assert "mf_group_2 AS" not in explained.sql
-    assert explained.sql.upper().count("LIMIT") == 1
-    result = client.query_bound(plan)
+    assert explained.sql
+    result = client.query(plan)
     assert len(executed_sql) == 1
-    assert "mf_group_0 AS" in executed_sql[0] and "mf_group_1 AS" in executed_sql[0]
     rows = rows_by_country(result)
     assert set(rows) == {"CN", "US", "JP", "DE", None}
     assert rows["CN"] == {"country": "CN", "revenue": 30, "orders_count": 2,
@@ -233,16 +248,15 @@ def test_real_engine_groups_four_metrics_into_two_queries_and_aligns_results(war
     assert rows[None]["revenue"] == 30 and rows[None]["refunds"] == 3
     # 排序使用没有缺失值的公共键，避免依赖各数据库的 NULL 默认排序。
     body.update(limit=1, orderBy=[{"fieldId": "country", "direction": "ASC"}])
-    limited = client.query_bound(compile_bound_query(MetricQueryRequest.model_validate(body), common, per_metric))
+    limited = client.query(resolve_query_bindings(MetricQueryRequest.model_validate(body), common, per_metric))
     assert limited.truncated and len(limited.rows) == 1
     assert rows_by_country(limited)["CN"]["revenue"] == 30
 
 
 def test_real_engine_keeps_compatible_metrics_in_one_query(warehouse):
     client, body, common, per_metric = prepare(warehouse, same_path=True)
-    plan = compile_bound_query(MetricQueryRequest.model_validate(body), common, per_metric)
-    assert len(plan.groups) == 1
-    result = rows_by_country(client.query_bound(plan))
+    plan = resolve_query_bindings(MetricQueryRequest.model_validate(body), common, per_metric)
+    result = rows_by_country(client.query(plan))
     assert result["CN"]["revenue"] == 30 and result["CN"]["refunds"] == 3
 
 
@@ -274,8 +288,8 @@ def test_mapped_labels_never_replace_alignment_keys(tmp_path):
     ordinary = client.query(CompiledQuery(mode=QueryMode.QUERY, metrics=["revenue"],
                                           group_by=["buyer__country"]))
     assert sum("same label" in row for row in ordinary.rows) == 2
-    plan = compile_bound_query(MetricQueryRequest.model_validate(body), common, per_metric)
-    result = client.query_bound(plan)
+    plan = resolve_query_bindings(MetricQueryRequest.model_validate(body), common, per_metric)
+    result = client.query(plan)
     assert len(result.rows) == 5
     rows = rows_by_country(result)
     assert set(rows) == {"CN", "US", "JP", "DE", None}

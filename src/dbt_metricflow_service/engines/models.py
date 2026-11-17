@@ -19,6 +19,17 @@ class QueryFilter(BaseModel):
     value: JsonValue
 
 
+class ResolvedBoundPath(BaseModel):
+    token: str
+    grain: str | None = None
+    dimension_type: str
+
+
+class ResolvedGroupByBinding(BaseModel):
+    name: str | None
+    paths: dict[str, ResolvedBoundPath]
+
+
 class CompiledQuery(BaseModel):
     """已解析选项与时间的引擎查询，不携带持久任务身份。"""
 
@@ -27,6 +38,7 @@ class CompiledQuery(BaseModel):
     mode: QueryMode
     metrics: list[str] = Field(default_factory=list)
     group_by: list[str] = Field(default_factory=list, alias=strings.GROUP_BY_ALIAS)
+    bound_group_by: list[ResolvedGroupByBinding] | None = None
     filters: list[QueryFilter] = Field(default_factory=list)
     start_time: datetime | None = Field(default=None, alias=strings.START_TIME_ALIAS)
     end_time: datetime | None = Field(default=None, alias=strings.END_TIME_ALIAS)
@@ -41,27 +53,6 @@ class NativeDimension(Contract):
     type: str = strings.UNKNOWN_VALUE_TYPE
     operators: list[str] | None = None
     grain_tokens: dict[str, str] = Field(default_factory=dict)
-
-
-class BoundGroupBy(BaseModel):
-    name: str
-    token: str
-    dimension_type: str
-    grain: str | None = None
-
-
-class BoundQueryGroup(BaseModel):
-    query: CompiledQuery
-    dimensions: list[BoundGroupBy]
-
-
-class BoundQueryPlan(BaseModel):
-    mode: QueryMode
-    metrics: list[str]
-    group_by: list[str]
-    groups: list[BoundQueryGroup]
-    order_by: list[str]
-    limit: int
 
 
 class NativeTimeDimension(Contract):

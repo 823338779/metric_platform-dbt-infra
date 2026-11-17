@@ -11,12 +11,12 @@ from dbt.adapters.factory import get_adapter_by_type
 from dbt_metricflow.cli.dbt_connectors.adapter_backed_client import AdapterBackedSqlClient
 from dbt_metricflow.cli.dbt_connectors.dbt_config_accessor import dbtProjectMetadata
 from metricflow.engine.metricflow_engine import MetricFlowEngine, MetricFlowQueryRequest, MetricFlowQueryType
-from metricflow.sql.sql_plan import SqlPlan
 from metricflow_semantic_interfaces.type_enums.time_granularity import TimeGranularity
 from metricflow_semantics.errors.error_classes import InformativeUserError, InvalidQueryException
 from metricflow_semantics.model.semantic_manifest_lookup import SemanticManifestLookup
 from metricflow_semantics.naming.linkable_spec_name import StructuredLinkableSpecName
 from metricflow_semantics.protocols.query_parameter import GroupByQueryParameter
+from metricflow_semantics.specs.bound_group_by_parameter import BoundGroupByParameter, MetricGroupByBinding
 from metricflow_semantics.specs.query_param_implementations import DimensionOrEntityParameter, TimeDimensionParameter
 from pydantic import JsonValue
 
@@ -25,17 +25,15 @@ from dbt_metricflow_service.adapters.starrocks import STARROCKS_ADAPTER, StarRoc
 from dbt_metricflow_service.engines import InvalidDimensionsRequest
 from dbt_metricflow_service.engines.dbt import DbtClient
 from dbt_metricflow_service.engines.models import (
-    BoundQueryGroup,
-    BoundQueryPlan,
     CompiledQuery,
     DataQueryResult,
     DimensionQueryResult,
     NativeDimension,
     NativeTimeDimension,
     QueryMode,
+    ResolvedBoundPath,
 )
 
-from .bound_queries import compile_groups, merge_sql
 from .planning import PlanningSqlClient
 from .results import serialize_rows
 
@@ -77,6 +75,12 @@ def _where_constraints(request: CompiledQuery) -> list[str]:
             dimension = f"Dimension('{local_name}', entity_path={list(links[:-1])!r})"
         constraints.append(f"{{{{ {dimension} }}}} {item.operator} {literal}")
     return constraints
+
+
+def _group_by_parameter(path: ResolvedBoundPath) -> GroupByQueryParameter:
+    if path.dimension_type == strings.TIME_DIMENSION_TYPE:
+        return TimeDimensionParameter(name=path.token, grain=path.grain)
+    return DimensionOrEntityParameter(name=path.token)
 
 
 class MetricFlowClient:
@@ -130,7 +134,15 @@ class MetricFlowClient:
         engine = self._engine
         mf_request = MetricFlowQueryRequest.create(
             metric_names=request.metrics,
-            group_by_names=request.group_by,
+            group_by_names=request.group_by if request.bound_group_by is None else None,
+            bound_group_by=(None if request.bound_group_by is None else [
+                _group_by_parameter(next(iter(binding.paths.values()))) if binding.name is None else
+                BoundGroupByParameter(name=binding.name, bindings=tuple(
+                    MetricGroupByBinding(metric_name=metric, parameter=_group_by_parameter(path))
+                    for metric, path in binding.paths.items()
+                ))
+                for binding in request.bound_group_by
+            ]),
             limit=request.limit + 1,
             time_constraint_start=request.start_time,
             time_constraint_end=request.end_time,
@@ -151,46 +163,6 @@ class MetricFlowClient:
         if result.result_df is None:
             raise ValueError(METRICFLOW_RESULT_MISSING_MESSAGE)
         return serialize_rows(result.result_df, limit=request.limit)
-
-    def _compile_bound_group(self, group: BoundQueryGroup) -> str:
-        dimensions: list[GroupByQueryParameter] = []
-        for dimension in group.dimensions:
-            if dimension.dimension_type == strings.TIME_DIMENSION_TYPE:
-                dimensions.append(TimeDimensionParameter(
-                    name=dimension.token, grain=dimension.grain, alias=dimension.name,
-                ))
-            else:
-                dimensions.append(DimensionOrEntityParameter(name=dimension.token, alias=dimension.name))
-        request = group.query
-        explained = self._engine.explain(MetricFlowQueryRequest.create(
-            metric_names=request.metrics, group_by=dimensions,
-            time_constraint_start=request.start_time, time_constraint_end=request.end_time,
-            where_constraints=_where_constraints(request),
-        ))
-        statement = explained.sql_statement
-        converted = explained.convert_to_execution_plan_result.convert_to_sql_plan_result
-        if converted.display_columns:
-            # 本项目原生映射是最终展示包装；对齐必须使用其下方保留原始键的 SQL 计划。
-            # 不解析或改写 SQL 文本，也不拿可能重复的显示标签参与关联。
-            mapped_select = converted.sql_plan.render_node.as_select_node
-            if mapped_select is None or mapped_select.from_source_alias != "mapping_raw":
-                raise ValueError("unexpected dimension value mapping SQL plan")
-            statement = self._sql_client.sql_plan_renderer.render_sql_plan(
-                SqlPlan(render_node=mapped_select.from_source),
-            )
-        if statement.bind_parameter_set.param_dict:
-            raise ValueError("bound queries do not support SQL bind parameters")
-        return statement.sql
-
-    def query_bound(self, plan: BoundQueryPlan) -> DataQueryResult:
-        try:
-            groups = compile_groups(plan.groups, self._compile_bound_group)
-            sql = merge_sql(plan, groups, self._adapter.quote)
-        except InformativeUserError as error:
-            raise InvalidDimensionsRequest(INVALID_METRICS_DIMENSIONS_MESSAGE) from error
-        if plan.mode is QueryMode.EXPLAIN:
-            return DataQueryResult(sql=sql)
-        return serialize_rows(self._sql_client.query(sql), limit=plan.limit)
 
 
 METRIC_SELECTION_INVALID_MESSAGE: Final[str] = '指标不存在或为空'

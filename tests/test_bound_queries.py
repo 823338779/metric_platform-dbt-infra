@@ -50,8 +50,8 @@ def test_binding_contract_rejects_ambiguous_alignment(change):
         MetricQueryRequest.model_validate(body)
 
 
-def test_equal_full_paths_share_queries_despite_different_option_ids():
-    from dbt_metricflow_service.application.bound_query_plan import compile_bound_query
+def test_bindings_preserve_each_requested_metric_path():
+    from dbt_metricflow_service.application.query_bindings import resolve_query_bindings
 
     per_metric = {metric: selection(metric, path) for metric, path in [
         ("sales", "buyer__country"), ("orders", "buyer__country"),
@@ -59,28 +59,37 @@ def test_equal_full_paths_share_queries_despite_different_option_ids():
     ]}
     body = body_for(per_metric)
     body["orderBy"] = [{"fieldId": "country", "direction": "ASC"}]
-    plan = compile_bound_query(MetricQueryRequest.model_validate(body), {}, per_metric)
-    assert [group.query.metrics for group in plan.groups] == [["sales", "orders"], ["refunds", "returns"]]
+    plan = resolve_query_bindings(MetricQueryRequest.model_validate(body), {}, per_metric)
+    assert {metric: path.token for metric, path in plan.bound_group_by[0].paths.items()} == {
+        "sales": "buyer__country", "orders": "buyer__country",
+        "refunds": "seller__country", "returns": "seller__country",
+    }
     assert plan.order_by == ["country"]
-    assert plan.group_by == ["country"]
+    assert plan.bound_group_by[0].name == "country"
 
 
-def test_binding_option_cannot_be_borrowed_from_another_metric():
-    from dbt_metricflow_service.application.bound_query_plan import compile_bound_query
+@pytest.mark.parametrize("wrong_selection", ["build", "metric"])
+def test_option_from_wrong_build_or_metric_is_rejected(wrong_selection):
     from dbt_metricflow_service.application.errors import ServiceError
+    from dbt_metricflow_service.application.query_bindings import resolve_query_bindings
 
     per_metric = {metric: selection(metric, "buyer__country") for metric in ["sales", "orders"]}
     body = body_for(per_metric)
-    body["groupBy"][0]["bindings"]["orders"] = body["groupBy"][0]["bindings"]["sales"]
+    if wrong_selection == "metric":
+        body["groupBy"][0]["bindings"]["orders"] = body["groupBy"][0]["bindings"]["sales"]
+    else:
+        per_metric["orders"] = resolve_dimensions("another-build", ["orders"], DimensionQueryResult(
+            dimensions=[NativeDimension(token="buyer__country", type="categorical")],
+        ))
     with pytest.raises(ServiceError) as caught:
-        compile_bound_query(MetricQueryRequest.model_validate(body), {}, per_metric)
+        resolve_query_bindings(MetricQueryRequest.model_validate(body), {}, per_metric)
     assert caught.value.error.code == "INVALID_DIMENSION_OPTION"
 
 
 @pytest.mark.parametrize("grains", [(None, None), ("day", "month")])
 def test_time_alignment_requires_same_explicit_grain(grains):
-    from dbt_metricflow_service.application.bound_query_plan import compile_bound_query
     from dbt_metricflow_service.application.errors import ServiceError
+    from dbt_metricflow_service.application.query_bindings import resolve_query_bindings
 
     per_metric = {metric: selection(metric, "order__ds", "time", {
         "day": "order__ds__day", "month": "order__ds__month",
@@ -89,11 +98,11 @@ def test_time_alignment_requires_same_explicit_grain(grains):
     for metric, grain in zip(per_metric, grains, strict=True):
         body["groupBy"][0]["bindings"][metric]["grain"] = grain
     with pytest.raises(ServiceError):
-        compile_bound_query(MetricQueryRequest.model_validate(body), {}, per_metric)
+        resolve_query_bindings(MetricQueryRequest.model_validate(body), {}, per_metric)
 
 
-def test_grouping_compares_every_dimension_and_preserves_shared_filters():
-    from dbt_metricflow_service.application.bound_query_plan import compile_bound_query
+def test_resolver_preserves_mixed_order_shared_sort_and_filters():
+    from dbt_metricflow_service.application.query_bindings import resolve_query_bindings
 
     per_metric = {metric: selection(metric, "buyer__country") for metric in ["sales", "orders"]}
     body = body_for(per_metric)
@@ -106,23 +115,28 @@ def test_grouping_compares_every_dimension_and_preserves_shared_filters():
     common = resolve_dimensions(BUILD, ["sales", "orders"], DimensionQueryResult(dimensions=[
         NativeDimension(token="order__status", name="status", type="categorical", operators=["="]),
     ]))
+    shared_id = next(iter(common))
+    body["groupBy"].insert(1, {"optionId": shared_id})
+    body["orderBy"] = [{"fieldId": shared_id, "direction": "DESC"}]
     body["filters"] = [{"optionId": next(iter(common)), "operator": "=", "value": "paid"}]
-    plan = compile_bound_query(MetricQueryRequest.model_validate(body), common, per_metric)
-    assert len(plan.groups) == 2
-    assert [group.query.group_by for group in plan.groups] == [
-        ["buyer__country", "buyer__region"], ["buyer__country", "seller__region"],
+    plan = resolve_query_bindings(MetricQueryRequest.model_validate(body), common, per_metric)
+    assert [item.name for item in plan.bound_group_by] == ["country", None, "region"]
+    assert [{metric: path.token for metric, path in item.paths.items()} for item in plan.bound_group_by] == [
+        {"sales": "buyer__country", "orders": "buyer__country"},
+        {"sales": "order__status", "orders": "order__status"},
+        {"sales": "buyer__region", "orders": "seller__region"},
     ]
-    assert all(group.query.filters[0].field == "order__status" and group.query.filters[0].value == "paid"
-               for group in plan.groups)
+    assert plan.order_by == ["-order__status"]
+    assert plan.filters[0].field == "order__status" and plan.filters[0].value == "paid"
 
 
 def test_alignment_rejects_mixed_dimension_types():
-    from dbt_metricflow_service.application.bound_query_plan import compile_bound_query
     from dbt_metricflow_service.application.errors import ServiceError
+    from dbt_metricflow_service.application.query_bindings import resolve_query_bindings
 
     per_metric = {"sales": selection("sales", "buyer__country"),
                   "orders": selection("orders", "order__ds", "time", {"day": "order__ds__day"})}
     body = body_for(per_metric)
     body["groupBy"][0]["bindings"]["orders"]["grain"] = "day"
     with pytest.raises(ServiceError):
-        compile_bound_query(MetricQueryRequest.model_validate(body), {}, per_metric)
+        resolve_query_bindings(MetricQueryRequest.model_validate(body), {}, per_metric)

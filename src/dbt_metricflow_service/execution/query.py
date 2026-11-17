@@ -11,8 +11,8 @@ from metricflow_semantics.errors.error_classes import DimensionValueMappingError
 
 from dbt_metricflow_service import constants as strings
 
-from ..application.bound_query_plan import compile_bound_query
 from ..application.errors import ServiceError
+from ..application.query_bindings import resolve_query_bindings
 from ..application.query_plan import compile_query, resolve_dimensions
 from ..engines import InvalidDimensionsRequest
 from ..engines.dbt import DbtClient
@@ -72,7 +72,7 @@ class QueryExecutor:
                         common = resolve_dimensions(
                             build.build_id, request.metrics, client.available_dimensions(tuple(request.metrics)),
                         )
-                    return client.query_bound(compile_bound_query(request, common, per_metric))
+                    return client.query(resolve_query_bindings(request, common, per_metric))
                 dimensions = {}
                 if isinstance(request, DimensionValuesRequest) or request.group_by or request.filters:
                     native = client.available_dimensions(tuple(request.metrics))

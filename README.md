@@ -247,14 +247,15 @@ PREVIEW 改用 `selector` 参数（例如 `"orders"`），交给 `dbt show` 原�
 筛选与 `startTime/endTime` 作用于每个子查询；未新增每指标独立筛选接口。
 排序字段使用绑定项的 `name`、共享项的 `optionId` 或指标名。
 
-服务按所有分组维度的完整路径、类型和粒度归组，不按指标个数或事实表数量拆分。
-优先将整个候选组交给 MetricFlow 编译；只有原生查询校验拒绝组合时才按稳定指标顺序贪心切分，并保留可以共同编译的指标。
-这会尽量减少分组，不承诺任意兼容关系下的全局最优切分。
+服务只校验构建/指标选项身份、解析公共筛选和排序，再将有序绑定交给 MetricFlow 原生查询请求；`optionId` 不进入原生引擎。
+MetricFlow 负责源维度解析、指标求值、Dataflow 与 SQL 对齐；派生指标的内部输入继承该请求指标的路径，不支持公式内部独立绑定。
 
-每组只生成 SQL，**所有子查询最终组合为一条完整 SQL，只执行一次数据库取数**，不在服务内存中合并结果。
-数据库以各组公共键的去重集合进行空值安全关联：保留任一组出现的键，相同 NULL 键对齐，缺失指标保留 NULL。
-单组不增加结果关联；最终只投影公共分组键与请求指标。排序和 `limit` 只作用于最终结果，读取 `limit + 1` 行判定 `resultTruncated`，不截断子查询。
-`EXPLAIN` 返回完整合并 SQL，不取数；未使用 `bindings` 的查询保留原行为。
+**一次原生查询生成一条完整 SQL，只执行一次数据库取数**，不在服务内存中合并结果。
+数据库以公共键的去重集合进行空值安全关联：保留任一分支出现的键，相同 NULL 键对齐，缺失指标保留 NULL。
+绑定模式下，绑定项和共享项均输出原始键；公共筛选仍按来源维度的计算语义执行，不因原始键输出而改写。
+最终只投影公共分组键与请求指标。排序和 `limit` 只作用于最终结果，服务传入 `limit + 1` 行判定 `resultTruncated`；原生引擎严格使用收到的 limit，不截断子查询。
+`EXPLAIN` 返回完整 SQL，不取数；未使用 `bindings` 的查询保留原行为。
+设计契约见 [原生指标维度绑定设计](docs/superpowers/specs/2026-11-17-native-metric-dimension-bindings-design.md)。
 
 历史查询只需要保存的 `manifest.json` 提供业务定义。`DbtClient` 和 `MetricFlowClient` 保留在服务内作为薄适配层：委托 dbt 原生 Manifest 加载及语义转换器、MetricFlow 原生上下文与查询引擎解释内容，不自行解析资源或推导依赖。维度发现与数据查询共享该 Client 的内存语义上下文，不生成或读取 `semantic_manifest.json`，也不重新 parse 业务 YAML。dbt `show` 显式注入从历史 artifact 恢复的 Manifest。工程配置、连接 profile、适配器及数据库仍是执行前提；不需要重新读取原来的业务 YAML/SQL 定义。
 
