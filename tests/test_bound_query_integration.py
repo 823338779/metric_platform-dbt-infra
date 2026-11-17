@@ -1,14 +1,22 @@
 from contextlib import contextmanager
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
 import yaml
+from metricflow.dataflow.optimizer.dataflow_optimizer_factory import DataflowPlanOptimization
+from metricflow.engine.metricflow_engine import MetricFlowEngine, MetricFlowQueryRequest
+from metricflow.sql.optimizer.optimization_levels import SqlOptimizationLevel
+from metricflow_semantics.specs.bound_group_by_parameter import BoundGroupByParameter, MetricGroupByBinding
+from metricflow_semantics.specs.query_param_implementations import DimensionOrEntityParameter, TimeDimensionParameter
 from test_sdk_integration import write_project
 
 from dbt_metricflow_service.application.bound_query_plan import compile_bound_query
 from dbt_metricflow_service.application.query_plan import resolve_dimensions
 from dbt_metricflow_service.engines.dbt import DbtClient
 from dbt_metricflow_service.engines.metricflow import MetricFlowClient
+from dbt_metricflow_service.engines.planning import PlanningSqlClient
+from dbt_metricflow_service.engines.results import serialize_rows
 from dbt_metricflow_service.execution.query import QueryExecutor
 from dbt_metricflow_service.models.queries import MetricQueryRequest, QueryMode
 from dbt_metricflow_service.platform.manifest_capture import ManifestCapture
@@ -29,6 +37,14 @@ select * from (values
     (project / "models/people.sql").write_text("""
 select * from (values (1, 'CN'), (2, 'US'), (3, 'JP'), (4, NULL), (5, 'DE')) t(id, country)
 """, encoding="utf-8")
+    (project / "models/refunds.sql").write_text("""
+select * from (values
+ (1, 1, 2, timestamp '2024-01-01', 1),
+ (2, 1, 3, timestamp '2024-01-02', 2),
+ (3, 4, 4, timestamp '2024-02-01', 3),
+ (4, 2, 5, timestamp '2024-02-02', 4)
+) t(id, buyer_id, seller_id, ds, amount)
+""", encoding="utf-8")
     path = project / "models/semantic.yml"
     semantic = yaml.safe_load(path.read_text(encoding="utf-8"))
     orders = semantic["semantic_models"][0]
@@ -40,10 +56,25 @@ select * from (values (1, 'CN'), (2, 'US'), (3, 'JP'), (4, NULL), (5, 'DE')) t(i
             "entities": [{"name": role, "type": "primary", "expr": "id"}],
             "dimensions": [{"name": "country", "type": "categorical"}],
         })
-    for metric, expr in [("orders_count", "1"), ("refunds", "refund"), ("returns_count", "1")]:
-        orders["measures"].append({"name": metric, "agg": "sum", "expr": expr})
+    refunds = {
+        "name": "refunds", "model": "ref('refunds')", "defaults": {"agg_time_dimension": "ds"},
+        "entities": [{"name": "refund", "type": "primary", "expr": "id"}, *orders["entities"][1:]],
+        "dimensions": orders["dimensions"], "measures": [],
+    }
+    semantic["semantic_models"].append(refunds)
+    for model, metric, expr in [(orders, "orders_count", "1"), (refunds, "refunds", "amount"),
+                                (refunds, "returns_count", "1")]:
+        model["measures"].append({"name": metric, "agg": "sum", "expr": expr})
         semantic["metrics"].append({"name": metric, "label": metric, "type": "simple",
                                     "type_params": {"measure": metric}})
+    semantic["metrics"].extend([
+        {"name": "double_revenue", "label": "Double revenue", "type": "derived",
+         "type_params": {"expr": "revenue * 2", "metrics": [{"name": "revenue"}]}},
+        {"name": "average_revenue", "label": "Average revenue", "type": "ratio",
+         "type_params": {"numerator": "revenue", "denominator": "orders_count"}},
+        {"name": "net_revenue", "label": "Net revenue", "type": "derived",
+         "type_params": {"expr": "revenue - refunds", "metrics": [{"name": "revenue"}, {"name": "refunds"}]}},
+    ])
     if mapped:
         (project / "models/country_labels.sql").write_text(
             "select * from (values ('CN', 'same label'), ('US', 'same label')) t(code, label)", encoding="utf-8")
@@ -72,15 +103,19 @@ def warehouse(tmp_path_factory):
     return build_warehouse(tmp_path_factory.mktemp("bound-query"))
 
 
-def prepare(warehouse, same_path=False, time=False):
+def prepare(warehouse, same_path=False, time=False, metric_paths=None):
     project, content = warehouse
     client = MetricFlowClient(content, project=project, profiles=project)
-    metrics = ["revenue", "orders_count", "refunds", "returns_count"]
+    metric_paths = metric_paths or {
+        "revenue": "buyer__country", "orders_count": "buyer__country",
+        "refunds": "seller__country", "returns_count": "seller__country",
+    }
+    metrics = list(metric_paths)
     per_metric = {metric: resolve_dimensions(BUILD, [metric], client.available_dimensions((metric,)))
                   for metric in metrics}
     bindings = {}
-    for index, metric in enumerate(metrics):
-        token = "buyer__country" if same_path or index < 2 else "seller__country"
+    for metric in metrics:
+        token = "buyer__country" if same_path else metric_paths[metric]
         option_id = next(key for key, option in per_metric[metric].items() if option.token == token)
         bindings[metric] = {"optionId": option_id}
     body = {"mode": "QUERY", "metrics": metrics, "groupBy": [{"name": "country", "bindings": bindings}]}
@@ -95,6 +130,79 @@ def prepare(warehouse, same_path=False, time=False):
 def rows_by_country(result):
     names = [column.name for column in result.columns]
     return {row[names.index("country")]: dict(zip(names, row, strict=True)) for row in result.rows}
+
+
+def normalized_rows(result, keys):
+    names = [column.name for column in result.columns]
+    rows = [dict(zip(names, row, strict=True)) for row in result.rows]
+    by_key = {tuple(row[key] for key in keys): row for row in rows}
+    assert len(by_key) == len(rows)
+    return by_key
+
+
+def native_request(metric_paths, *, time=False, **kwargs):
+    group_by = [BoundGroupByParameter("country", tuple(
+        MetricGroupByBinding(metric, DimensionOrEntityParameter(path)) for metric, path in metric_paths.items()
+    ))]
+    if time:
+        group_by.append(TimeDimensionParameter("metric_time", grain="month"))
+    return MetricFlowQueryRequest.create(metric_names=list(metric_paths), bound_group_by=group_by, **kwargs)
+
+
+@pytest.mark.parametrize("passthrough", [False, True], ids=["dfs", "passthrough"])
+@pytest.mark.parametrize("level", [SqlOptimizationLevel.O4, SqlOptimizationLevel.O5], ids=["subquery", "cte"])
+@pytest.mark.parametrize("scenario", ["independent", "common", "filtered", "derived"])
+def test_native_results_match_legacy_oracle(warehouse, monkeypatch, passthrough, level, scenario):
+    paths = {"revenue": "buyer__country", "refunds": "seller__country"}
+    if scenario == "common":
+        paths["refunds"] = "buyer__country"
+    if scenario == "derived":
+        paths.update(double_revenue="seller__country", average_revenue="seller__country", net_revenue="buyer__country")
+    client, body, common, per_metric = prepare(warehouse, time=True, metric_paths=paths)
+    options = DataflowPlanOptimization.enabled_optimizations() - {
+        DataflowPlanOptimization.PASSTHROUGH_METRIC_EVALUATION,
+    }
+    if passthrough:
+        options |= {DataflowPlanOptimization.PASSTHROUGH_METRIC_EVALUATION}
+    kwargs = {"sql_optimization_level": level, "dataflow_plan_optimizations": options}
+    if scenario == "filtered":
+        time_id = next(key for key, option in common.items() if option.option.name == "metric_time")
+        body.update(startTime="2024-01-01", endTime="2024-01-31",
+                    filters=[{"optionId": time_id, "operator": ">=", "value": "2024-01-01"}])
+        kwargs.update(time_constraint_start=datetime(2024, 1, 1), time_constraint_end=datetime(2024, 1, 31),
+                      where_constraints=["{{ Dimension('metric_time') }} >= '2024-01-01'"])
+    plan = compile_bound_query(MetricQueryRequest.model_validate(body), common, per_metric)
+    legacy = client.query_bound(plan)
+    calls = []
+    query = client._sql_client.query
+
+    def fetch(*args, **kwargs):
+        calls.append(args[0])
+        return query(*args, **kwargs)
+
+    monkeypatch.setattr(client._sql_client, "query", fetch)
+    request = native_request(paths, time=True, **kwargs)
+    client._engine.explain(request)
+    assert calls == []
+    result = client._engine.query(request)
+    assert len(calls) == 1
+    assert result.result_df is not None
+    native = serialize_rows(result.result_df, limit=100)
+    keys = ("country", "metric_time__month")
+    assert normalized_rows(native, keys) == normalized_rows(legacy, keys)
+    if scenario == "derived":
+        january = normalized_rows(native, keys)[("CN", "2024-01-01T00:00:00")]
+        assert january["revenue"] == 30 and january["net_revenue"] == 27
+        assert january["double_revenue"] is None
+    # Service's lookahead row detects truncation; native limit itself remains exact.
+    body.update(limit=1, orderBy=[{"fieldId": "country", "direction": "ASC"}])
+    limited_plan = compile_bound_query(MetricQueryRequest.model_validate(body), common, per_metric)
+    limited_legacy = client.query_bound(limited_plan)
+    limited = client._engine.query(native_request(paths, time=True, order_by_names=["country"], limit=2, **kwargs))
+    assert limited.result_df is not None and len(limited.result_df.rows) == 2
+    limited_native = serialize_rows(limited.result_df, limit=1)
+    assert limited_native.truncated == limited_legacy.truncated is True
+    assert normalized_rows(limited_native, keys) == normalized_rows(limited_legacy, keys)
 
 
 def test_real_engine_groups_four_metrics_into_two_queries_and_aligns_results(warehouse, monkeypatch):
@@ -173,3 +281,29 @@ def test_mapped_labels_never_replace_alignment_keys(tmp_path):
     assert set(rows) == {"CN", "US", "JP", "DE", None}
     assert rows["CN"]["refunds"] is None
     assert rows["US"]["revenue"] == 40 and rows["US"]["refunds"] == 1
+    native = client._engine.query(native_request({
+        "revenue": "buyer__country", "orders_count": "buyer__country",
+        "refunds": "seller__country", "returns_count": "seller__country",
+    }))
+    assert native.result_df is not None
+    actual = normalized_rows(serialize_rows(native.result_df, limit=100), ("country",))
+    assert actual == normalized_rows(result, ("country",))
+    # Bound compilation does not change display mapping for subsequent ordinary requests.
+    ordinary_after = client.query(CompiledQuery(mode=QueryMode.QUERY, metrics=["revenue"],
+                                                group_by=["buyer__country"]))
+    assert ordinary_after.rows == ordinary.rows
+
+
+@pytest.mark.parametrize("adapter", ["postgres", "starrocks"])
+def test_native_bound_plan_renders_service_dialects(warehouse, adapter):
+    client, _, _, _ = prepare(warehouse)
+    engine = MetricFlowEngine(client._semantic_context, PlanningSqlClient(adapter))
+    explained = engine.explain(native_request(
+        {"revenue": "buyer__country", "refunds": "seller__country", "double_revenue": "seller__country"},
+        time=True, where_constraints=["{{ Dimension('buyer__country') }} = 'CN'"],
+        order_by_names=["country"], limit=2,
+    ))
+    assert "UNION" in explained.sql_statement.sql
+    assert "UNION ALL" not in explained.sql_statement.sql
+    assert "IS NULL" in explained.sql_statement.sql
+    assert "LEFT OUTER JOIN" in explained.sql_statement.sql
