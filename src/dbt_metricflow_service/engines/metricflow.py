@@ -10,7 +10,12 @@ from dbt.adapters.base import BaseAdapter
 from dbt.adapters.factory import get_adapter_by_type
 from dbt_metricflow.cli.dbt_connectors.adapter_backed_client import AdapterBackedSqlClient
 from dbt_metricflow.cli.dbt_connectors.dbt_config_accessor import dbtProjectMetadata
-from metricflow.engine.metricflow_engine import MetricFlowEngine, MetricFlowQueryRequest, MetricFlowQueryType
+from metricflow.engine.metricflow_engine import (
+    MetricFlowEngine,
+    MetricFlowQueryRequest,
+    MetricFlowQueryType,
+    OutputColumnOrderMode,
+)
 from metricflow_semantic_interfaces.type_enums.time_granularity import TimeGranularity
 from metricflow_semantics.errors.error_classes import InformativeUserError, InvalidQueryException
 from metricflow_semantics.model.semantic_manifest_lookup import SemanticManifestLookup
@@ -148,6 +153,10 @@ class MetricFlowClient:
             time_constraint_end=request.end_time,
             where_constraints=_where_constraints(request),
             order_by_names=request.order_by,
+            output_column_order_mode=(
+                OutputColumnOrderMode.LEGACY_TYPE_GROUPED
+                if request.bound_group_by is None else OutputColumnOrderMode.INPUT_ORDER
+            ),
             query_type=(
                 MetricFlowQueryType.DIMENSION_VALUES
                 if request.mode is QueryMode.DIMENSION_VALUES else MetricFlowQueryType.METRIC

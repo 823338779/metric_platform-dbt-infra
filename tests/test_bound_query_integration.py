@@ -260,6 +260,36 @@ def test_real_engine_keeps_compatible_metrics_in_one_query(warehouse):
     assert result["CN"]["revenue"] == 30 and result["CN"]["refunds"] == 3
 
 
+@pytest.mark.parametrize("shared_first", [False, True])
+def test_interleaved_metric_groups_preserve_requested_column_order(warehouse, monkeypatch, shared_first):
+    paths = {"revenue": "buyer__country", "refunds": "seller__country", "orders_count": "buyer__country"}
+    client, body, common, per_metric = prepare(warehouse, time=True, metric_paths=paths)
+    if shared_first:
+        body["groupBy"].reverse()
+    plan = resolve_query_bindings(MetricQueryRequest.model_validate(body), common, per_metric)
+    executed_sql = []
+    query = client._sql_client.query
+
+    def fetch(sql, **kwargs):
+        executed_sql.append(sql)
+        return query(sql, **kwargs)
+
+    monkeypatch.setattr(client._sql_client, "query", fetch)
+    result = client.query(plan)
+    assert len(executed_sql) == 1
+    key_names = ["metric_time__month", "country"] if shared_first else ["country", "metric_time__month"]
+    assert [column.name for column in result.columns] == [*key_names, "revenue", "refunds", "orders_count"]
+    january, february = "2024-01-01T00:00:00", "2024-02-01T00:00:00"
+    expected = [
+        ("CN", january, 30, None, 2), ("US", january, None, 1, None),
+        ("JP", january, None, 2, None), ("US", february, 40, None, 1),
+        ("DE", february, None, 4, None), (None, february, 30, 3, 1),
+    ]
+    if shared_first:
+        expected = [(row[1], row[0], *row[2:]) for row in expected]
+    assert {tuple(row) for row in result.rows} == set(expected)
+
+
 def test_executor_uses_single_metric_options_and_shared_time_filter(warehouse, settings, monkeypatch):
     project, content = warehouse
     _, body, common, _ = prepare(warehouse, time=True)

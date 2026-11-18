@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
+from metricflow.engine.metricflow_engine import OutputColumnOrderMode
 from pydantic import TypeAdapter
 
 from dbt_metricflow_service.application.errors import ServiceError
@@ -186,6 +187,7 @@ def test_executor_calls_one_native_query_for_bound_request(monkeypatch, settings
     assert len(calls) == 1
     native = calls[0]
     assert native.limit == 2 and native.order_by_names == ["-buyer__country"]
+    assert native.output_column_order_mode is OutputColumnOrderMode.INPUT_ORDER
     assert not native.group_by_names
     first, shared, last = native.bound_group_by
     assert first.name == "country" and last.name == "other_country"
@@ -216,4 +218,5 @@ def test_old_group_by_still_uses_old_native_parameters():
     assert len(calls) == 1
     assert calls[0].group_by_names == ["buyer__country"]
     assert calls[0].bound_group_by is None
+    assert calls[0].output_column_order_mode is OutputColumnOrderMode.LEGACY_TYPE_GROUPED
     assert calls[0].limit == 4
