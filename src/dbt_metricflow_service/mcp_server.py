@@ -12,13 +12,22 @@ import httpx
 from mcp import types
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationError
 
 from .mcp_client import ToolFailure, request
-from .models.builds import BuildRequest, DeploymentPolicy, Origin
-from .models.contracts import SHA_PATTERN, JsonObject
+from .models.builds import BuildRequest, BuildView, DeploymentPolicy, Origin
+from .models.catalog import ResourceSummary, ResourceView
+from .models.contracts import SHA_PATTERN, JsonObject, Page
+from .models.deployments import DeploymentTargetView
 from .models.execution import ExecutionSnapshot
-from .models.queries import BoundDimension, SelectedDimension, SelectedFilter, SelectedOrder
+from .models.queries import (
+    AvailableDimensionsView,
+    BoundDimension,
+    MetricQueryResult,
+    SelectedDimension,
+    SelectedFilter,
+    SelectedOrder,
+)
 
 
 class Arguments(BaseModel):
@@ -28,10 +37,9 @@ class Arguments(BaseModel):
 class CurrentDeployment(Arguments):
     """读取仓库、环境、分支实际生效的部署；后续分析应固定返回的 activeBuildId。"""
 
-    repository: str
+    repository: Annotated[str, AfterValidator(BuildRequest.valid_repository)] = Field(min_length=1, max_length=2048)
     environment_id: UUID
     branch_name: str
-
 
 class BuildIdentity(Arguments):
     build_id: UUID = Field(description="已固定的构建 ID")
@@ -59,14 +67,20 @@ class MetricSelection(BuildIdentity):
     metric_resource_ids: list[Annotated[str, Field(min_length=1)]] = Field(min_length=1, max_length=100)
 
 
+class ResourceBoundDimension(BoundDimension):
+    bindings: dict[str, SelectedDimension] = Field(min_length=1, max_length=100,
+                                                  description="每个已选指标资源 ID 对应的单指标维度选项")
+
+
 class QueryMetrics(MetricSelection):
     """查询所选指标。分组与过滤使用该选择的维度 optionId；复合绑定按指标资源 ID 指定单指标选项。"""
 
-    group_by: list[SelectedDimension | BoundDimension] = Field(default_factory=list, max_length=100)
+    group_by: list[SelectedDimension | ResourceBoundDimension] = Field(default_factory=list, max_length=100)
     filters: list[SelectedFilter] = Field(default_factory=list, max_length=100)
-    order_by: list[SelectedOrder] = Field(default_factory=list, max_length=100)
-    start_time: datetime | None = None
-    end_time: datetime | None = None
+    order_by: list[SelectedOrder] = Field(default_factory=list, max_length=100,
+                                          description="fieldId 为所选指标资源 ID、维度 optionId 或复合分组列名")
+    start_time: datetime | None = Field(default=None, description="起始时间；有偏移量时转换到构建业务时区")
+    end_time: datetime | None = Field(default=None, description="结束时间；无偏移量时按构建业务时区解释")
     limit: int = Field(default=1000, ge=1, le=10000)
 
 
@@ -101,8 +115,11 @@ class Gateway:
         build = str(args.build_id)
         names: dict[str, str] = {}
         for uid in dict.fromkeys(args.metric_resource_ids):
-            result = await request(self.http, "GET", f"/builds/{build}/catalog/search",
+            result = await request(self.http, "GET", f"/builds/{build}/catalog/search", Page[ResourceSummary],
                                    params={"resourceId": uid, "resourceType": "metric"}, build_id=build)
+            if len(result["items"]) != 1 or result["items"][0]["resourceId"] != uid:
+                raise ToolFailure({"code": "HTTP_ERROR", "message": "Invalid exact resource lookup response.",
+                                   "retryable": False, "buildId": build})
             item = result["items"][0]
             if item.get("queryNameUnique") is not True:
                 raise ToolFailure({"code": "AMBIGUOUS_METRIC", "message": "Metric query name is not unique.",
@@ -130,14 +147,16 @@ class Gateway:
                 body["startTime"] = args.start_time.isoformat()
             if args.end_time:
                 body["endTime"] = args.end_time.isoformat()
-        return await request(self.http, "POST", path, params={"build_id": build}, body=body, build_id=build)
+        model = MetricQueryResult if isinstance(args, QueryMetrics) else AvailableDimensionsView
+        return await request(self.http, "POST", path, model, params={"build_id": build}, body=body, build_id=build)
 
     async def execute(self, args: Arguments) -> JsonObject:
         if isinstance(args, SubmitBuild):
             build = BuildRequest.model_validate(args.model_dump())
-            return await request(self.http, "POST", "/builds", body=build.model_dump(mode="json", by_alias=True))
+            body = build.model_dump(mode="json", by_alias=True)
+            return await request(self.http, "POST", "/builds", BuildView, body=body)
         if isinstance(args, GetBuild):
-            result = await request(self.http, "GET", f"/builds/{args.build_id}", build_id=str(args.build_id))
+            result = await request(self.http, "GET", f"/builds/{args.build_id}", BuildView, build_id=str(args.build_id))
             result["queryAvailability"] = "unknown"
             return result
         if isinstance(args, MetricSelection):
@@ -145,17 +164,19 @@ class Gateway:
         if isinstance(args, SearchCatalog):
             params = {"keyword": args.keyword, "limit": args.limit, "resourceType": args.resource_type,
                       "cursor": args.cursor}
-            return await request(self.http, "GET", f"/builds/{args.build_id}/catalog/search",
+            return await request(self.http, "GET", f"/builds/{args.build_id}/catalog/search", Page[ResourceSummary],
                                  params={k: v for k, v in params.items() if v is not None}, build_id=str(args.build_id))
         if isinstance(args, GetResource):
             path = f"/builds/{args.build_id}/resources/{quote(args.resource_id, safe='')}"
-            return await request(self.http, "GET", path,
+            return await request(self.http, "GET", path, ResourceView,
                                  build_id=str(args.build_id))
         if isinstance(args, CurrentDeployment):
-            result = await request(self.http, "GET", "/deployments/current", params={
+            result = await request(self.http, "GET", "/deployments/current", DeploymentTargetView, params={
                 "repository": args.repository, "environmentId": str(args.environment_id),
                 "branchName": args.branch_name})
-            result["status"] = "active" if result.get("activeBuildId") else "undeployed"
+            if "activeBuildId" not in result:
+                raise ToolFailure({"code": "HTTP_ERROR", "message": "Missing deployment pointer.", "retryable": False})
+            result["status"] = "active" if result["activeBuildId"] else "undeployed"
             return result
         raise ValueError("unknown tool")
 
@@ -169,6 +190,10 @@ class Gateway:
         except ValidationError:
             failed = True
             data = {"error": {"code": "INVALID_REQUEST", "message": "Invalid tool arguments.", "retryable": False}}
+            try:
+                data["error"]["buildId"] = str(UUID(str(arguments.get("build_id"))))
+            except ValueError:
+                pass
         except ToolFailure as exc:
             failed = True
             data = {"error": exc.error}

@@ -14,3 +14,5 @@
 复现：安装项目依赖和 mcp extra，设置专用测试 PostgreSQL 的 `DBT_SERVICE_TEST_DSN`，执行 `uv run --frozen --extra mcp pytest tests/test_mcp_integration.py -sq`。要同时核对第二客户端，安装 Inspector CLI 2.13.0，将 `MCP_INSPECTOR_ENTRY` 指向该包的 `clients/launcher/build/index.js`，并确保 Node 在 PATH 中。测试在独立临时数据库 schema 和临时 DuckDB 文件内运行。
 
 已知契约缺口：get_build 的 queryAvailability 返回 unknown；失败诊断来自具体维度或指标查询。完整单条摘要超限时，搜索返回服务的 RESULT_TOO_LARGE。
+
+整分支独立审阅后补测了不完整的 202 响应、无正文的鉴权错误、已知构建 ID 保留、仓库 URL 与上游错误的凭据处理。使用专用 PostgreSQL 并启用 Inspector 后，整个测试集 159 项通过，耗时 37.81 秒；两条警告来自 Starlette 测试客户端的依赖弃用提示。Ruff 和 uv 锁文件一致性检查通过。

@@ -14,15 +14,20 @@ async def test_submit_recovers_same_request_and_reads_separate_status(build_requ
     sent = []
     args = build_request.model_dump(mode="json", by_alias=False, exclude_none=True)
     args["deployment_policy"] = "ON_SUCCESS"
+    accepted = {"execution": build_request.execution.model_dump(mode="json", by_alias=True), "buildId": BUILD,
+                "repository": args["repository"], "branchName": "main", "requestedCommitSha": args["commit_sha"],
+                "commitSha": args["commit_sha"], "toolchainVersion": "test", "buildStatus": "QUEUED", "phase": "QUEUED",
+                "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z"}
 
     def respond(req):
         if req.method == "GET":
-            return httpx.Response(200, json={"buildStatus": "SUCCEEDED", "initialDeployment": {
-                "deploymentStatus": "FAILED"}})
+            return httpx.Response(200, json={**accepted, "buildStatus": "SUCCEEDED", "initialDeployment": {
+                "deploymentStatus": "FAILED", "repository": args["repository"], "environmentId": BUILD,
+                "branchName": "main", "generation": 1, "buildId": BUILD, "createdAt": accepted["createdAt"]}})
         sent.append(json.loads(req.content))
         if len(sent) == 1:
             raise httpx.ReadTimeout("unknown")
-        return httpx.Response(202, json={"buildId": BUILD})
+        return httpx.Response(202, json=accepted)
 
     async with httpx.AsyncClient(base_url="http://test", transport=httpx.MockTransport(respond)) as http:
         gateway = Gateway(http)

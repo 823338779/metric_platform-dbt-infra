@@ -84,7 +84,10 @@ def test_all_http_operations(api, build_request, monkeypatch, method, path, body
 def test_openapi_describes_modes_and_system_responses(api):
     _, app, _ = api
     paths = app.openapi()["paths"]
-    assert sum(method in {"get", "post"} for item in paths.values() for method in item) == 14
+    assert sum(method in {"get", "post"} for item in paths.values() for method in item) == 15
+    search = paths["/builds/{build_id}/catalog/search"]["get"]
+    assert {p["name"] for p in search["parameters"]} == {
+        "build_id", "keyword", "resourceId", "resourceType", "cursor", "limit"}
     catalog_content = paths["/builds/{build_id}/catalog"]["get"]["responses"]["200"]["content"]
     assert catalog_content["application/json"]["schema"]["type"] == "array"
     schema = paths["/query"]["post"]["requestBody"]["content"]["application/json"]["schema"]

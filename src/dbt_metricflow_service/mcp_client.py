@@ -1,6 +1,7 @@
 """HTTP transport shared by the stdio tools."""
 
 import httpx
+from pydantic import BaseModel, ValidationError
 
 from .models.contracts import JsonObject
 
@@ -10,7 +11,8 @@ class ToolFailure(Exception):
         self.error = error
 
 
-async def request(http: httpx.AsyncClient, method: str, path: str, *, params: JsonObject | None = None,
+async def request(http: httpx.AsyncClient, method: str, path: str, response_model: type[BaseModel], *,
+                  params: JsonObject | None = None,
                   body: JsonObject | None = None, build_id: str | None = None) -> JsonObject:
     submitting = (method, path) == ("POST", "/builds")
     try:
@@ -25,12 +27,21 @@ async def request(http: httpx.AsyncClient, method: str, path: str, *, params: Js
     except ValueError:
         payload = None
     if response.is_success and isinstance(payload, dict):
-        return payload
-    if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
+        try:
+            response_model.model_validate(payload)
+        except ValidationError:
+            pass
+        else:
+            return payload
+    if not response.is_success and isinstance(payload, dict) and isinstance(payload.get("error"), dict):
         error = {k: v for k, v in payload["error"].items() if k in ("code", "message", "phase", "retryable", "buildId")}
         if not error.get("buildId"):
             error["buildId"] = build_id
+        token = http.headers.get("Authorization", "").removeprefix("Bearer ")
+        if token:
+            error = {k: v.replace(token, "[redacted]") if isinstance(v, str) else v for k, v in error.items()}
         raise ToolFailure(error)
-    raise ToolFailure({"code": "BUILD_ACCEPTANCE_UNKNOWN" if submitting else "HTTP_ERROR",
+    unknown = submitting and (response.is_success or response.status_code >= 500 or response.status_code == 408)
+    raise ToolFailure({"code": "BUILD_ACCEPTANCE_UNKNOWN" if unknown else "HTTP_ERROR",
                        "message": f"Unexpected service response (HTTP {response.status_code}).",
-                       "buildId": build_id, "retryable": submitting or response.status_code >= 500})
+                       "buildId": build_id, "retryable": unknown or response.status_code >= 500})
