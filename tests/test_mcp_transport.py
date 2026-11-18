@@ -1,10 +1,39 @@
+import sys
+
 import httpx
 import pytest
 
 pytest.importorskip("mcp")
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
 from dbt_metricflow_service.mcp_server import Gateway
 
 BUILD = "00000000-0000-0000-0000-000000000001"
+
+
+@pytest.mark.asyncio
+async def test_stdio_discovery_explains_inputs_and_result_fields():
+    launch = StdioServerParameters(command=sys.executable, args=["-m", "dbt_metricflow_service.mcp_server"],
+                                   env={"DBT_METRICFLOW_SERVICE_URL": "http://127.0.0.1:1"})
+    async with stdio_client(launch) as streams, ClientSession(*streams) as client:
+        await client.initialize()
+        discovered = {tool.name: tool for tool in (await client.list_tools()).tools}
+    result_fields = {
+        "get_current_deployment": ("activeBuildId", "undeployed"),
+        "search_catalog": ("resourceId", "nextCursor"),
+        "get_resource": ("resource", "source"),
+        "get_available_dimensions": ("optionId", "granularities", "operators"),
+        "query_metrics": ("columns", "rows", "normalizedTimeRange", "resultTruncated"),
+        "submit_build": ("buildId", "get_build", "BUILD_ACCEPTANCE_UNKNOWN"),
+        "get_build": ("buildStatus", "deploymentStatus", "queryAvailability"),
+    }
+    assert discovered.keys() == result_fields.keys()
+    for name, fields in result_fields.items():
+        tool = discovered[name]
+        assert all(field in tool.description for field in fields), name
+        for param, schema in tool.inputSchema["properties"].items():
+            assert schema.get("description"), (name, param)
 
 
 @pytest.mark.asyncio

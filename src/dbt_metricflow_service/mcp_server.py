@@ -1,6 +1,7 @@
 """Client-neutral stdio tools for the public dbt-metricflow-service API."""
 
 import asyncio
+import inspect
 import json
 import os
 from datetime import datetime
@@ -35,36 +36,58 @@ class Arguments(BaseModel):
 
 
 class CurrentDeployment(Arguments):
-    """读取仓库、环境、分支实际生效的部署；后续分析应固定返回的 activeBuildId。"""
+    """用户要分析当前部署时先调用一次；用户已指定构建 ID 时直接使用该构建。
+    status=active 时，把 activeBuildId 作为后续目录、维度和查询工具的 build_id，记录 activeCommitSha。
+    status=undeployed 表示此目标尚无生效版本；可请用户指定构建 ID。latestAttempt 只描述最近一次部署尝试。
+    """
 
-    repository: Annotated[str, AfterValidator(BuildRequest.valid_repository)] = Field(min_length=1, max_length=2048)
-    environment_id: UUID
-    branch_name: str
+    repository: Annotated[str, AfterValidator(BuildRequest.valid_repository)] = Field(
+        min_length=1, max_length=2048, description="从用户指定的项目或部署配置取得 Git 远端 URL，使用无凭据地址")
+    environment_id: UUID = Field(description="目标部署环境的 UUID，取自用户或调用方环境配置")
+    branch_name: str = Field(description="该部署目标的 Git 短分支名，如 main，从用户或部署配置取得")
+
 
 class BuildIdentity(Arguments):
-    build_id: UUID = Field(description="已固定的构建 ID")
+    build_id: UUID = Field(description="用户指定的构建 UUID、get_current_deployment 的 activeBuildId，"
+                                       "或 submit_build 返回的 buildId；同一次分析始终沿用该值")
 
 
 class SearchCatalog(BuildIdentity):
-    """在固定构建中搜索资源；保留同名候选，按 nextCursor 继续相同条件的搜索。"""
+    """固定构建后，按用户的业务用语搜索指标或其他资源。items 是本页候选，含 resourceId、名称、标签和说明。
+    nextCursor 非空时可续页。多个候选符合时，用 get_resource 对比定义并请用户选择；
+    将选中指标的 resourceId 交给 get_available_dimensions 或 query_metrics。空列表表示当前搜索无匹配。
+    """
 
-    keyword: str = Field(min_length=1)
+    keyword: str = Field(min_length=1, description="从问题提取的关键词，如“销售额”；匹配资源 ID、名称、标签或说明")
     resource_type: Literal["source", "seed", "snapshot", "model", "semantic_model", "metric",
-                           "saved_query", "exposure"] | None = None
-    limit: int = Field(default=50, ge=1, le=200)
-    cursor: str | None = None
+                           "saved_query", "exposure"] | None = Field(
+        default=None,
+        description="查指标时选 metric；省略则搜索所有业务资源类型")
+    limit: int = Field(default=50, ge=1, le=200, description="每页最多返回的候选数，服务可按响应大小提前分页")
+    cursor: str | None = Field(
+        default=None,
+        description="首轮省略；续页原样传回上页 nextCursor，沿用原构建、关键词和类型")
 
 
 class GetResource(BuildIdentity):
-    """读取所选资源在固定构建中的完整定义与公开属性。"""
+    """搜索后需要核对指标口径或解释候选差异时调用。resource 是该版本的原生节点，包含定义和公开属性；
+    source 在可用时提供源码路径和正文。用定义向用户澄清，后续查询沿用所选指标的完整 resourceId。
+    """
 
-    resource_id: str = Field(pattern=r"^[a-z_]+\.[^/\\?#]+$")
+    resource_id: str = Field(
+        pattern=r"^[a-z_]+\.[^/\\?#]+$",
+        description="同一构建 search_catalog 返回的 items[].resourceId")
 
 
 class MetricSelection(BuildIdentity):
-    """获取固定构建和指标组合的可用维度、optionId 及粒度。"""
+    """指标确定后，需要分组或过滤时调用。按 dimensions[].displayName 和 name 找到用户所指维度，
+    将该项的 optionId 用于 query_metrics，粒度从 granularities 选，过滤操作符从 operators 选。
+    选项绑定到本次 build_id 和指标组合；更换构建或组合后重新获取。没有所需维度时向用户澄清。
+    """
 
-    metric_resource_ids: list[Annotated[str, Field(min_length=1)]] = Field(min_length=1, max_length=100)
+    metric_resource_ids: list[Annotated[str, Field(min_length=1)]] = Field(
+        min_length=1, max_length=100,
+        description="同一构建中由 search_catalog 选定的完整指标 resourceId 列表，如 metric.api_review.revenue")
 
 
 class ResourceBoundDimension(BoundDimension):
@@ -73,31 +96,52 @@ class ResourceBoundDimension(BoundDimension):
 
 
 class QueryMetrics(MetricSelection):
-    """查询所选指标。分组与过滤使用该选择的维度 optionId；复合绑定按指标资源 ID 指定单指标选项。"""
+    """指标和分析口径确定后执行查询。处理“上月”等相对时间时，先从 get_build 的 execution.businessTimezone 确定日期范围。
+    按 columns 的名称、类型及顺序读取 rows 各单元格，保留 null；成功且 rows 为空表示没有匹配数据。
+    报告 buildId、commitSha、businessTimezone 和 normalizedTimeRange；resultTruncated 为真时说明仅展示部分行。
+    isError 为真时按 error.code 和 message 说明失败；切换构建前请用户重新选择。
+    """
 
-    group_by: list[SelectedDimension | ResourceBoundDimension] = Field(default_factory=list, max_length=100)
-    filters: list[SelectedFilter] = Field(default_factory=list, max_length=100)
+    group_by: list[SelectedDimension | ResourceBoundDimension] = Field(
+        default_factory=list, max_length=100, description="按指标组合的维度 optionId 分组，可选该维度支持的 grain。"
+        "需按不同路径对齐多个指标时，分别查询各单指标维度，用 bindings 将每个指标资源 ID 映射到其单指标选项。")
+    filters: list[SelectedFilter] = Field(
+        default_factory=list, max_length=100,
+        description="optionId 和 operator 取自指标组合的维度选项；"
+        "value 取自用户筛选条件。IN 传 1–100 个标量，其他操作符传单个标量。")
     order_by: list[SelectedOrder] = Field(default_factory=list, max_length=100,
                                           description="fieldId 为所选指标资源 ID、维度 optionId 或复合分组列名")
     start_time: datetime | None = Field(default=None, description="起始时间；有偏移量时转换到构建业务时区")
     end_time: datetime | None = Field(default=None, description="结束时间；无偏移量时按构建业务时区解释")
-    limit: int = Field(default=1000, ge=1, le=10000)
+    limit: int = Field(
+        default=1000, ge=1, le=10000,
+        description="本次查询最多返回的行数，结合 resultTruncated 判断是否截断")
 
 
 class SubmitBuild(Arguments):
-    """提交固定版本及执行快照。ON_SUCCESS 会在构建成功后尝试部署。受理未知时复用原输入及幂等键。"""
+    """用户要求从指定提交构建时调用。返回 buildId 表示服务已受理，用 get_build 跟踪构建及关联部署。
+    遇到 BUILD_ACCEPTANCE_UNKNOWN，服务可能已受理，恢复时重用所有原始参数和同一个幂等键。
+    """
 
-    repository: str = Field(min_length=1, max_length=2048)
-    branch_name: str
-    commit_sha: str = Field(pattern=SHA_PATTERN)
-    execution: ExecutionSnapshot
-    deployment_policy: DeploymentPolicy
-    idempotency_key: str = Field(min_length=1, max_length=256)
-    origin: Origin | None = None
+    repository: str = Field(min_length=1, max_length=2048, description="从待构建项目取得无凭据的 Git 远端 URL")
+    branch_name: str = Field(description="用户指定的源分支短名，如 main")
+    commit_sha: str = Field(pattern=SHA_PATTERN, description="从用户或仓库取得此次指定提交的完整小写 SHA")
+    execution: ExecutionSnapshot = Field(
+        description="从调用方的目标环境配置取得完整执行快照，credentialRef 填已配置的凭据引用")
+    deployment_policy: DeploymentPolicy = Field(
+        description="按用户意图显式选择：NONE 仅构建，ON_SUCCESS 在构建成功后尝试部署")
+    idempotency_key: str = Field(
+        min_length=1, max_length=256,
+        description="调用方为本次逻辑提交分配的稳定键，同一次提交的重试始终复用")
+    origin: Origin | None = Field(default=None, description="可选，由调用方提供本次会话或操作的追溯标签")
 
 
 class GetBuild(BuildIdentity):
-    """读取构建与关联部署的独立状态。仅 DEPLOYED 表示部署成功。"""
+    """submit_build 受理后或用户指定构建时调用。buildStatus 和 phase 表示构建进展，失败原因见 error。
+    initialDeployment 为空表示没有关联的部署尝试；否则查看 deploymentStatus 和 reason，仅 DEPLOYED 表示该次部署成功。
+    catalogAvailable 表示目录可读；queryAvailability=unknown 时以实际查询结果为准。
+    解释相对日期可读取 execution.businessTimezone；要确认此刻生效的版本，用 get_current_deployment。
+    """
 
 
 TOOLS: dict[str, type[Arguments]] = {
@@ -213,7 +257,7 @@ async def serve() -> None:
 
         @server.list_tools()
         async def list_tools() -> list[types.Tool]:
-            return [types.Tool(name=name, description=model.__doc__, inputSchema=model.model_json_schema())
+            return [types.Tool(name=name, description=inspect.getdoc(model), inputSchema=model.model_json_schema())
                     for name, model in TOOLS.items()]
 
         server.call_tool(validate_input=False)(gateway.call)
