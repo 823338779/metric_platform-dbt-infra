@@ -15,8 +15,8 @@ def test_search_pages_and_resolves_metrics():
     metrics = {}
     for index in range(5):
         uid = f"metric.demo.sales{index}"
-        metrics[uid] = dict(unique_id=uid, name=f"sales{index}", resource_type="metric",
-                            label="销售额", description="渠道" * 45)
+        metrics[uid] = {"unique_id": uid, "name": f"sales{index}", "resource_type": "metric",
+                            "label": "销售额", "description": "渠道" * 45}
     manifest = json.dumps({"metrics": metrics, "nodes": {}}).encode()
     build = SimpleNamespace(build_id=build_id, build_status="SUCCEEDED", output_set_id="sealed")
     service = CatalogService(SimpleNamespace(get=lambda _: build), SimpleNamespace(read_file=lambda *_: manifest),
@@ -44,5 +44,9 @@ def test_search_pages_and_resolves_metrics():
     exact = http.get(url, params={"resourceId": seen[-1], "resourceType": "metric"})
     assert exact.json()["items"][0]["queryNameUnique"] is True
     assert http.get(url, params={"resourceId": "unknown"}).status_code == 404
+    assert not http.get(url, params={"keyword": "missing"}).json()["items"]
+    metrics[seen[0]]["name"] = metrics[seen[-1]]["name"]
+    manifest = json.dumps({"metrics": metrics}).encode()
+    assert not http.get(url, params={"resourceId": seen[-1]}).json()["items"][0]["queryNameUnique"]
     service.max_result_bytes = 30
     assert http.get(url, params={"keyword": "sales"}).json()["error"]["code"] == "RESULT_TOO_LARGE"

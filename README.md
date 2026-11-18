@@ -340,3 +340,14 @@ StarRocks 的 profile.catalog 指定 catalog，profile.schema 指定 database；
 - `execution/errors.py`、`models.py`、`toolchain.py`：共用执行错误、结果类型和工具链标识。
 
 HTTP 查询入口注入 `runtime.queries` 的方法；执行与 worker 模块不反向依赖 `bootstrap`，纯查询编译由执行器在请求上下文内调用，SDK 与工作目录不传出到 HTTP 层。
+
+## Agent 的 MCP 接入
+
+在启用了目录搜索端点的 HTTP 服务之外，由客户端启动本地 MCP 进程。项目根目录运行 `uv sync --frozen --extra mcp` 安装可选依赖。客户端的 command 指向安装后的 `dbt-metricflow-mcp` 可执行文件（Windows 位于 `.venv/Scripts`，Linux/macOS 位于 `.venv/bin`），args 为空，传输方式为 stdio。也可将 command 设为该虚拟环境的 Python，args 设为 `["-m", "dbt_metricflow_service.mcp_server"]`。
+
+| 进程环境变量 | 含义 |
+|---|---|
+| `DBT_METRICFLOW_SERVICE_URL` | 必填，客户端可访问的服务基础地址，如 `http://127.0.0.1:8000`。 |
+| `DBT_METRICFLOW_SERVICE_TOKEN` | 部署要求 Bearer 认证时设置，由客户端运行环境注入。 |
+
+客户端使用 `tools/list` 获取七个工具的说明和输入结构。启动命令无需额外参数或专用 Skill。stdout 用于协议，诊断输出到 stderr。服务端同时公开 `GET /builds/{build_id}/catalog/search`，支持 keyword、resourceType、limit、cursor；内部精确查找使用 resourceId 替代 keyword。构建详情的查询可用性目前为 unknown，实际查询会返回服务错误或查询结果。见[中文查询与构建示例](docs/examples/mcp-sales-query.md)。

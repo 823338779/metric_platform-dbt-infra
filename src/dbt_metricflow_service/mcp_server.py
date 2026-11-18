@@ -4,7 +4,7 @@ import asyncio
 import json
 import os
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import quote
 from uuid import UUID
 
@@ -41,7 +41,8 @@ class SearchCatalog(BuildIdentity):
     """在固定构建中搜索资源；保留同名候选，按 nextCursor 继续相同条件的搜索。"""
 
     keyword: str = Field(min_length=1)
-    resource_type: str | None = None
+    resource_type: Literal["source", "seed", "snapshot", "model", "semantic_model", "metric",
+                           "saved_query", "exposure"] | None = None
     limit: int = Field(default=50, ge=1, le=200)
     cursor: str | None = None
 
@@ -49,7 +50,7 @@ class SearchCatalog(BuildIdentity):
 class GetResource(BuildIdentity):
     """读取所选资源在固定构建中的完整定义与公开属性。"""
 
-    resource_id: str = Field(pattern=r"^[^/\\?#]+\.[^/\\?#]+$")
+    resource_id: str = Field(pattern=r"^[a-z_]+\.[^/\\?#]+$")
 
 
 class MetricSelection(BuildIdentity):
@@ -147,11 +148,13 @@ class Gateway:
             return await request(self.http, "GET", f"/builds/{args.build_id}/catalog/search",
                                  params={k: v for k, v in params.items() if v is not None}, build_id=str(args.build_id))
         if isinstance(args, GetResource):
-            return await request(self.http, "GET", f"/builds/{args.build_id}/resources/{quote(args.resource_id, safe='')}",
+            path = f"/builds/{args.build_id}/resources/{quote(args.resource_id, safe='')}"
+            return await request(self.http, "GET", path,
                                  build_id=str(args.build_id))
         if isinstance(args, CurrentDeployment):
             result = await request(self.http, "GET", "/deployments/current", params={
-                "repository": args.repository, "environmentId": str(args.environment_id), "branchName": args.branch_name})
+                "repository": args.repository, "environmentId": str(args.environment_id),
+                "branchName": args.branch_name})
             result["status"] = "active" if result.get("activeBuildId") else "undeployed"
             return result
         raise ValueError("unknown tool")
