@@ -15,7 +15,9 @@ from mcp.server.stdio import stdio_server
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .mcp_client import ToolFailure, request
-from .models.contracts import JsonObject
+from .models.builds import BuildRequest, DeploymentPolicy, Origin
+from .models.contracts import SHA_PATTERN, JsonObject
+from .models.execution import ExecutionSnapshot
 from .models.queries import BoundDimension, SelectedDimension, SelectedFilter, SelectedOrder
 
 
@@ -67,9 +69,26 @@ class QueryMetrics(MetricSelection):
     limit: int = Field(default=1000, ge=1, le=10000)
 
 
+class SubmitBuild(Arguments):
+    """提交固定版本及执行快照。ON_SUCCESS 会在构建成功后尝试部署。受理未知时复用原输入及幂等键。"""
+
+    repository: str = Field(min_length=1, max_length=2048)
+    branch_name: str
+    commit_sha: str = Field(pattern=SHA_PATTERN)
+    execution: ExecutionSnapshot
+    deployment_policy: DeploymentPolicy
+    idempotency_key: str = Field(min_length=1, max_length=256)
+    origin: Origin | None = None
+
+
+class GetBuild(BuildIdentity):
+    """读取构建与关联部署的独立状态。仅 DEPLOYED 表示部署成功。"""
+
+
 TOOLS: dict[str, type[Arguments]] = {
     "get_current_deployment": CurrentDeployment, "search_catalog": SearchCatalog, "get_resource": GetResource,
     "get_available_dimensions": MetricSelection, "query_metrics": QueryMetrics,
+    "submit_build": SubmitBuild, "get_build": GetBuild,
 }
 
 
@@ -113,6 +132,13 @@ class Gateway:
         return await request(self.http, "POST", path, params={"build_id": build}, body=body, build_id=build)
 
     async def execute(self, args: Arguments) -> JsonObject:
+        if isinstance(args, SubmitBuild):
+            build = BuildRequest.model_validate(args.model_dump())
+            return await request(self.http, "POST", "/builds", body=build.model_dump(mode="json", by_alias=True))
+        if isinstance(args, GetBuild):
+            result = await request(self.http, "GET", f"/builds/{args.build_id}", build_id=str(args.build_id))
+            result["queryAvailability"] = "unknown"
+            return result
         if isinstance(args, MetricSelection):
             return await self.metrics(args)
         if isinstance(args, SearchCatalog):
