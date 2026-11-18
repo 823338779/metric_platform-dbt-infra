@@ -256,6 +256,7 @@ MetricFlow 负责源维度解析、指标求值、Dataflow 与 SQL 对齐；派�
 最终只投影公共分组键与请求指标。排序和 `limit` 只作用于最终结果，服务传入 `limit + 1` 行判定 `resultTruncated`；原生引擎严格使用收到的 limit，不截断子查询。
 `EXPLAIN` 返回完整 SQL，不取数；未使用 `bindings` 的查询保留原行为。
 设计契约见 [原生指标维度绑定设计](docs/superpowers/specs/2026-11-17-native-metric-dimension-bindings-design.md)。
+多维对齐、嵌套派生、空结果与共享筛选的输入和固定期望见 [可执行查询场景示例](docs/examples/native-metric-dimension-bindings.md)。
 
 历史查询只需要保存的 `manifest.json` 提供业务定义。`DbtClient` 和 `MetricFlowClient` 保留在服务内作为薄适配层：委托 dbt 原生 Manifest 加载及语义转换器、MetricFlow 原生上下文与查询引擎解释内容，不自行解析资源或推导依赖。维度发现与数据查询共享该 Client 的内存语义上下文，不生成或读取 `semantic_manifest.json`，也不重新 parse 业务 YAML。dbt `show` 显式注入从历史 artifact 恢复的 Manifest。工程配置、连接 profile、适配器及数据库仍是执行前提；不需要重新读取原来的业务 YAML/SQL 定义。
 

@@ -1,0 +1,109 @@
+{
+  "command": "pytest tests_metricflow_semantics/toolkit/test_singleton.py::test_create_existing -q -n 4 -p no:cacheprovider",
+  "hashseed": "0",
+  "original_mapping": {
+    "current": "M:",
+    "baseline": "N:"
+  },
+  "original_abba": [
+    {
+      "index": 0,
+      "revision": "baseline",
+      "exit_code": 0
+    },
+    {
+      "index": 1,
+      "revision": "current",
+      "exit_code": 1
+    },
+    {
+      "index": 2,
+      "revision": "current",
+      "exit_code": 1
+    },
+    {
+      "index": 3,
+      "revision": "baseline",
+      "exit_code": 0
+    },
+    {
+      "index": 4,
+      "revision": "baseline",
+      "exit_code": 0
+    },
+    {
+      "index": 5,
+      "revision": "current",
+      "exit_code": 1
+    },
+    {
+      "index": 6,
+      "revision": "current",
+      "exit_code": 1
+    },
+    {
+      "index": 7,
+      "revision": "baseline",
+      "exit_code": 0
+    }
+  ],
+  "swapped_mapping": {
+    "current": "N:",
+    "baseline": "M:"
+  },
+  "swapped_runs": [
+    {
+      "ratio": 0.39,
+      "revision": "baseline",
+      "round": 1,
+      "exit_code": 1
+    },
+    {
+      "revision": "current",
+      "round": 1,
+      "exit_code": 0
+    },
+    {
+      "revision": "baseline",
+      "round": 2,
+      "exit_code": 0
+    },
+    {
+      "revision": "current",
+      "round": 2,
+      "exit_code": 0
+    }
+  ],
+  "logging_only_context_probe": {
+    "current": {
+      "root": "M:\\",
+      "trace": "None",
+      "profile": "None",
+      "cache_size": 3,
+      "cache_classes": {
+        "SingletonIdElement": 2,
+        "SingletonCompositeId": 1
+      },
+      "timings": [
+        "Compared performance of left and right statements.\n  left_statement_runtime: datetime.timedelta(microseconds=328)\n  right_statement_runtime: datetime.timedelta(microseconds=812)\n  performance_factor: 0.40\n  expected_min_performance_factor: 0.40"
+      ]
+    },
+    "baseline": {
+      "root": "N:\\",
+      "trace": "None",
+      "profile": "None",
+      "cache_size": 3,
+      "cache_classes": {
+        "SingletonIdElement": 2,
+        "SingletonCompositeId": 1
+      },
+      "timings": [
+        "Compared performance of left and right statements.\n  left_statement_runtime: datetime.timedelta(microseconds=312)\n  right_statement_runtime: datetime.timedelta(microseconds=844)\n  performance_factor: 0.37\n  expected_min_performance_factor: 0.40",
+        "Since performance is lower than expected, sleeping and retrying in case it's a fluke\n  sleep_time: 1.00s\n  attempt_num: 1\n  attempt_count: 3",
+        "Compared performance of left and right statements.\n  left_statement_runtime: datetime.timedelta(microseconds=328)\n  right_statement_runtime: datetime.timedelta(microseconds=844)\n  performance_factor: 0.39\n  expected_min_performance_factor: 0.40",
+        "Since performance is lower than expected, sleeping and retrying in case it's a fluke\n  sleep_time: 1.00s\n  attempt_num: 2\n  attempt_count: 3",
+        "Compared performance of left and right statements.\n  left_statement_runtime: datetime.timedelta(microseconds=297)\n  right_statement_runtime: datetime.timedelta(microseconds=875)\n  performance_factor: 0.34\n  expected_min_performance_factor: 0.40"
+      ]
+    }
+  }
+}

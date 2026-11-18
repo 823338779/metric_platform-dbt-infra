@@ -290,6 +290,51 @@ def test_interleaved_metric_groups_preserve_requested_column_order(warehouse, mo
     assert {tuple(row) for row in result.rows} == set(expected)
 
 
+@pytest.mark.parametrize("duplicate", [False, True], ids=["opposite-paths", "repeated-source"])
+def test_service_two_bound_dimensions_keep_complete_key_and_slot_order(warehouse, duplicate):
+    paths = {"revenue": "buyer__country", "refunds": "seller__country"}
+    client, body, common, per_metric = prepare(warehouse, time=True, metric_paths=paths)
+    counterpart_paths = paths if duplicate else {"revenue": "seller__country", "refunds": "buyer__country"}
+    body["groupBy"].append({"name": "counterparty", "bindings": {
+        metric: {"optionId": next(key for key, option in per_metric[metric].items() if option.token == token)}
+        for metric, token in counterpart_paths.items()
+    }})
+    result = client.query(resolve_query_bindings(MetricQueryRequest.model_validate(body), common, per_metric))
+    assert [column.name for column in result.columns] == [
+        "country", "metric_time__month", "counterparty", "revenue", "refunds",
+    ]
+    january, february = "2024-01-01T00:00:00", "2024-02-01T00:00:00"
+    expected = (
+        {("CN", january, "CN", 30, None), ("US", january, "US", None, 1),
+         ("JP", january, "JP", None, 2), ("US", february, "US", 40, None),
+         ("DE", february, "DE", None, 4), (None, february, None, 30, 3)}
+        if duplicate else
+        {("CN", january, "US", 10, None), ("CN", january, "JP", 20, None),
+         ("US", january, "CN", None, 1), ("JP", january, "CN", None, 2),
+         ("US", february, "DE", 40, None), ("DE", february, "US", None, 4),
+         (None, february, None, 30, 3)}
+    )
+    assert len(result.rows) == len(expected)
+    assert {tuple(row) for row in result.rows} == expected
+
+
+def test_service_shared_in_filter_targets_source_not_public_output(warehouse):
+    client, body, common, per_metric = prepare(
+        warehouse, time=True, metric_paths={"revenue": "buyer__country", "refunds": "seller__country"},
+    )
+    buyer_option = next(key for key, option in common.items() if option.token == "buyer__country")
+    body["filters"] = [{"optionId": buyer_option, "operator": "IN", "value": ["CN", "US"]}]
+    result = client.query(resolve_query_bindings(MetricQueryRequest.model_validate(body), common, per_metric))
+    january, february = "2024-01-01T00:00:00", "2024-02-01T00:00:00"
+    assert [column.name for column in result.columns] == ["country", "metric_time__month", "revenue", "refunds"]
+    # Seller JP/DE remain: the predicate applies to the source buyer, not the final country alias.
+    assert len(result.rows) == 5
+    assert {tuple(row) for row in result.rows} == {
+        ("CN", january, 30, None), ("US", january, None, 1), ("JP", january, None, 2),
+        ("US", february, 40, None), ("DE", february, None, 4),
+    }
+
+
 def test_executor_uses_single_metric_options_and_shared_time_filter(warehouse, settings, monkeypatch):
     project, content = warehouse
     _, body, common, _ = prepare(warehouse, time=True)
