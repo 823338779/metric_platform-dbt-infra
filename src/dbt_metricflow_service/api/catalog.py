@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 
 from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.application.catalog import CatalogService
 
-from ..models.catalog import ResourceView
-from ..models.contracts import JsonObject
+from ..models.catalog import ResourceSummary, ResourceView
+from ..models.contracts import JsonObject, Page
 
 
 def router(service: CatalogService) -> APIRouter:
@@ -19,6 +19,12 @@ def router(service: CatalogService) -> APIRouter:
     @routes.get(strings.ROUTE_BUILD_ID_CATALOG, response_model=list[JsonObject])
     def catalog(build_id: UUID) -> list[JsonObject]:
         return service.list(build_id)
+
+    @routes.get(strings.ROUTE_BUILD_ID_CATALOG + "/search")
+    def search(build_id: UUID, keyword: str | None = None, resourceId: str | None = None,
+               resourceType: str | None = None, cursor: str | None = None,
+               limit: int = Query(default=50, ge=1, le=200)) -> Page[ResourceSummary]:
+        return service.search(build_id, keyword, resourceId, resourceType, cursor, limit)
 
     @routes.get(strings.ROUTE_BUILD_ID_LINEAGE, response_model=list[JsonObject])
     def lineage(build_id: UUID, selector: str) -> list[JsonObject]:

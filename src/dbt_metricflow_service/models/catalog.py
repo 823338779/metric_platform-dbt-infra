@@ -12,6 +12,15 @@ class ResourceSourceView(Contract):
     content: str = Field(description="封存源码正文")
 
 
+class ResourceSummary(Contract):
+    resource_id: str
+    name: str
+    label: str | None = None
+    description: str
+    resource_type: str
+    query_name_unique: bool | None = None
+
+
 class ResourceView(Contract):
     """统一资源读取响应；原生字段完整保留在 resource 内。"""
 
