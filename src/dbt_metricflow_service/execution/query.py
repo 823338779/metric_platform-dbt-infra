@@ -11,6 +11,7 @@ from metricflow_semantics.errors.error_classes import DimensionValueMappingError
 
 from dbt_metricflow_service import constants as strings
 
+from ..application.catalog import RETIRED_OUTPUT_MESSAGE
 from ..application.errors import ServiceError
 from ..application.query_bindings import resolve_query_bindings
 from ..application.query_plan import compile_query, resolve_dimensions
@@ -31,6 +32,16 @@ from .environment import build_engine_environment
 from .workspace import materialized_workspace
 
 
+def _output_set(build: StoredBuild) -> str:
+    # 每次读取任务最新持久引用，清理后的查询在进入引擎前返回明确的产物错误。
+    if not build.output_set_id:
+        if build.build_status == strings.SUCCEEDED:
+            raise ServiceError(strings.ARTIFACT_UNAVAILABLE, RETIRED_OUTPUT_MESSAGE, 410, build_id=build.build_id)
+        raise ServiceError(strings.ARTIFACT_UNAVAILABLE, "sealed build output is unavailable", 503,
+                           build_id=build.build_id)
+    return build.output_set_id
+
+
 class QueryExecutor:
     def __init__(self, settings: Settings, artifacts: ArtifactStore) -> None:
         self.settings = settings
@@ -40,7 +51,7 @@ class QueryExecutor:
         def invoke() -> DimensionQueryResult:
             try:
                 # 每次请求直接读取该构建封存的 Manifest，不还原工程或生成 profile。
-                manifest = ManifestCapture.read(self.artifacts, build.output_set_id)
+                manifest = ManifestCapture.read(self.artifacts, _output_set(build))
                 return MetricFlowClient(manifest).available_dimensions(metrics)
             except ServiceError:
                 raise
@@ -90,7 +101,7 @@ class QueryExecutor:
     def _engine_context(self, build: StoredBuild, manifest: bytes | None = None) -> Iterator[tuple[bytes, Path, Path]]:
         try:
             with materialized_workspace(
-                self.artifacts, build.output_set_id, self.settings.temp_root, str(uuid4()), str(uuid4()),
+                self.artifacts, _output_set(build), self.settings.temp_root, str(uuid4()), str(uuid4()),
             ) as project:
                 with materialized_profile(build.config_snapshot, self.settings.temp_root,
                                           self.settings, project) as profiles:

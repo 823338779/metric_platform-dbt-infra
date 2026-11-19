@@ -17,8 +17,9 @@ from dbt_metricflow_service.models.deployments import DeploymentKey
 from dbt_metricflow_service.storage.postgres import Database
 from dbt_metricflow_service.storage.records import StoredBuild, StoredDeploymentAttempt, StoredDeploymentTarget
 
-from .entities import Build, DeploymentAttempt, DeploymentTarget, RuntimeJob
+from .entities import ArtifactSet, Build, DeploymentAttempt, DeploymentTarget, RuntimeJob
 from .paging import HISTORY_CURSOR_VERSION, read_cursor, write_cursor
+from .retention import PENDING_STATUSES, retain_deployment
 from .rows import entity_record
 
 INVALID_CURSOR_IDENTITY_MESSAGE: Final = "invalid cursor identity"
@@ -37,7 +38,7 @@ TARGET_OR_BUILD_CHANGED = strings.TARGET_OR_BUILD_CHANGED
 MATCHED = strings.MATCHED
 MISSING = strings.MISSING
 TERMINAL = frozenset({DEPLOYED, STALE, strings.FAILED, strings.CANCELLED})
-PENDING_STATUSES = (WAITING_FOR_BUILD, PENDING, CHECKING)
+MISSING_ACTIVE_DEPLOYMENT: Final = "environment has no successful active deployment with sealed output"
 
 
 def _natural(
@@ -137,8 +138,7 @@ class DeploymentStore:
             target.source_state = state
             # 每次有效观察都有新版本，旧 Git 读取不能覆盖新观察或用于结算。
             target.version += 1
-            if state == MISSING:
-                target.active_build_id = None
+            # 分支消失只使未完成意图过期；最后成功的环境版本仍可使用。
             session.flush()
             if state == MISSING:
                 _stale(session, natural(key))
@@ -181,6 +181,7 @@ class DeploymentStore:
                 ):
                     status, reason = STALE, TARGET_OR_BUILD_CHANGED
                 else:
+                    retain_deployment(session, key.environment, build.build_id)
                     target.active_build_id = build.build_id
                     target.version += 1
                     target.source_state = MATCHED
@@ -193,6 +194,25 @@ class DeploymentStore:
                 attempt.deployed_at = func.clock_timestamp()
             session.flush()
             return entity_record(attempt, StoredDeploymentAttempt)
+
+    def retain_current(self, environment: str) -> str:
+        # 存量清理只选择仍有活动指针、成功部署记录及封存输出的最新版本。
+        with self.db.fact_session() as session:
+            winner = session.scalar(select(Build.build_id)
+                .join(DeploymentTarget, DeploymentTarget.active_build_id == Build.build_id)
+                .join(DeploymentAttempt, DeploymentAttempt.build_id == Build.build_id)
+                .join(ArtifactSet, ArtifactSet.set_id == Build.output_set_id)
+                .where(Build.environment_id == environment, DeploymentTarget.environment == environment,
+                       DeploymentAttempt.environment == environment,
+                       DeploymentAttempt.repository == DeploymentTarget.repository,
+                       DeploymentAttempt.branch_name == DeploymentTarget.branch_name,
+                       DeploymentAttempt.deployment_status == DEPLOYED, DeploymentAttempt.deployed_at.is_not(None),
+                       Build.build_status == SUCCEEDED, ArtifactSet.state == strings.SEALED)
+                .order_by(DeploymentAttempt.deployed_at.desc(), Build.build_id.desc()).limit(1))
+            if winner is None:
+                raise ValueError(MISSING_ACTIVE_DEPLOYMENT)
+            retain_deployment(session, environment, winner)
+            return winner
 
     def pending(self) -> list[StoredDeploymentAttempt]:
         with self.db.session() as session:

@@ -92,10 +92,11 @@ class DeploymentService:
         # 部署记录的外键保证引用构建存在；构建历史不会被物理清理删除。
         build = cast(StoredBuild, self.builds.get(attempt.build_id))
         status = build.build_status
-        if status in {strings.FAILED, strings.CANCELLED}:
-            return attempt_view(
-                cast(StoredDeploymentAttempt, self.store.settle(key, generation, status, strings.BUILD_ + status))
-            )
+        if status in {strings.FAILED, strings.CANCELLED, strings.OUTCOME_UNKNOWN}:
+            # 外部结果未知的构建已终结，部署记为失败；未停止执行仍由租约记录保护。
+            deployment_status = strings.FAILED if status == strings.OUTCOME_UNKNOWN else status
+            settled = self.store.settle(key, generation, deployment_status, strings.BUILD_ + status)
+            return attempt_view(cast(StoredDeploymentAttempt, settled))
         if status != strings.SUCCEEDED:
             return attempt_view(attempt)
         try:

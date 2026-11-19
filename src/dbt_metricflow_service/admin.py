@@ -17,6 +17,7 @@ from dbt_metricflow_service.models.contracts import JsonObject
 from dbt_metricflow_service.platform.bindings import PROJECT_NAME_PATTERN
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
+from dbt_metricflow_service.storage.deployments import DeploymentStore
 from dbt_metricflow_service.storage.jobs import JobStore
 from dbt_metricflow_service.storage.postgres import Database
 from dbt_metricflow_service.storage.rows import row_record
@@ -33,6 +34,8 @@ DATABASE_URL_REQUIRED: Final[str] = "SERVICE_DATABASE_URL is required"
 INVALID_GC_OPTIONS: Final[str] = "GC age and limit are invalid"
 
 
+RETAIN_DEPLOYMENT = "retain-deployment"
+ENVIRONMENT_OPTION = "--environment"
 INIT_DB = "init-db"
 RECONCILE = strings.ADMIN_RECONCILE_ATTEMPT_COMMAND
 GC = "gc"
@@ -53,6 +56,11 @@ class InitializationResult(ConfigurationModel):
 
 class ReconciliationResult(ConfigurationModel):
     confirmed: bool
+
+
+class RetentionResult(ConfigurationModel):
+    # 本次保留的已部署构建身份。
+    build_id: UUID
 
 
 class GarbageCollectionResult(ConfigurationModel):
@@ -99,6 +107,8 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=ADMIN_DESCRIPTION)
     commands = parser.add_subparsers(dest=strings.ADMIN_COMMAND_DESTINATION, required=True)
     commands.add_parser(INIT_DB)
+    retention = commands.add_parser(RETAIN_DEPLOYMENT)
+    retention.add_argument(ENVIRONMENT_OPTION, type=UUID, required=True)
     build = commands.add_parser(BUILD)
     build.add_argument(strings.ADMIN_FILE_OPTION, type=Path, required=True)
     reconcile = commands.add_parser(RECONCILE)
@@ -130,6 +140,8 @@ def main(argv: list[str] | None = None) -> None:
                                        settings)
                 request = BuildRequest.model_validate(_json(args.file, settings.max_artifact_file_bytes))
                 result = service.submit(request, strings.ADMIN_IDENTITY)
+            elif args.command == RETAIN_DEPLOYMENT:
+                result = RetentionResult(build_id=UUID(DeploymentStore(db).retain_current(str(args.environment))))
             elif args.command == RECONCILE:
                 result = ReconciliationResult(confirmed=reconcile_attempt(
                     db, args.attempt_id, confirm_external_stopped=args.confirm_external_stopped,

@@ -25,6 +25,10 @@ def observation_store(monkeypatch):
         def scalar(self, statement):
             return build
 
+        def scalars(self, statement):
+            # No historical jobs in this observation-only fixture.
+            return SimpleNamespace(all=lambda: [])
+
         def execute(self, statement):
             return None
 

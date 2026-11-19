@@ -21,6 +21,7 @@ from dbt_metricflow_service.models.native import NativePackages, NativeProject
 from dbt_metricflow_service.storage.entities import (
     ArtifactFile,
     ArtifactSet,
+    Build,
     RuntimeAttempt,
     RuntimeJob,
     RuntimeProject,
@@ -391,22 +392,28 @@ class ArtifactStore:
         # 引用外键与集合行锁共同阻止 GC 删除正在发布或仍被任务引用的版本。
         try:
             with self.database.session() as session:
-                if session.get(ArtifactSet, set_id, with_for_update=True) is None:
-                    return False
-                referenced = or_(
-                    exists().where(or_(RuntimeJob.input_set_id == set_id, RuntimeJob.output_set_id == set_id)),
-                    exists().where(RuntimeProject.source_set_id == set_id),
-                    exists().where(ArtifactSet.source_set_id == set_id),
-                    exists().where(RuntimeAttempt.attempt_id == ArtifactSet.producer_attempt_id,
-                                   ArtifactSet.set_id == set_id, RuntimeAttempt.state.in_(LIVE_ATTEMPT_STATES)),
-                )
-                if session.scalar(select(referenced)):
-                    return False
-                session.execute(update(ArtifactSet).where(ArtifactSet.set_id == set_id).values(state=DELETING))
-                session.execute(delete(ArtifactFile).where(ArtifactFile.set_id == set_id))
-                session.execute(delete(ArtifactSet).where(ArtifactSet.set_id == set_id))
-                return True
+                return self.delete_in_transaction(session, set_id)
         except IntegrityError as error:
             if error.orig.pgcode == strings.POSTGRES_FOREIGN_KEY_VIOLATION:
                 return False
             raise
+
+    @staticmethod
+    def delete_in_transaction(session: Session, set_id: str) -> bool:
+        # 同一事务持有集合锁并检查所有引用，调用方决定提交边界。
+        if session.get(ArtifactSet, set_id, with_for_update=True) is None:
+            return False
+        referenced = or_(
+            exists().where(Build.output_set_id == set_id),
+            exists().where(or_(RuntimeJob.input_set_id == set_id, RuntimeJob.output_set_id == set_id)),
+            exists().where(RuntimeProject.source_set_id == set_id),
+            exists().where(ArtifactSet.source_set_id == set_id),
+            exists().where(RuntimeAttempt.attempt_id == ArtifactSet.producer_attempt_id,
+                           ArtifactSet.set_id == set_id, RuntimeAttempt.state.in_(LIVE_ATTEMPT_STATES)),
+        )
+        if session.scalar(select(referenced)):
+            return False
+        session.execute(update(ArtifactSet).where(ArtifactSet.set_id == set_id).values(state=DELETING))
+        session.execute(delete(ArtifactFile).where(ArtifactFile.set_id == set_id))
+        session.execute(delete(ArtifactSet).where(ArtifactSet.set_id == set_id))
+        return True

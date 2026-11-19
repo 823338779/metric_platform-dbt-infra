@@ -133,7 +133,15 @@ dbt 命令通过 `dbtRunner.invoke()` 直接执行，MetricFlow 查询调用 Pyt
 
 同仓库、可信调用方下同幂等键恢复原身份；输入不同返回 409。恢复先于当前实例配置校验，只有新受理请求才校验当前实例。服务 API 不要求令牌或身份校验，无需传递 Authorization 请求头。新键同 SHA 产生新构建。构建成功与部署成功独立，`initialDeployment` 描述随构建附带的意图。
 
-`ON_SUCCESS` 受理时即分配 generation；较新意图即使失败，也不会恢复较旧待处理意图。部署意图仅由 `POST /builds` 的 `deploymentPolicy=ON_SUCCESS` 创建；需要再次部署时提交新构建。目标自然键是 repository/environmentId/branchName。每次有效远端观察递增目标 version，切换事务同时核对观察版本、head、状态与构建可用性；过期观察保持意图待协调，真实 ref 消失停用指针，网络失败只标记 UNKNOWN。
+`ON_SUCCESS` 受理时即分配 generation；较新意图即使失败，也不会恢复较旧待处理意图。部署意图仅由 `POST /builds` 的 `deploymentPolicy=ON_SUCCESS` 创建；需要再次部署时提交新构建。目标自然键是 repository/environmentId/branchName。每次有效远端观察递增目标 version，切换事务同时核对观察版本、head、状态与构建可用性；过期观察保持意图待协调，真实 ref 消失标记 MISSING 并使待处理意图过期，网络失败标记 UNKNOWN。最近一次成功部署的活动指针保留至下一次成功切换。
+
+每个 environmentId 跨仓库、跨分支保留一个成功部署。新部署成功切换时，同一事务清除其他目标的活动指针，并回收该环境其余已终结构建的独占源码和执行产物。设置 `deploymentPolicy=NONE` 的构建可在下次成功切换前使用。待部署、运行中及执行尚未确认停止的任务保留其产物。清理保留共享快照、构建记录、部署历史、执行日志和目标数据库对象；历史构建的 `catalogAvailable` 变为 false，使用该构建读取目录、血缘、维度或查询会返回 HTTP 410 和 `ARTIFACT_UNAVAILABLE`。
+
+存量环境可运行以下命令。命令在当前服务数据库中，从该环境仍有效且有封存产物的活动指针中按部署时间选择最新成功版本，返回保留的 buildId，可重复执行。
+
+```powershell
+uv run --frozen dbt-service-admin retain-deployment --environment <环境UUID>
+```
 
 构建还原完整工程并生成临时 profile，只执行一次 `dbt build`，直接持久化该次调用返回的内存 Manifest。解析、编译、宏、schema/alias、物化、hook 和模型测试均遵循 dbt 原生行为；服务不再注入宏或预先校验模板、SQL、目标及结果，不运行独立的 parse、compile、source freshness、docs generate 或 MetricFlow 查询探测。成功仅表示 dbt build 成功。
 

@@ -24,7 +24,7 @@ from .results import check_result_size
 
 INCOMPLETE_CATALOG_MESSAGE: Final = "complete catalog is not available"
 RESOURCE_BUILD_CONFLICT_MESSAGE: Final = "resource does not belong to this build"
-UNAVAILABLE_CATALOG_MESSAGE: Final = "sealed manifest is unavailable"
+RETIRED_OUTPUT_MESSAGE: Final = "sealed build output has been retired"
 UNAVAILABLE_SOURCE_MESSAGE: Final = "sealed source is unavailable"
 UNREADABLE_CATALOG_MESSAGE: Final = "sealed manifest cannot be read"
 
@@ -56,7 +56,7 @@ class CatalogService:
         if build.build_status != strings.SUCCEEDED:
             raise ServiceError(strings.CATALOG_NOT_READY, INCOMPLETE_CATALOG_MESSAGE, 409)
         if not build.output_set_id:
-            raise ServiceError(strings.ARTIFACT_UNAVAILABLE, UNAVAILABLE_CATALOG_MESSAGE, 503)
+            raise ServiceError(strings.ARTIFACT_UNAVAILABLE, RETIRED_OUTPUT_MESSAGE, 410, build_id=build.build_id)
         try:
             manifest = ManifestCapture.read(self.artifacts, build.output_set_id)
         except (ValueError, KeyError) as error:
