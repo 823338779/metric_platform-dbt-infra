@@ -237,6 +237,7 @@ class JobStore:
             raise StoreConflict(PROJECT_CHANGED_MESSAGE)
         if input_set_id is None and parent:
             input_set_id = parent.output_set_id
+        # 队列保存本次显式传入的执行参数，worker 可在服务重启后按这份快照继续取源码、准备 profile。
         safe_request = request_json.model_dump(
             mode=strings.JSON_MODE, by_alias=True,
             exclude=set(JobRequest.model_fields) - request_json.model_fields_set,
@@ -277,6 +278,7 @@ class JobStore:
             raise ValueError(UNPUBLISHED_PARENT_MESSAGE)
         if write and project.busy_job_id is not None:
             raise ProjectBusy(strings.PROJECT_BUSY)
+        # 数据库默认任务状态为 QUEUED。受理事务提交后，匹配配置版本和工具链的 worker 即可领取。
         job = RuntimeJob(
             job_id=str(job_id or uuid4()),
             project_id=project_id,

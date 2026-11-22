@@ -100,6 +100,7 @@ class DeploymentService:
             return attempt_view(cast(StoredDeploymentAttempt, settled))
         if status != strings.SUCCEEDED:
             return attempt_view(attempt)
+        # 先确认成功构建的封存目录仍可读，再把当前远端分支与构建固定的提交进行比较。
         try:
             self.catalogs.read_build(build)
         except ServiceError as error:
@@ -108,6 +109,7 @@ class DeploymentService:
             )
         current = cast(StoredDeploymentTarget, self._observe(key))
         if current.source_state == strings.UNKNOWN:
+            # 本轮无法确认远端状态，保留意图等待下轮核对；已确认分支偏离构建提交时才按过期处理。
             return attempt_view(attempt)
         if current.observed_head_sha != build.commit_sha:
             return attempt_view(
@@ -119,6 +121,7 @@ class DeploymentService:
                     ),
                 )
             )
+        # 提交切换时再次校验部署序号、目标版本和分支观察值，避免覆盖观察期间出现的新决定。
         return attempt_view(
             cast(StoredDeploymentAttempt, self.store.settle(
                 key, generation, strings.DEPLOYED, expected_version=current.version, head=current.observed_head_sha

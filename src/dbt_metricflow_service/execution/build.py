@@ -63,10 +63,12 @@ class BuildExecutor:
         from ..platform.execution_profile import materialized_profile
         from ..storage.execution_targets import ExecutionTargetStore
         targets = ExecutionTargetStore(self.jobs.db)
+        # 写入前申请物理目标的执行权；其他任务正在占用时保持本任务租约，待目标释放再继续。
         while not await run_in_thread(targets.claim, job.job_id, job.lease_token):
             if not await run_in_thread(self.jobs.heartbeat, job.job_id, job.lease_token):
                 raise ExecutionError(ERROR_LEASE_LOST)
             await asyncio.sleep(0.25)
+        # 按受理时固定的快照和凭据引用生成临时 dbt profile，限定本次构建实际连接的目标。
         profile = materialized_profile(raw, attempt, self.settings, project)
         with profile as profiles:
             return await execute_build(self, job, project, profiles=profiles)
@@ -81,9 +83,11 @@ class BuildExecutor:
 
         body = job.request_json
         if job.input_set_id:
+            # 准备阶段重试可直接恢复已经关联的源码快照，即使远端分支移动也使用同一份源码。
             return job
         builds = BuildStore(self.jobs.db)
         try:
+            # 优先使用指定的提交；只给分支时先查远端 HEAD，并在拉取前把 SHA 固定到构建和任务记录。
             sha = body.commit_sha
             if not sha:
                 sha = await run_in_thread(remote_head, body.repository, body.branch_name, attempt)
@@ -100,6 +104,7 @@ class BuildExecutor:
                     toolchain_version=job.toolchain_version))
             finally:
                 await run_in_thread(shutil.rmtree, directory)
+            # 在租约仍有效时关联源码产物及摘要，重新读取任务以取得后续还原工程所需的 input_set_id。
             if not await run_in_thread(self.jobs.attach_input, job.job_id, job.lease_token, source,
                                      project_digest=digest):
                 raise ExecutionError(ERROR_LEASE_LOST, stopped=True)
@@ -150,6 +155,7 @@ async def execute_build(
 
     def build() -> None:
         with dbt_execution(job.project_id, environment, settings.max_output_bytes, writer.emit) as context:
+            # 执行一次 dbt build，回调采集本次运行的事件；成功后捕获同一次调用生成的 Manifest。
             result = DbtClient().build(
                 project, profiles, target=cast(str, job.profile_binding_id),
                 target_path=project / strings.TARGET_DIRECTORY, callbacks=[context.callback],
@@ -165,6 +171,7 @@ async def execute_build(
         # 取消时串行执行器也会等待引擎退出，之后才关闭日志写入器。
         await run_in_thread(writer.close)
     await run_in_thread(_normalize_artifact_target, project)
+    # 将 Manifest 和工程产物持久化，交给 worker 在任务完成事务中校验并封存。
     output = await run_in_thread(
         capture.persist, executor.artifacts, job.project_id, project,
         producer_attempt_id=job.attempt_id, metadata=executor._metadata(job),

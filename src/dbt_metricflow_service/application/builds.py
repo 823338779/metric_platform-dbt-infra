@@ -36,6 +36,7 @@ class BuildService:
 
     def submit(self, request: BuildRequest, caller: str) -> BuildView:
         try:
+            # 由存储层在确认是新请求后调用目标校验；这样即使实例配置后来被移除，重试仍可找回原构建。
             row = self.store.accept(
                 request, caller, self.toolchain, self.settings.config_version,
                 validate_new=partial(validate_execution_target, settings=self.settings),
@@ -43,8 +44,10 @@ class BuildService:
         except ExecutionConfigurationError as error:
             raise ServiceError(error.code, "execution target is not verified") from error
         except StoreConflict as error:
+            # 物理目标或配置版本冲突保留具体错误码；同一 idempotencyKey 对应不同输入时报告幂等冲突。
             code = str(error) if str(error).startswith(strings.EXECUTION_) else strings.IDEMPOTENCY_CONFLICT
             raise ServiceError(code, str(error), 409) from error
+        # 受理事务已提交。新提交和幂等重试都按 buildId 重读当前状态，并带回关联部署尝试的进度。
         return self.get(row.build_id)
 
     def get(self, build_id: UUID | str) -> BuildView:

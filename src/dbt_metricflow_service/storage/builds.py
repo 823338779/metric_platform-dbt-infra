@@ -61,10 +61,12 @@ class BuildStore:
     ) -> StoredBuild:
         from .deployments import DeploymentStore
 
+        # 将含默认值的完整请求存为快照；用摘要判断同一 idempotencyKey 的两次提交是否具有相同输入。
         body = request.model_dump(mode=JSON_MODE, by_alias=True)
         fingerprint = digest(body)
+        # 执行项目、队列任务、构建记录和可选的部署意图共用这一事务，任一步失败都会一起回滚。
         with self.db.fact_session() as session:
-            # 查旧请求先于读取配置；Git 不在受理路径内。
+            # 对仓库、调用方和 idempotencyKey 的组合加事务锁，串行处理并发重试，再查第一次受理的记录。
             scope = json.dumps([request.repository, caller, request.idempotency_key])
             session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(scope, 0))))
             prior = session.scalar(
@@ -74,17 +76,20 @@ class BuildStore:
                     Build.idempotency_key == request.idempotency_key,
                 )
             )
+            # 如果idempotencyKey重复，那么会直接退出提交任务的流程
             if prior:
+                # 即使首次构建已经结束，相同请求也返回那次构建；输入不同则报冲突，两个分支都不会再次入队。
                 if prior.request_digest != fingerprint:
                     raise StoreConflict(IDEMPOTENCY_INPUT_CONFLICT_MESSAGE)
                 return entity_record(prior, StoredBuild)
+            # 新请求才核对快照的连接目标与服务允许的实例清单，随后固定该构建使用的完整环境配置。
             validate_new(request.execution)
             snapshot = request.execution
             config = snapshot.model_dump(mode=JSON_MODE, by_alias=True)
             environment = str(snapshot.environment_id)
             config_version, schema_name = str(snapshot.config_version), snapshot.schema_name
             profile_target = SNAPSHOT_TARGET
-            # 归属由已有构建快照证明；同版本输入不可变，旧协议目标不明确时保守拒绝重叠。
+            # 按适配器、实例、catalog 和 schema 锁定物理写入目标；已有其他环境使用同一目标时拒绝受理。
             target_key = physical_target_key(snapshot)
             session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(target_key, 0))))
             other = session.scalar(select(Build.build_id).where(
@@ -92,13 +97,14 @@ class BuildStore:
             ).limit(1))
             if other:
                 raise StoreConflict(strings.EXECUTION_TARGET_CONFLICT)
+            # 同一环境的同一 configVersion 必须对应完全相同的快照，避免同一版本指向两套配置。
             version = session.scalar(select(Build).where(
                 Build.environment_id == str(snapshot.environment_id), Build.config_version == config_version,
             ).limit(1))
             if version and version.config_snapshot != config:
                 raise StoreConflict(strings.EXECUTION_SNAPSHOT_CONFLICT)
+            # build_id 供调用方跟踪，run_id 关联 worker 领取的队列任务。每次新构建有独立的内部项目来归集产物。
             build_id, run_id = str(uuid4()), uuid4()
-            # 队列表的 project 列是内部执行容器；每次构建独立，不是公开业务项目。
             project = PROJECT_PREFIX + build_id
             session.add(
                 RuntimeProject(
@@ -107,12 +113,14 @@ class BuildStore:
                     config_version=runtime_config_version,
                 )
             )
+            # 队列操作会立即读取并锁定这个项目，先在当前事务内写入项目行。
             session.flush()
             payload = JobRequest(
                 repository=request.repository, branch_name=request.branch_name, commit_sha=request.commit_sha,
                 execution=request.execution, deployment_policy=request.deployment_policy,
                 idempotency_key=request.idempotency_key, origin=request.origin, build_id=build_id, binding=snapshot,
             )
+            # 保存 worker 执行所需的源码参数和环境快照。队列按服务配置版本及工具链版本匹配 worker。
             job = self.jobs.reserve_in_transaction(
                 session,
                 project,
@@ -123,6 +131,7 @@ class BuildStore:
                 profile_binding_id=profile_target,
                 schema_name=schema_name,
             )
+            # 把物理目标记到任务上，供执行阶段协调写入；用 run_id 把公开构建关联到任务的状态与产物。
             session.get(RuntimeJob, job.job_id).physical_target_key = target_key
             build = Build(
                 build_id=build_id,
@@ -145,6 +154,7 @@ class BuildStore:
             session.add(build)
             session.flush()
             row = entity_record(build, StoredBuild)
+            # ON_SUCCESS 在受理时就登记部署顺序。实际切换由后台在构建成功并核对来源后完成。
             if request.deployment_policy == strings.ON_SUCCESS:
                 DeploymentStore(self.db).accept_in_transaction(
                     session,

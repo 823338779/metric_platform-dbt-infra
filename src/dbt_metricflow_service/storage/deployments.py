@@ -66,7 +66,7 @@ class DeploymentStore:
         session: Session,
         build: StoredBuild,
     ) -> StoredDeploymentAttempt:
-        # 自动部署与构建受理共用事务，身份和幂等证据只来自该构建。
+        # 同一仓库、环境和分支共享部署目标。首次提交创建目标，后续提交锁定同一行分配部署序号。
         branch = cast(str, build.branch_name)
         natural_key = (build.repository, build.environment, branch)
         session.execute(
@@ -75,10 +75,12 @@ class DeploymentStore:
             .on_conflict_do_nothing()
         )
         target = session.get(DeploymentTarget, natural_key, with_for_update=True, populate_existing=True)
+        # 按受理顺序淘汰此目标上仍待处理的旧意图，防止先提交、后完成的构建覆盖新的部署决定。
         _stale(session, natural_key)
         target.desired_generation += 1
         target.version += 1
         session.flush()
+        # 新构建从 WAITING_FOR_BUILD 开始。此处只记录关联尝试，当前生效的 buildId 要等部署成功才切换。
         attempt = DeploymentAttempt(
             repository=natural_key[0],
             environment=natural_key[1],

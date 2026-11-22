@@ -72,6 +72,7 @@ class Worker:
             try:
                 await asyncio.to_thread(self.jobs.recover)
                 if self.deployments is not None:
+                    # 部署单独轮询持久化的待处理意图；进程重启后也能继续核对构建结果和远端分支。
                     await asyncio.to_thread(self.deployments.reconcile_pending)
             except (DatabaseError, PoolTimeout, RuntimeError) as error:
                 logger.warning(FAILURE_LOG, type(error).__name__)
@@ -80,6 +81,7 @@ class Worker:
     async def _slot(self) -> None:
         while not self._stopping:
             try:
+                # 从已提交的队列中领取与本实例兼容的任务。claim 返回本次尝试的租约，后续状态写入都要核对它。
                 job = await asyncio.to_thread(
                     self.jobs.claim, str(self.instance_id),
                     toolchain_version=self.toolchain,
@@ -94,11 +96,12 @@ class Worker:
             await asyncio.sleep(POLL_SECONDS)
 
     async def _execute(self, job: LeasedJob) -> None:
+        # 构建期间并行续租；心跳确认失去执行权时会取消执行，防止旧 worker 提交结果。
         execution = asyncio.create_task(self.executor.execute(job))
         heartbeat = asyncio.create_task(self._heartbeat(job, execution))
         try:
             result = await execution
-            # 只封存产物并提交任务状态，不保存通用结果或成功诊断副本。
+            # finish 在同一事务中封存产物并完成任务；engine_sync_job 触发器把状态和产物 ID 同步到公开构建记录。
             await asyncio.to_thread(
                 self.jobs.finish, job.job_id, job.lease_token,
                 output_set_id=result.output_set_id, seal=self.artifacts.seal,
