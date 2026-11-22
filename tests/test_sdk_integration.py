@@ -1,4 +1,5 @@
 import asyncio
+import json
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -96,6 +97,9 @@ def test_real_build_and_all_http_operations(database, settings, build_request, t
     # A stale lease cannot publish; the proper lease seals and publishes the same output.
     assert not jobs.finish(leased.build_id, uuid4(), output_set_id=result.output_set_id, seal=artifacts.seal)
     assert jobs.finish(leased.build_id, leased.lease_token, output_set_id=result.output_set_id, seal=artifacts.seal)
+    saved = json.loads(artifacts.read_file(result.output_set_id, "target/manifest.json"))
+    assert "exposures" not in saved
+    assert "constraints" not in saved["nodes"]["model.api_review.orders"]
     view = client.get(f"/builds/{build_id}").json()
     assert view["buildStatus"] == "SUCCEEDED"
     assert view["catalogAvailable"] is True

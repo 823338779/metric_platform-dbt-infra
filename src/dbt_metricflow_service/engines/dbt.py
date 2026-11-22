@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from functools import cached_property
+from itertools import chain
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -24,6 +25,7 @@ from dbt_metricflow_service.engines.models import DataQueryResult
 from dbt_metricflow_service.engines.results import json_cell
 from dbt_metricflow_service.models.contracts import JsonObject
 from dbt_metricflow_service.models.queries import ResultColumn
+from dbt_metricflow_service.platform.manifest_capture import MANIFEST_MAPS, SPARSE_EDGE_MAPS
 
 if TYPE_CHECKING:
     from dbt_common.events.base_types import EventMsg
@@ -52,7 +54,25 @@ class DbtClient:
     def _artifact(self) -> WritableManifest:
         if self._content is None:
             raise ValueError(MANIFEST_REQUIRED_MESSAGE)
-        return WritableManifest.from_dict(json.loads(self._content))
+        payload = json.loads(self._content)
+        # 顶层空映射在入库时省略；资源内部的缺省字段由 dbt 自己还原。
+        for key in MANIFEST_MAPS:
+            payload.setdefault(key, {})
+        sparse_edges = payload.pop(SPARSE_EDGE_MAPS, False)
+        artifact = WritableManifest.from_dict(payload)
+        if sparse_edges is True:
+            # 与 dbt v12 的 build_parent_and_child_maps 使用同一组资源；保留已存的非空边。
+            for resource_id in chain(artifact.nodes, artifact.sources, artifact.exposures, artifact.functions,
+                                     artifact.metrics, artifact.semantic_models, artifact.saved_queries,
+                                     artifact.unit_tests):
+                if artifact.parent_map is not None:
+                    artifact.parent_map.setdefault(resource_id, [])
+                if artifact.child_map is not None:
+                    artifact.child_map.setdefault(resource_id, [])
+            if artifact.group_map is not None:
+                for group in artifact.groups.values():
+                    artifact.group_map.setdefault(group.name, [])
+        return artifact
 
     @cached_property
     def _manifest(self) -> Manifest:
