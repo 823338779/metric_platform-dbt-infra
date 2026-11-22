@@ -165,7 +165,7 @@ uv run --frozen dbt-service-admin build --file build-request.json
 | --- | --- |
 | `GET /builds`、`GET /builds/{buildId}` | environmentId 必填，repository/branchName/buildStatus 可选；固定身份读取 |
 | `GET /builds/{buildId}/execution-logs` | 按构建增量读取结构化 dbt 详细日志，支持 cursor、limit；[前端对接说明](docs/build-execution-logs-api.md) |
-| `GET /deployments/current`、`GET /deployments` | 自然键当前观察、意图历史 |
+| `GET /deployments/current`、`GET /deployments` | 自然键当前部署、意图历史。current 默认直接读取生效指针及最近一次来源观察；仅显式传入 `refreshSource=true` 时联机刷新远端分支状态。 |
 | `GET /builds/{buildId}/catalog` | 通过 dbt ls 返回模型、指标、语义模型等原生资源数组 |
 | `GET /builds/{buildId}/resources/{resourceId}` | 一次返回原生节点 resource 与源码文件 source，不提供 view 入参或独立 /source 路由 |
 | `GET /builds/{buildId}/lineage?selector=...` | 用 dbt 原生 selector 查询血缘，返回 `dbt ls --output json` 的节点数组 |

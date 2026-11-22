@@ -67,8 +67,9 @@ class DeploymentService:
         # 已受理目标没有删除路径；并发观察最多改变其版本和指针。
         return observed or self.store.current(key)
 
-    def current(self, key: DeploymentKey) -> DeploymentTargetView:
-        target = self._observe(key)
+    def current(self, key: DeploymentKey, *, refresh_source: bool = False) -> DeploymentTargetView:
+        # 部署指针始终读事实库，只有主动刷新来源时才联机观察 Git。
+        target = self._observe(key) if refresh_source else self.store.current(key)
         if target is None:
             return DeploymentTargetView(**key.model_dump())
         active = self.builds.get(target.active_build_id) if target.active_build_id else None

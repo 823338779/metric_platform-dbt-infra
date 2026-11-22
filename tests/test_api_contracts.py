@@ -97,6 +97,25 @@ def test_openapi_describes_modes_and_system_responses(api):
         assert paths[path]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
 
 
+@pytest.mark.parametrize("params,observations", [({}, 0), ({"refreshSource": "false"}, 0),
+                                                ({"refreshSource": "true"}, 1)])
+def test_current_reads_authoritative_pointer_without_implicit_git(api, monkeypatch, params, observations):
+    client, _, _ = api
+    target = SimpleNamespace(repository="repo", environment=ENVIRONMENT, branch_name="main", version=3,
+                             desired_generation=1, active_build_id=BUILD_ID, observed_head_sha="a" * 40,
+                             head_observed_at=datetime.now(UTC), source_state="AHEAD")
+    monkeypatch.setattr("dbt_metricflow_service.storage.deployments.DeploymentStore.current", lambda *_: target)
+    monkeypatch.setattr("dbt_metricflow_service.storage.deployments.DeploymentStore.attempt", lambda *_: None)
+    observe = Mock(return_value=target)
+    monkeypatch.setattr("dbt_metricflow_service.application.deployments.DeploymentService._observe", observe)
+    response = client.get("/deployments/current", params={"repository": "repo", "environmentId": ENVIRONMENT,
+                                                          "branchName": "main", **params})
+    assert response.status_code == 200, response.text
+    assert response.json()["activeBuildId"] == BUILD_ID
+    assert response.json()["observedHeadSha"] == "a" * 40
+    assert observe.call_count == observations
+
+
 @pytest.mark.parametrize("path", ["", "/catalog", "/resources/model.orders", "/lineage?selector=orders",
                                   "/execution-logs"])
 def test_missing_build_errors(api, path):
