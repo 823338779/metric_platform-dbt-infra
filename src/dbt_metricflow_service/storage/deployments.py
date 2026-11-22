@@ -17,7 +17,7 @@ from dbt_metricflow_service.models.deployments import DeploymentKey
 from dbt_metricflow_service.storage.postgres import Database
 from dbt_metricflow_service.storage.records import StoredBuild, StoredDeploymentAttempt, StoredDeploymentTarget
 
-from .entities import ArtifactSet, Build, DeploymentAttempt, DeploymentTarget, RuntimeJob
+from .entities import ArtifactSet, Build, DeploymentAttempt, DeploymentTarget
 from .paging import HISTORY_CURSOR_VERSION, read_cursor, write_cursor
 from .retention import PENDING_STATUSES, retain_deployment
 from .rows import entity_record
@@ -89,7 +89,6 @@ class DeploymentStore:
             build_id=build.build_id,
             caller=build.caller,
             idempotency_key=BUILD_KEY_PREFIX + build.build_id,
-            request_digest=build.request_digest,
             deployment_status=PENDING if build.build_status == SUCCEEDED else WAITING_FOR_BUILD,
             operation=BUILD_OPERATION,
         )
@@ -169,13 +168,7 @@ class DeploymentStore:
                     # 观察过期不终结部署意图，下一轮用最新观察重新协调。
                     return entity_record(attempt, StoredDeploymentAttempt)
             if status == DEPLOYED:
-                build = session.scalar(
-                    select(Build)
-                    .join(RuntimeJob, Build.run_id == RuntimeJob.job_id)
-                    .where(Build.build_id == attempt.build_id)
-                    .with_for_update(of=(RuntimeJob, Build))
-                )
-                # 同一事实事务中核对当前观察，并锁定构建与执行记录。
+                build = session.get(Build, attempt.build_id, with_for_update=True)
                 if (
                     build.build_status != SUCCEEDED
                     or not build.output_set_id

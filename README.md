@@ -105,7 +105,6 @@ dbt 命令通过 `dbtRunner.invoke()` 直接执行，MetricFlow 查询调用 Pyt
 | `SERVICE_DATABASE_URL` | PostgreSQL 元数据库；必需 |
 | `EXECUTION_INSTANCES` / `EXECUTION_CREDENTIALS` | 可信物理实例清单和数据库账号、密码 |
 | `SERVICE_TEMP_ROOT` | 可丢弃执行目录 |
-| `SERVICE_CONFIG_VERSION` | 本 worker 可执行的配置版本，默认 1 |
 | `SERVICE_TOOLCHAIN_VERSION` | 工具链标识；默认按依赖版本及源码计算 |
 | `WORKER_CONCURRENCY` | 执行槽位，默认 2 |
 | `JOB_LEASE_SECONDS` / `JOB_HEARTBEAT_SECONDS` | 默认 90 / 15 秒 |
@@ -120,18 +119,20 @@ dbt 命令通过 `dbtRunner.invoke()` 直接执行，MetricFlow 查询调用 Pyt
 ```json
 {"repository":"https://git.example.com/data/sales.git","branchName":"feature/orders",
  "commitSha":"0123456789012345678901234567890123456789",
- "execution":{"environmentId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","configVersion":1,
+ "execution":{"environmentId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
    "connection":{"type":"starrocks","instanceId":"warehouse","host":"localhost","port":9030},
    "credentialRef":"warehouse-readwrite","catalog":"default_catalog","schema":"analytics",
    "threads":1,"businessTimezone":"Asia/Shanghai"},
- "deploymentPolicy":"NONE","idempotencyKey":"build-001"}
+ "deploymentPolicy":"NONE","idempotencyKey":"f83dacee-e4df-49b3-a217-c10a7a0f363a"}
 ```
 
 `POST /builds` 在 Git I/O 前原子保存完整请求和持久任务，返回 202。部署策略默认为 NONE。
 环境由 environmentId 标识，不限制分支名称；branchName 必填，commitSha 可选且必须为完整 SHA。
 分支输入在 worker 首次解析后固定 SHA，重试不会跟随最新 head。schema 必须显式提供；构建使用固定 schema 和原表名，后续构建可能覆盖同名表，因此固定 buildId 不表示历史物理数据快照。
 
-同仓库、可信调用方下同幂等键恢复原身份；输入不同返回 409。恢复先于当前实例配置校验，只有新受理请求才校验当前实例。服务 API 不要求令牌或身份校验，无需传递 Authorization 请求头。新键同 SHA 产生新构建。构建成功与部署成功独立，`initialDeployment` 描述随构建附带的意图。
+调用方为每次新构建生成全局唯一的 UUID 作为 `idempotencyKey`。重复提交同一 UUID 会返回首次受理的构建和当前状态，即使仓库、调用方或其他参数发生变化。新 UUID 会重新受理，执行相应的环境校验。服务 API 不要求令牌或身份校验，无需传递 Authorization 请求头。构建成功与部署成功独立，`initialDeployment` 描述随构建附带的意图。
+
+已有服务库升级时，先停止服务和 worker，在目标 schema 执行一次 [global_build_idempotency.sql](src/dbt_metricflow_service/storage/global_build_idempotency.sql)。历史 UUID 保留，旧的非 UUID 键改用该记录的 `buildId`。若多个历史构建对应同一 UUID，迁移会整体回滚；需先为冲突记录分配独立 UUID 再执行。
 
 `ON_SUCCESS` 受理时即分配 generation；较新意图即使失败，也不会恢复较旧待处理意图。部署意图仅由 `POST /builds` 的 `deploymentPolicy=ON_SUCCESS` 创建；需要再次部署时提交新构建。目标自然键是 repository/environmentId/branchName。每次有效远端观察递增目标 version，切换事务同时核对观察版本、head、状态与构建可用性；过期观察保持意图待协调，真实 ref 消失标记 MISSING 并使待处理意图过期，网络失败标记 UNKNOWN。最近一次成功部署的活动指针保留至下一次成功切换。
 
@@ -303,9 +304,9 @@ uv run --frozen ruff check src tests
 `tests/test_api_contracts.py` 使用依赖替身独立检查所有入口和 OpenAPI。
 当前验收不代表已完成真实 StarRocks 或 PostgreSQL 目标仓库的 SQL 集成验证。
 
-## 外部执行快照与环境隔离
+## 外部执行快照与环境配置
 
-环境由指标平台等调用方管理。本服务不提供环境配置 CRUD 或环境注册表；每次 `POST /builds` 必须携带 repository、branchName、idempotencyKey 和完整 execution 快照。execution 包含 environmentId、configVersion、connection、credentialRef、catalog、schema、threads、businessTimezone。branchName 与环境无绑定，main 和 feature 分支使用相同规则。configVersion 是外部版本，worker 匹配仍使用 SERVICE_CONFIG_VERSION。
+环境由指标平台等调用方管理。每次 `POST /builds` 携带 repository、branchName、idempotencyKey 和完整 execution 快照。execution 包含 environmentId、connection、credentialRef、catalog、schema、threads、businessTimezone。每次构建保存自己的快照，worker 按工具链版本领取任务。
 
 `GET /builds` 必须携带 environmentId；可选 repository、branchName、buildStatus、cursor、limit。详情和详细日志位于 `/builds/{buildId}`、`/builds/{buildId}/execution-logs`。阶段、状态、错误码从构建详情读取，旧 `/logs` 接口已删除。`/deployments` 与 `/current` 以 repository/environmentId/branchName 定位部署。目录与查询使用固定 buildId，内部按该 build 的快照创建临时 profile。
 
@@ -323,14 +324,17 @@ EXECUTION_CREDENTIALS:
     password: ""
 ```
 
-账号和密码直接在服务 YAML 的 `EXECUTION_CREDENTIALS` 中填写，不需要凭据环境变量；空密码必须显式填写 `""`。临时 profile 在执行后销毁且不封存，执行日志继续脱敏。实例清单不含环境、catalog/schema；不得为同一物理实例登记多个不同 instanceId，否则无法证明跨别名的物理隔离。
+账号和密码直接在服务 YAML 的 `EXECUTION_CREDENTIALS` 中填写，不需要凭据环境变量；空密码必须显式填写 `""`。临时 profile 在执行后销毁且不封存，执行日志继续脱敏。执行快照通过 instanceId 引用清单中的实例，并指定本次使用的 catalog 和 schema。
 
 StarRocks 的 profile.catalog 指定 catalog，profile.schema 指定 database；profile.database 留空，避免 source 继承后被误识别成外部 catalog。模型的 catalog/database/schema 覆盖由 dbt 与适配器解释，服务不再限制节点必须属于 profile 中的 schema。PostgreSQL 的 catalog 映射为 dbname，DuckDB 的 catalog 必须等于清单中绝对文件路径的文件名（去后缀）。不存在或不可写的外部 catalog 会导致构建失败；不能把更换 catalog 字段当成已验证的适配器写入能力。
 
-物理归属从不可变构建事实核验，已使用的目标不能交给另一环境。构建按请求声明的物理目标串行调度；工程宏额外选择的其他 schema 不单独纳入该锁；租约过期或外部停止情况未知时保留写入保护，直到现有 reconcile 流程确认停止。
+不同环境可以使用相同的实例、catalog 和 schema。同一环境的不同构建可使用不同的执行配置，每个任务凭自己的租约执行。
 
-目标实例与 schema 的归属验证仍由持久构建事实和物理目标锁承担；本次未修改数据库 schema、
-目标隔离及未知写入保护。既有历史环境隔离验收脚本不在当前 checkout 中，不列作本次验证证据。
+已有数据库升级前，停止服务和 worker，在目标服务 schema 执行 [remove_config_versions.sql](src/dbt_metricflow_service/storage/remove_config_versions.sql)。调用方从请求中删除 `execution.configVersion`，服务配置中删除 `SERVICE_CONFIG_VERSION`。
+
+构建重试仅按 `idempotencyKey` 查找。对于仍包含 `engine_build.request_digest` 的数据库，停服后执行 [remove_build_request_digest.sql](src/dbt_metricflow_service/storage/remove_build_request_digest.sql)，移除构建和部署尝试中的请求摘要，并允许新构建任务省略队列指纹。
+
+从含物理目标键的版本升级时，停止服务和 worker，在目标服务 schema 执行 [remove_physical_target_key.sql](src/dbt_metricflow_service/storage/remove_physical_target_key.sql)，然后启动新版。
 
 已移除构建清理任务和 `CLEANING/CLEANED` 生命周期，不再通过清理任务关闭历史查询，也不删除共享数据库对象。构建成功、失败或取消时，等待执行线程退出及日志收尾后，删除本次 attempt 的源码、项目、profile、target 和日志等临时文件，并删除已空的任务目录；共享临时根目录和其他执行中的目录保留。成功构建的产物在清理前持久化，历史查询与日志读取不依赖本地临时目录。存量数据库需停止服务后，在目标服务 schema 的事务内执行 `src/dbt_metricflow_service/storage/remove_run_cleanup.sql`；保留历史记录，未完成的旧清理任务标记为失败。
 
@@ -340,7 +344,7 @@ StarRocks 的 profile.catalog 指定 catalog，profile.schema 指定 database；
 服务执行代码按职责组织，原 `runtime/` 包已移除：
 
 - `bootstrap.py`：依赖组装与服务启停，持有查询执行器和后台 worker。
-- `execution/build.py`：`BuildExecutor` 准备源码、获取目标租约，直接调用 dbt 并保存 Manifest。
+- `execution/build.py`：`BuildExecutor` 准备源码和 profile，调用 dbt 并保存 Manifest。
 - `execution/query.py`：`QueryExecutor` 执行查询、维度获取和血缘查询。
 - `workers/build.py`：任务领取、心跳、停机/失租中断和终态提交；显式接收配置、存储和实例身份。
 - `execution/environment.py`、`workspace.py`、`threads.py`：共用环境、临时目录和取消安全的线程等待。

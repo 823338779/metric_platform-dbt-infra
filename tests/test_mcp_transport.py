@@ -29,6 +29,7 @@ async def test_stdio_discovery_explains_inputs_and_result_fields():
         "get_build": ("buildStatus", "deploymentStatus", "queryAvailability"),
     }
     assert discovered.keys() == result_fields.keys()
+    assert discovered["submit_build"].inputSchema["properties"]["idempotency_key"]["format"] == "uuid"
     for name, fields in result_fields.items():
         tool = discovered[name]
         assert all(field in tool.description for field in fields), name

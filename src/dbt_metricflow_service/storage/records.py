@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from dbt_metricflow_service import constants as strings
 
 from ..execution.models import JobStatus
-from ..models.builds import BuildRequest, DeploymentPolicy, Origin
+from ..models.builds import BuildRequest
 from ..models.contracts import Contract
 from ..models.execution import ExecutionSnapshot
 
@@ -18,25 +18,6 @@ class StoredRecord(BaseModel):
     """数据库列快照；只接受已声明字段，不持有 ORM 会话。"""
 
     model_config = ConfigDict(extra=strings.EXTRA_FORBID, from_attributes=True)
-
-
-class EmptyConfig(StoredRecord):
-    """尚未配置执行绑定的内部项目。"""
-
-
-class JobRequest(Contract):
-    """持久构建任务请求；底层队列测试允许空请求。"""
-
-    repository: str | None = None
-    branch_name: str | None = None
-    commit_sha: str | None = None
-    execution: ExecutionSnapshot | None = None
-    deployment_policy: DeploymentPolicy | None = None
-    idempotency_key: str | None = None
-    origin: Origin | None = None
-    build_id: str | None = None
-    binding: ExecutionSnapshot | None = None
-    project_digest: str | None = None
 
 
 class ValidationCheck(Contract):
@@ -75,25 +56,15 @@ class ArtifactMetadata(StoredRecord):
     source_set_id: str | None = None
     source_commit_sha: str | None = None
     project_digest: str | None = None
-    config_version: str | None = strings.DEFAULT_CONFIG_VERSION
     toolchain_version: str | None = strings.DEFAULT_TOOLCHAIN_VERSION
     format_version: str = strings.ARTIFACT_FORMAT_VERSION
-
-
-class StoredProject(StoredRecord):
-    project_id: str
-    binding_config: ExecutionSnapshot | EmptyConfig
-    config_version: str
-    source_set_id: str | None
-    busy_job_id: str | None
-    revision: int
 
 
 class StoredExecutionLog(StoredRecord):
     """脱离 Session 的执行日志快照；不暴露数据库实体。"""
 
     log_id: int
-    build_id: str | None
+    build_id: str
     job_id: str
     attempt_id: str
     phase: str
@@ -143,23 +114,20 @@ class StoredArtifactFile(ArtifactDigestEntry):
 
 
 class StoredBuild(StoredRecord):
-    """engine_build 完整记录，包含可选的执行生命周期关联列。"""
+    """供构建详情、部署和历史查询使用的构建记录。"""
 
     build_id: str  # 一次构建的公开身份。
-    run_id: str  # 受理构建时原子创建的内部执行任务。
+    project_id: str
+    input_set_id: str | None
+    project_digest: str | None
     repository: str  # 规范仓库地址。
     branch_name: str | None  # 构建来源分支。
     environment: str  # 预览或正式执行环境。
     environment_id: str | None  # 外部环境身份。
-    physical_target_key: str | None  # 完整物理写入目标摘要。
-    config_version: str  # 固定配置版本。
     toolchain_version: str  # 固定引擎工具链版本。
     caller: str  # 可信调用来源。
     idempotency_key: str  # 构建受理幂等键。
-    request_digest: str  # 原请求的规范化摘要。
     request_json: BuildRequest  # 已校验请求。
-    config_snapshot: ExecutionSnapshot  # 固定执行配置，不含凭据。
-    requested_commit_sha: str | None  # 请求显式指定的源码版本。
     commit_sha: str | None  # 实际解析并固定的源码版本。
     build_status: str  # 构建状态，与部署状态独立。
     phase: str  # 当前执行阶段。
@@ -169,6 +137,10 @@ class StoredBuild(StoredRecord):
     created_at: datetime  # 受理时间。
     updated_at: datetime  # 最近更新时间。
     finished_at: datetime | None  # 终态时间。
+
+    @property
+    def config_snapshot(self) -> ExecutionSnapshot:
+        return self.request_json.execution
 
 
 class StoredDeploymentTarget(StoredRecord):
@@ -195,7 +167,6 @@ class StoredDeploymentAttempt(StoredRecord):
     build_id: str  # 本次意图引用的构建。
     caller: str  # 可信调用来源。
     idempotency_key: str  # 本次操作的幂等键。
-    request_digest: str  # 本次请求摘要。
     operation: str  # 历史部署来源；新意图统一由构建创建。
     deployment_status: str  # 部署状态。
     reason: str | None  # 失败或过期原因。
@@ -205,42 +176,17 @@ class StoredDeploymentAttempt(StoredRecord):
     last_checked_at: datetime | None  # 后台最近检查时间。
 
 
-class StoredJob(StoredRecord):
-    """执行任务持久字段；领取后附加的租约信息由 LeasedJob 描述。"""
+class LeasedBuild(StoredRecord):
+    """worker 执行一次尝试所需的固定输入和租约。"""
 
-    physical_target_key: str | None
-    target_claimed: bool
-    idempotency_scope: str | None
-    idempotency_key: str | None
-    attempt_no: int
-    available_at: datetime
-    max_attempts: int
-    retry_policy: str
-    created_at: datetime
-    started_at: datetime | None
-    finished_at: datetime | None
-    job_id: str  # 内部任务身份。
-    project_id: str  # 内部执行容器身份。
-    parent_run_id: str | None  # 历史父任务引用。
-    request_json: JobRequest  # 固定执行请求。
-    request_fingerprint: str  # 幂等请求摘要。
-    status: str  # 执行状态。
-    phase: str  # 执行阶段。
-    input_set_id: str | None  # 固定输入产物。
-    output_set_id: str | None  # 完成后生成的产物。
-    config_version: str  # 固定配置版本。
-    toolchain_version: str  # 固定工具链版本。
-    profile_binding_id: str | None  # 数据仓库配置引用。
-    schema_name: str | None  # 受控物理 schema。
-    current_attempt_id: str | None  # 当前执行尝试身份。
-    error_code: str | None  # 稳定错误码。
-    error_detail: JobErrorDetail | None  # 脱敏错误元数据。
-
-
-class LeasedJob(StoredJob):
-    """已领取或通过租约校验的任务，执行器可以依赖尝试身份。"""
-
-    attempt_id: str  # 领取或租约查询附加的尝试身份。
-    lease_token: str  # 用于 fencing 的租约凭据。
-
-    execution_stage: str = strings.PREPARING
+    build_id: str
+    attempt_id: str
+    lease_token: str
+    project_id: str
+    repository: str
+    branch_name: str | None
+    commit_sha: str | None
+    input_set_id: str | None
+    project_digest: str | None
+    toolchain_version: str
+    execution: ExecutionSnapshot

@@ -57,7 +57,6 @@ class ServiceConfiguration(ConfigurationModel):
     WORKER_CONCURRENCY: ConfigurationScalar = None
     JOB_LEASE_SECONDS: ConfigurationScalar = None
     JOB_HEARTBEAT_SECONDS: ConfigurationScalar = None
-    SERVICE_CONFIG_VERSION: ConfigurationScalar = None
     SERVICE_TOOLCHAIN_VERSION: ConfigurationScalar = None
     MAX_RESULT_BYTES: ConfigurationScalar = None
     MAX_ARTIFACT_FILE_BYTES: ConfigurationScalar = None

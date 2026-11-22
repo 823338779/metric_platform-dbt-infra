@@ -18,10 +18,11 @@ ENVIRONMENT = "00000000-0000-0000-0000-000000000001"
 def api(monkeypatch, settings, build_request):
     now = datetime.now(UTC)
     build = StoredBuild(
-        build_id=BUILD_ID, run_id=str(build_request.execution.environment_id), repository=build_request.repository,
-        branch_name="main", environment=ENVIRONMENT, environment_id=ENVIRONMENT, physical_target_key="target",
-        config_version="1", toolchain_version="test", caller="service", idempotency_key="key", request_digest="digest",
-        request_json=build_request, config_snapshot=build_request.execution, requested_commit_sha="b" * 40,
+        build_id=BUILD_ID, project_id="project", input_set_id="input", project_digest=None, repository=build_request.repository,
+        branch_name="main", environment=ENVIRONMENT, environment_id=ENVIRONMENT,
+        toolchain_version="test", caller="service",
+        idempotency_key=str(build_request.idempotency_key),
+        request_json=build_request,
         commit_sha="b" * 40, build_status="SUCCEEDED", phase="COMPLETE", output_set_id="output", error_code=None,
         version=1, created_at=now, updated_at=now, finished_at=now,
     )
@@ -37,8 +38,6 @@ def api(monkeypatch, settings, build_request):
     monkeypatch.setattr("dbt_metricflow_service.storage.builds.BuildStore.accept", lambda *args, **kwargs: build)
     monkeypatch.setattr("dbt_metricflow_service.storage.builds.BuildStore.list",
                         lambda *args, **kwargs: ([build], None))
-    monkeypatch.setattr("dbt_metricflow_service.storage.jobs.JobStore.get",
-                        lambda *args: SimpleNamespace(input_set_id="input"))
     monkeypatch.setattr("dbt_metricflow_service.storage.deployments.DeploymentStore.initial", lambda *args: None)
     monkeypatch.setattr("dbt_metricflow_service.storage.deployments.DeploymentStore.initials", lambda *args: {})
     monkeypatch.setattr("dbt_metricflow_service.storage.deployments.DeploymentStore.current", lambda *args: None)
@@ -79,6 +78,14 @@ def test_all_http_operations(api, build_request, monkeypatch, method, path, body
         assert key in response.json()
     else:
         assert isinstance(response.json(), list)
+
+
+def test_build_requires_uuid_idempotency_key(api, build_request):
+    client, app, _ = api
+    field = app.openapi()["components"]["schemas"]["BuildRequest"]["properties"]["idempotencyKey"]
+    assert field["format"] == "uuid"
+    body = build_request.model_dump(mode="json", by_alias=True)
+    assert client.post("/builds", json={**body, "idempotencyKey": "build-1"}).status_code == 422
 
 
 def test_openapi_describes_modes_and_system_responses(api):

@@ -62,14 +62,12 @@ async def test_cancel_during_source_resolution_removes_source_directory(settings
         return directory, "digest"
 
     monkeypatch.setattr("dbt_metricflow_service.platform.bindings.resolve_commit", resolve)
-    monkeypatch.setattr("dbt_metricflow_service.storage.builds.BuildStore.pin_source", lambda *args: None)
     job = SimpleNamespace(
-        job_id=str(uuid4()), attempt_id=str(uuid4()), input_set_id=None,
+        build_id=str(uuid4()), commit_sha="b" * 40, attempt_id=str(uuid4()), input_set_id=None,
         project_id="project", profile_binding_id="profile", lease_token="lease",
-        request_json=SimpleNamespace(build_id="build", execution=True, commit_sha="b" * 40,
-                                     repository="repo", branch_name="main"),
+        execution=True, repository="repo", branch_name="main",
     )
-    jobs = SimpleNamespace(db=None, phase=lambda *args: None)
+    jobs = SimpleNamespace(pin_source=lambda *args: None, phase=lambda *args: None)
     executor = BuildExecutor(settings, jobs, None)
     task = asyncio.create_task(executor.execute(job))
     try:
@@ -82,4 +80,4 @@ async def test_cancel_during_source_resolution_removes_source_directory(settings
         with pytest.raises(asyncio.CancelledError):
             await task
     assert not directories[0].exists()
-    assert not (settings.temp_root / job.job_id).exists()
+    assert not (settings.temp_root / job.build_id).exists()

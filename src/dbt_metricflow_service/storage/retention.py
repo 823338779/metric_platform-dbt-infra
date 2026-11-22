@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from dbt_metricflow_service import constants as strings
 
 from .artifacts import LIVE_ATTEMPT_STATES, ArtifactStore
-from .entities import ArtifactSet, Build, DeploymentAttempt, DeploymentTarget, RuntimeAttempt, RuntimeJob
+from .entities import ArtifactSet, Build, DeploymentAttempt, DeploymentTarget, RuntimeAttempt
 
 PENDING_STATUSES: Final = (strings.WAITING_FOR_BUILD, strings.PENDING, strings.CHECKING)
 TERMINAL_BUILDS: Final = (strings.SUCCEEDED, strings.FAILED, strings.CANCELLED, strings.OUTCOME_UNKNOWN)
@@ -21,21 +21,20 @@ def retain_deployment(session: Session, environment: str, winner: str) -> None:
     ).values(active_build_id=None, source_state=strings.UNDEPLOYED, version=DeploymentTarget.version + 1))
 
     # 当前构建、候选部署和仍未确认停止的执行需要其快照，直至成功切换或执行终结。
-    jobs = session.scalars(select(RuntimeJob).join(Build, Build.run_id == RuntimeJob.job_id).where(
+    jobs = session.scalars(select(Build).where(
         Build.environment_id == environment, Build.build_id != winner, Build.build_status.in_(TERMINAL_BUILDS),
-        RuntimeJob.status.in_((strings.SUCCEEDED, strings.FAILED)),
         # 失败终态无法部署；存量 WAITING_FOR_BUILD 不应永久持有已停止任务的输入。
         (Build.build_status != strings.SUCCEEDED) | ~exists().where(
             DeploymentAttempt.build_id == Build.build_id, DeploymentAttempt.deployment_status.in_(PENDING_STATUSES)),
-        ~exists().where(RuntimeAttempt.job_id == RuntimeJob.job_id, RuntimeAttempt.state.in_(LIVE_ATTEMPT_STATES)),
-    ).with_for_update(of=RuntimeJob)).all()
+        ~exists().where(RuntimeAttempt.build_id == Build.build_id, RuntimeAttempt.state.in_(LIVE_ATTEMPT_STATES)),
+    ).with_for_update(of=Build)).all()
     if not jobs:
         return
 
-    # 收集历史任务的输入、输出及重试暂存集合。任务触发器同步解除构建的输出引用。
-    job_ids = [job.job_id for job in jobs]
+    # 收集历史任务的输入、输出及重试暂存集合。
+    build_ids = [job.build_id for job in jobs]
     references = {ref for job in jobs for ref in (job.input_set_id, job.output_set_id) if ref}
-    produced = select(RuntimeAttempt.attempt_id).where(RuntimeAttempt.job_id.in_(job_ids))
+    produced = select(RuntimeAttempt.attempt_id).where(RuntimeAttempt.build_id.in_(build_ids))
     sets = session.scalars(select(ArtifactSet).where(
         ArtifactSet.set_id.in_(references) | ArtifactSet.producer_attempt_id.in_(produced),
     ).order_by(ArtifactSet.kind, ArtifactSet.set_id)).all()

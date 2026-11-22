@@ -23,8 +23,6 @@ from dbt_metricflow_service.storage.entities import (
     ArtifactSet,
     Build,
     RuntimeAttempt,
-    RuntimeJob,
-    RuntimeProject,
 )
 from dbt_metricflow_service.storage.postgres import Database
 from dbt_metricflow_service.storage.records import (
@@ -285,7 +283,6 @@ class ArtifactStore:
                 source_set_id=metadata.source_set_id,
                 source_commit_sha=metadata.source_commit_sha,
                 project_digest=metadata.project_digest,
-                config_version=metadata.config_version,
                 toolchain_version=metadata.toolchain_version,
                 format_version=metadata.format_version,
                 content_digest="",
@@ -404,9 +401,7 @@ class ArtifactStore:
         if session.get(ArtifactSet, set_id, with_for_update=True) is None:
             return False
         referenced = or_(
-            exists().where(Build.output_set_id == set_id),
-            exists().where(or_(RuntimeJob.input_set_id == set_id, RuntimeJob.output_set_id == set_id)),
-            exists().where(RuntimeProject.source_set_id == set_id),
+            exists().where(or_(Build.input_set_id == set_id, Build.output_set_id == set_id)),
             exists().where(ArtifactSet.source_set_id == set_id),
             exists().where(RuntimeAttempt.attempt_id == ArtifactSet.producer_attempt_id,
                            ArtifactSet.set_id == set_id, RuntimeAttempt.state.in_(LIVE_ATTEMPT_STATES)),

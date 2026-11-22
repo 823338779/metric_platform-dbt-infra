@@ -25,9 +25,9 @@ def settings(tmp_path):
 def build_request(settings):
     return BuildRequest.model_validate({
         "repository": "https://example.invalid/repo.git", "branchName": "main",
-        "commitSha": "b" * 40, "idempotencyKey": "build-1",
+        "commitSha": "b" * 40, "idempotencyKey": str(uuid4()),
         "execution": {
-            "environmentId": "00000000-0000-0000-0000-000000000001", "configVersion": 1,
+            "environmentId": "00000000-0000-0000-0000-000000000001",
             "connection": {"type": "duckdb", "instanceId": "local",
                            "path": str(Path(settings.temp_root) / "warehouse.duckdb")},
             "credentialRef": "local", "catalog": "warehouse", "schema": "analytics",

@@ -90,8 +90,6 @@ class Settings:
     # 数据库租约有效期及续租间隔，单位秒。
     lease_seconds: int = 90
     heartbeat_seconds: int = 15
-    # 当前实例可执行的连接配置版本。
-    config_version: str = strings.DEFAULT_CONFIG_VERSION
     # 部署镜像可显式指定工具链标识，默认由安装版本及服务代码计算。
     toolchain_version: str | None = None
     # 单结果、单文件和单产物集的原始字节上限。
@@ -190,9 +188,6 @@ class Settings:
             ),
             heartbeat_seconds=int(
                 value(strings.JOB_HEARTBEAT_SECONDS, config.JOB_HEARTBEAT_SECONDS, strings.DEFAULT_HEARTBEAT_SECONDS)
-            ),
-            config_version=value(
-                strings.SERVICE_CONFIG_VERSION, config.SERVICE_CONFIG_VERSION, strings.DEFAULT_CONFIG_VERSION
             ),
             toolchain_version=value(strings.SERVICE_TOOLCHAIN_VERSION, config.SERVICE_TOOLCHAIN_VERSION) or None,
             max_result_bytes=int(value(strings.MAX_RESULT_BYTES, config.MAX_RESULT_BYTES, str(8 * 1024 * 1024))),

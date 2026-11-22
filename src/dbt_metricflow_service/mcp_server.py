@@ -130,9 +130,7 @@ class SubmitBuild(Arguments):
         description="从调用方的目标环境配置取得完整执行快照，credentialRef 填已配置的凭据引用")
     deployment_policy: DeploymentPolicy = Field(
         description="按用户意图显式选择：NONE 仅构建，ON_SUCCESS 在构建成功后尝试部署")
-    idempotency_key: str = Field(
-        min_length=1, max_length=256,
-        description="调用方为本次逻辑提交分配的稳定键，同一次提交的重试始终复用")
+    idempotency_key: UUID = Field(description="每个新构建使用新的全局唯一 UUID，重试时复用")
     origin: Origin | None = Field(default=None, description="可选，由调用方提供本次会话或操作的追溯标签")
 
 

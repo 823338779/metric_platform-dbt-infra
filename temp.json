@@ -1,0 +1,2815 @@
+{
+  "semantic_models": [
+    {
+      "name": "stock_snapshots",
+      "defaults": {
+        "agg_time_dimension": "stock_date"
+      },
+      "description": "\u6bcf\u65e5\u5e97\u94fa\u5546\u54c1\u5e93\u5b58\u3002",
+      "node_relation": {
+        "alias": "stock_snapshots",
+        "schema_name": "env_prod",
+        "database": null,
+        "relation_name": "`env_prod`.`stock_snapshots`"
+      },
+      "primary_entity": null,
+      "entities": [
+        {
+          "name": "stock_snapshot",
+          "description": "",
+          "type": "primary",
+          "role": null,
+          "expr": "snapshot_id",
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "stock_position",
+          "description": "",
+          "type": "foreign",
+          "role": null,
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "store",
+          "description": "",
+          "type": "foreign",
+          "role": null,
+          "expr": "store_id",
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "product",
+          "description": "",
+          "type": "foreign",
+          "role": null,
+          "expr": "product_id",
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        }
+      ],
+      "measures": [],
+      "dimensions": [
+        {
+          "name": "stock_date",
+          "description": "",
+          "type": "time",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": {
+            "time_granularity": "day",
+            "validity_params": null
+          },
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        }
+      ],
+      "label": null,
+      "metadata": null,
+      "config": {
+        "meta": {}
+      }
+    },
+    {
+      "name": "spend_stage_history",
+      "defaults": {
+        "agg_time_dimension": null
+      },
+      "description": "\u5ba2\u6237\u6309\u65e5\u521d\u5386\u53f2\u6210\u4ea4\u9636\u6bb5\u5212\u5206\u7684\u6709\u6548\u671f\uff0c\u5de6\u95ed\u53f3\u5f00\u3002",
+      "node_relation": {
+        "alias": "spend_stage_history",
+        "schema_name": "env_prod",
+        "database": null,
+        "relation_name": "`env_prod`.`spend_stage_history`"
+      },
+      "primary_entity": "spend_stage_version",
+      "entities": [
+        {
+          "name": "buyer_history",
+          "description": "",
+          "type": "natural",
+          "role": null,
+          "expr": "user_id",
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        }
+      ],
+      "measures": [],
+      "dimensions": [
+        {
+          "name": "valid_from",
+          "description": "",
+          "type": "time",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": {
+            "time_granularity": "day",
+            "validity_params": {
+              "is_start": true,
+              "is_end": false
+            }
+          },
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "valid_to",
+          "description": "",
+          "type": "time",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": {
+            "time_granularity": "day",
+            "validity_params": {
+              "is_start": false,
+              "is_end": true
+            }
+          },
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "spend_stage",
+          "description": "",
+          "type": "categorical",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": null,
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        }
+      ],
+      "label": null,
+      "metadata": null,
+      "config": {
+        "meta": {}
+      }
+    },
+    {
+      "name": "daily_refund_reporting",
+      "defaults": {
+        "agg_time_dimension": "date_day"
+      },
+      "description": "\u5168\u6e20\u9053\u65e5\u5386\u65e5\u9000\u6b3e\u5bf9\u8d26\uff0c\u5b8c\u6574\u6027\u7531\u4e0a\u6e38\u786e\u8ba4\u7684\u65e5\u671f\u533a\u95f4\u51b3\u5b9a\u3002",
+      "node_relation": {
+        "alias": "daily_refund_reporting",
+        "schema_name": "env_prod",
+        "database": null,
+        "relation_name": "`env_prod`.`daily_refund_reporting`"
+      },
+      "primary_entity": null,
+      "entities": [
+        {
+          "name": "reporting_day",
+          "description": null,
+          "type": "primary",
+          "role": null,
+          "expr": "date_day",
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        }
+      ],
+      "measures": [],
+      "dimensions": [
+        {
+          "name": "date_day",
+          "description": "",
+          "type": "time",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": {
+            "time_granularity": "day",
+            "validity_params": null
+          },
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        }
+      ],
+      "label": null,
+      "metadata": null,
+      "config": {
+        "meta": {}
+      }
+    },
+    {
+      "name": "product_views",
+      "defaults": {
+        "agg_time_dimension": "event_time"
+      },
+      "description": "\u6bcf\u4e2a\u7528\u6237\u548c\u5546\u54c1\u7ec4\u5408\u6700\u65e9\u7684\u4e00\u6b21\u6d4f\u89c8\u3002",
+      "node_relation": {
+        "alias": "product_views",
+        "schema_name": "env_prod",
+        "database": null,
+        "relation_name": "`env_prod`.`product_views`"
+      },
+      "primary_entity": null,
+      "entities": [
+        {
+          "name": "product_view",
+          "description": "",
+          "type": "primary",
+          "role": null,
+          "expr": "event_id",
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "user",
+          "description": "",
+          "type": "foreign",
+          "role": null,
+          "expr": "user_id",
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "product",
+          "description": "",
+          "type": "foreign",
+          "role": null,
+          "expr": "product_id",
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        }
+      ],
+      "measures": [],
+      "dimensions": [
+        {
+          "name": "event_time",
+          "description": "",
+          "type": "time",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": {
+            "time_granularity": "second",
+            "validity_params": null
+          },
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        }
+      ],
+      "label": null,
+      "metadata": null,
+      "config": {
+        "meta": {}
+      }
+    },
+    {
+      "name": "product_purchases",
+      "defaults": {
+        "agg_time_dimension": "event_time"
+      },
+      "description": "\u6bcf\u4e2a\u7528\u6237\u548c\u5546\u54c1\u7ec4\u5408\u9996\u6b21\u6d4f\u89c8\u540e\u6700\u65e9\u7684\u4e00\u6b21\u8d2d\u4e70\u3002",
+      "node_relation": {
+        "alias": "product_purchases",
+        "schema_name": "env_prod",
+        "database": null,
+        "relation_name": "`env_prod`.`product_purchases`"
+      },
+      "primary_entity": null,
+      "entities": [
+        {
+          "name": "product_purchase",
+          "description": "",
+          "type": "primary",
+          "role": null,
+          "expr": "event_id",
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "user",
+          "description": "",
+          "type": "foreign",
+          "role": null,
+          "expr": "user_id",
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "product",
+          "description": "",
+          "type": "foreign",
+          "role": null,
+          "expr": "product_id",
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        }
+      ],
+      "measures": [],
+      "dimensions": [
+        {
+          "name": "event_time",
+          "description": "",
+          "type": "time",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": {
+            "time_granularity": "second",
+            "validity_params": null
+          },
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        }
+      ],
+      "label": null,
+      "metadata": null,
+      "config": {
+        "meta": {}
+      }
+    },
+    {
+      "name": "completed_purchases",
+      "defaults": {
+        "agg_time_dimension": "created_at"
+      },
+      "description": "\u6bcf\u4f4d\u7528\u6237\u6ce8\u518c\u540e\u9996\u7b14\u6210\u4ea4\u8ba2\u5355\u7684\u521b\u5efa\u65f6\u95f4\u3002",
+      "node_relation": {
+        "alias": "completed_purchases",
+        "schema_name": "env_prod",
+        "database": null,
+        "relation_name": "`env_prod`.`completed_purchases`"
+      },
+      "primary_entity": "completed_purchase",
+      "entities": [
+        {
+          "name": "user",
+          "description": "",
+          "type": "foreign",
+          "role": null,
+          "expr": "user_id",
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        }
+      ],
+      "measures": [],
+      "dimensions": [
+        {
+          "name": "created_at",
+          "description": "",
+          "type": "time",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": {
+            "time_granularity": "second",
+            "validity_params": null
+          },
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        }
+      ],
+      "label": null,
+      "metadata": null,
+      "config": {
+        "meta": {}
+      }
+    },
+    {
+      "name": "refunds",
+      "defaults": {
+        "agg_time_dimension": "refund_date"
+      },
+      "description": "\u552e\u540e\u4e8b\u5b9e\uff0c\u4e00\u884c\u4e00\u7b14\u9000\u6b3e\uff0c\u591a\u7b14\u9000\u6b3e\u5206\u522b\u8ba1\u5165\u53d1\u751f\u671f\u3002",
+      "node_relation": {
+        "alias": "refunds",
+        "schema_name": "env_prod",
+        "database": null,
+        "relation_name": "`env_prod`.`refunds`"
+      },
+      "primary_entity": null,
+      "entities": [
+        {
+          "name": "refund",
+          "description": "\u5355\u7b14\u9000\u6b3e\u7684\u552f\u4e00\u7f16\u53f7\u3002",
+          "type": "primary",
+          "role": null,
+          "expr": "refund_id",
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "user",
+          "description": "\u539f\u8ba2\u5355\u4e70\u5bb6\uff0c\u7528\u4e8e\u6309\u4e70\u5bb6\u5c5e\u6027\u5206\u6790\u9000\u6b3e\u3002",
+          "type": "foreign",
+          "role": null,
+          "expr": "user_id",
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "store",
+          "description": "\u539f\u8ba2\u5355\u5e97\u94fa\uff0c\u7528\u4e8e\u6309\u7ecf\u8425\u4e3b\u4f53\u5206\u6790\u9000\u6b3e\u3002",
+          "type": "foreign",
+          "role": null,
+          "expr": "store_id",
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        }
+      ],
+      "measures": [],
+      "dimensions": [
+        {
+          "name": "refund_date",
+          "description": "\u9000\u6b3e\u6d41\u6c34 refunded_at \u5bf9\u5e94\u7684\u81ea\u7136\u65e5\u3002",
+          "type": "time",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": {
+            "time_granularity": "day",
+            "validity_params": null
+          },
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        }
+      ],
+      "label": null,
+      "metadata": null,
+      "config": {
+        "meta": {}
+      }
+    },
+    {
+      "name": "orders",
+      "defaults": {
+        "agg_time_dimension": "order_date"
+      },
+      "description": "\u8ba2\u5355\u8bed\u4e49\u6a21\u578b\uff1a\u4e00\u884c\u4e00\u6761\u5546\u54c1\u660e\u7ec6\uff0c\u4ee5\u660e\u7ec6\u91d1\u989d\u907f\u514d\u8ba2\u5355\u603b\u989d\u91cd\u590d\u7d2f\u8ba1\u3002",
+      "node_relation": {
+        "alias": "orders",
+        "schema_name": "env_prod",
+        "database": null,
+        "relation_name": "`env_prod`.`orders`"
+      },
+      "primary_entity": null,
+      "entities": [
+        {
+          "name": "order_item",
+          "description": "\u8ba2\u5355\u5546\u54c1\u660e\u7ec6\u552f\u4e00\u6807\u8bc6\uff1b\u540c\u4e00\u8ba2\u5355\u53ef\u4ee5\u5305\u542b\u591a\u6761\u660e\u7ec6\u3002",
+          "type": "primary",
+          "role": null,
+          "expr": "order_item_id",
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "user",
+          "description": "\u8ba2\u5355\u8d2d\u4e70\u7528\u6237\u6807\u8bc6\u3002",
+          "type": "foreign",
+          "role": null,
+          "expr": "user_id",
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "product",
+          "description": "\u660e\u7ec6\u5546\u54c1\u6807\u8bc6\u3002",
+          "type": "foreign",
+          "role": null,
+          "expr": "product_id",
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "store",
+          "description": "\u8ba2\u5355\u5f52\u5c5e\u5e97\u94fa\u6807\u8bc6\u3002",
+          "type": "foreign",
+          "role": null,
+          "expr": "store_id",
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "buyer_history",
+          "description": null,
+          "type": "foreign",
+          "role": null,
+          "expr": "user_id",
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        }
+      ],
+      "measures": [],
+      "dimensions": [
+        {
+          "name": "order_id",
+          "description": "\u8ba2\u5355\u6807\u8bc6\uff0c\u660e\u7ec6\u4e2d\u5141\u8bb8\u91cd\u590d\uff1b\u8ba2\u5355\u6307\u6807\u6309\u6b64\u5b57\u6bb5\u53bb\u91cd\u3002",
+          "type": "categorical",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": null,
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "order_date",
+          "description": "\u8ba2\u5355\u5934\u4e0b\u5355\u65e5\u671f\uff0c\u6210\u4ea4\u6307\u6807\u4ecd\u6309\u4e0b\u5355\u65e5\u671f\u5f52\u5c5e\uff0c\u4e0d\u662f\u652f\u4ed8\u65e5\u671f\u3002",
+          "type": "time",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": {
+            "time_granularity": "day",
+            "validity_params": null
+          },
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "order_status",
+          "description": "\u8ba2\u5355\u5f53\u524d\u72b6\u6001\uff1b\u4ec5 COMPLETED \u8ba1\u5165\u6210\u4ea4\uff0c\u5176\u4ed6\u72b6\u6001\u4e0d\u8ba1\u5165\u3002",
+          "type": "categorical",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": null,
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "sales_channel",
+          "description": "\u8ba2\u5355\u9500\u552e\u6e20\u9053\u3002",
+          "type": "categorical",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": null,
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "order_value_band",
+          "description": "\u6574\u5355\u5e94\u4ed8\u5546\u54c1\u989d\uff08\u6263\u8fd0\u8d39\uff09\u5206\u6863\uff0c\u53ef\u6309\u5546\u54c1\u5207\u5206\u6210\u4ea4\u8ba2\u5355\u6570\u3002",
+          "type": "categorical",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": null,
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "item_value_band",
+          "description": "\u5355\u6761\u5546\u54c1\u660e\u7ec6\u6298\u540e\u5e94\u4ed8\u989d\u5206\u6863\uff0c\u8fb9\u754c\u4e3a 100 \u5143\u548c 500 \u5143\u3002",
+          "type": "categorical",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": null,
+          "expr": "case when item_paid_amount is null then 'unknown'\n     when item_paid_amount < 100 then 'under_100'\n     when item_paid_amount < 500 then '100_to_under_500'\n     else '500_plus' end",
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "item_discount_band",
+          "description": "\u6309\u660e\u7ec6\u4f18\u60e0\u989d\u5360\u6298\u524d\u989d\u7684\u6bd4\u4f8b\u5206\u6863\uff0c\u6298\u524d\u989d\u975e\u6b63\u6216\u7f3a\u503c\u65f6\u5f52\u5165 unknown\u3002",
+          "type": "categorical",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": null,
+          "expr": "case when item_gross_amount is null or item_gross_amount <= 0\n           or item_discount_amount is null then 'unknown'\n     when item_discount_amount <= 0 then 'no_discount'\n     when item_discount_amount < item_gross_amount * 0.2 then 'under_20pct'\n     else '20pct_plus' end",
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "order_month",
+          "description": "\u660e\u7ec6\u6240\u5c5e\u8ba2\u5355\u7684\u4e0b\u5355\u6708\uff0c\u53d6\u5f53\u6708\u7b2c\u4e00\u5929\u3002",
+          "type": "time",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": {
+            "time_granularity": "month",
+            "validity_params": null
+          },
+          "expr": "date_trunc('month', order_date)",
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        }
+      ],
+      "label": null,
+      "metadata": null,
+      "config": {
+        "meta": {}
+      }
+    },
+    {
+      "name": "users",
+      "defaults": {
+        "agg_time_dimension": "register_date"
+      },
+      "description": "\u7528\u6237\u8bed\u4e49\u6a21\u578b\uff1a\u4e00\u884c\u4e00\u6761\u5ba2\u6237\u6ce8\u518c\u8bb0\u5f55\uff0c\u4f1a\u5458\u7b49\u7ea7\u4e3a\u6ce8\u518c\u65f6\u5c5e\u6027\u3002",
+      "node_relation": {
+        "alias": "users",
+        "schema_name": "env_prod",
+        "database": null,
+        "relation_name": "`env_prod`.`users`"
+      },
+      "primary_entity": null,
+      "entities": [
+        {
+          "name": "user",
+          "description": "\u7528\u6237\u552f\u4e00\u6807\u8bc6\uff0c\u6e90 customer_id\u3002",
+          "type": "primary",
+          "role": null,
+          "expr": "user_id",
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        }
+      ],
+      "measures": [],
+      "dimensions": [
+        {
+          "name": "member_level",
+          "description": "\u6ce8\u518c\u65f6\u7684\u4f1a\u5458\u7b49\u7ea7\uff0c\u4e0d\u8868\u793a\u4e0b\u5355\u65f6\u7684\u7b49\u7ea7\u3002",
+          "type": "categorical",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": null,
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "province",
+          "description": "\u7528\u6237\u6240\u5728\u7701\u4efd\uff0c\u4e0e\u5e97\u94fa\u7701\u4efd\u72ec\u7acb\u3002",
+          "type": "categorical",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": null,
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "register_date",
+          "description": "\u7528\u6237\u6ce8\u518c\u65e5\u671f\uff0c\u7528\u6237\u6307\u6807\u9ed8\u8ba4\u805a\u5408\u65f6\u95f4\u3002",
+          "type": "time",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": {
+            "time_granularity": "day",
+            "validity_params": null
+          },
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "acquisition_channel",
+          "description": "\u7528\u6237\u9996\u6b21\u83b7\u5ba2\u6e20\u9053\u3002",
+          "type": "categorical",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": null,
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "registered_at",
+          "description": "\u7528\u6237\u5b9e\u9645\u6ce8\u518c\u65f6\u95f4\uff0c\u4f9b\u4e03\u65e5\u8f6c\u5316\u7a97\u53e3\u6309\u79d2\u5339\u914d\u3002",
+          "type": "time",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": {
+            "time_granularity": "second",
+            "validity_params": null
+          },
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        }
+      ],
+      "label": null,
+      "metadata": null,
+      "config": {
+        "meta": {}
+      }
+    },
+    {
+      "name": "products",
+      "defaults": {
+        "agg_time_dimension": "launched_date"
+      },
+      "description": "\u5546\u54c1\u8bed\u4e49\u6a21\u578b\uff1a\u4e00\u884c\u4e00\u4e2a\u5546\u54c1\uff0c\u7c7b\u76ee\u3001\u54c1\u724c\u6765\u81ea ODS \u5546\u54c1\u4e0a\u67b6\u8bb0\u5f55\u3002",
+      "node_relation": {
+        "alias": "products",
+        "schema_name": "env_prod",
+        "database": null,
+        "relation_name": "`env_prod`.`products`"
+      },
+      "primary_entity": null,
+      "entities": [
+        {
+          "name": "product",
+          "description": "\u5546\u54c1\u552f\u4e00\u6807\u8bc6\uff0c\u6e90 product_id\u3002",
+          "type": "primary",
+          "role": null,
+          "expr": "product_id",
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        }
+      ],
+      "measures": [],
+      "dimensions": [
+        {
+          "name": "sku_code",
+          "description": "\u5546\u54c1 SKU \u7f16\u7801\u3002",
+          "type": "categorical",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": null,
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "product_name",
+          "description": "\u5f53\u524d\u5546\u54c1\u540d\u79f0\u3002",
+          "type": "categorical",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": null,
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "category_level1",
+          "description": "\u5546\u54c1\u4e00\u7ea7\u7c7b\u76ee\u3002",
+          "type": "categorical",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": null,
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "brand_name",
+          "description": "\u5546\u54c1\u54c1\u724c\u3002",
+          "type": "categorical",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": null,
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "launched_date",
+          "description": "\u5546\u54c1\u9996\u6b21\u4e0a\u67b6\u65e5\u671f\uff0c\u5546\u54c1\u6307\u6807\u9ed8\u8ba4\u805a\u5408\u65f6\u95f4\u3002",
+          "type": "time",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": {
+            "time_granularity": "day",
+            "validity_params": null
+          },
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        }
+      ],
+      "label": null,
+      "metadata": null,
+      "config": {
+        "meta": {}
+      }
+    },
+    {
+      "name": "stores",
+      "defaults": {
+        "agg_time_dimension": "opened_date"
+      },
+      "description": "\u5e97\u94fa\u8bed\u4e49\u6a21\u578b\uff1a\u4e00\u884c\u4e00\u5bb6\u5e97\u94fa\uff0c\u5730\u57df\u5c5e\u6027\u6765\u81ea ODS \u5165\u9a7b\u8bb0\u5f55\u3002",
+      "node_relation": {
+        "alias": "stores",
+        "schema_name": "env_prod",
+        "database": null,
+        "relation_name": "`env_prod`.`stores`"
+      },
+      "primary_entity": null,
+      "entities": [
+        {
+          "name": "store",
+          "description": "\u5e97\u94fa\u552f\u4e00\u6807\u8bc6\uff0c\u6e90 store_id\u3002",
+          "type": "primary",
+          "role": null,
+          "expr": "store_id",
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        }
+      ],
+      "measures": [],
+      "dimensions": [
+        {
+          "name": "store_name",
+          "description": "\u5e97\u94fa\u540d\u79f0\u3002",
+          "type": "categorical",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": null,
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "store_code",
+          "description": "\u5e97\u94fa\u7ecf\u8425\u5206\u6790\u952e\uff0c\u666e\u901a\u5206\u7ec4\u663e\u793a\u5e97\u94fa\u540d\u79f0\uff0c\u540c\u540d\u5e97\u94fa\u5206\u522b\u7edf\u8ba1\u3002",
+          "type": "categorical",
+          "datatype": null,
+          "value_mapping": {
+            "semantic_model": "store_directory",
+            "value_dimension": "raw_store_id",
+            "display_dimension": "display_name"
+          },
+          "is_partition": false,
+          "type_params": null,
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "province",
+          "description": "\u5e97\u94fa\u6240\u5728\u7701\u4efd\uff0c\u4e0e\u7528\u6237\u7701\u4efd\u72ec\u7acb\u3002",
+          "type": "categorical",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": null,
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "opened_date",
+          "description": "\u5e97\u94fa\u5f00\u5e97\u65e5\u671f\uff0c\u5e97\u94fa\u6307\u6807\u9ed8\u8ba4\u805a\u5408\u65f6\u95f4\u3002",
+          "type": "time",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": {
+            "time_granularity": "day",
+            "validity_params": null
+          },
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        }
+      ],
+      "label": null,
+      "metadata": null,
+      "config": {
+        "meta": {}
+      }
+    },
+    {
+      "name": "store_directory",
+      "defaults": {
+        "agg_time_dimension": null
+      },
+      "description": "\u5e97\u94fa\u5c55\u793a\u5b57\u5178\uff0c\u6bcf\u4e2a\u5e97\u94fa\u952e\u5bf9\u5e94\u4e00\u6761\u5165\u9a7b\u8bb0\u5f55\u3002",
+      "node_relation": {
+        "alias": "store_directory",
+        "schema_name": "env_prod",
+        "database": null,
+        "relation_name": "`env_prod`.`store_directory`"
+      },
+      "primary_entity": null,
+      "entities": [
+        {
+          "name": "directory_entry",
+          "description": "\u4e0e\u5e97\u94fa\u7ef4\u5ea6 store_code \u540c\u7c7b\u578b\u7684\u552f\u4e00\u6620\u5c04\u952e\u3002",
+          "type": "primary",
+          "role": null,
+          "expr": "raw_store_id",
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        }
+      ],
+      "measures": [],
+      "dimensions": [
+        {
+          "name": "raw_store_id",
+          "description": "\u4e0e\u5e97\u94fa\u7ef4\u5ea6 store_code \u540c\u7c7b\u578b\u7684\u552f\u4e00\u6620\u5c04\u952e\u3002",
+          "type": "categorical",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": null,
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        },
+        {
+          "name": "display_name",
+          "description": "\u7ecf\u8425\u62a5\u8868\u4f7f\u7528\u7684\u5f53\u524d\u5e97\u94fa\u540d\u79f0\uff0c\u5141\u8bb8\u4e0d\u540c\u5e97\u94fa\u91cd\u540d\u3002",
+          "type": "categorical",
+          "datatype": null,
+          "value_mapping": null,
+          "is_partition": false,
+          "type_params": null,
+          "expr": null,
+          "metadata": null,
+          "label": null,
+          "config": {
+            "meta": {}
+          }
+        }
+      ],
+      "label": null,
+      "metadata": null,
+      "config": {
+        "meta": {}
+      }
+    }
+  ],
+  "metrics": [
+    {
+      "name": "period_closing_stock",
+      "description": "\u6bcf\u4e2a\u5e97\u94fa\u5546\u54c1\u5728\u6240\u9009\u671f\u95f4\u53d6\u5404\u81ea\u6700\u540e\u4e00\u6b21\u89c2\u6d4b\u7684\u671f\u672b\u4ef6\u6570\u540e\u6c42\u548c\u3002",
+      "type": "simple",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": "closing_quantity",
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": {
+          "semantic_model": "stock_snapshots",
+          "agg": "sum",
+          "agg_params": {
+            "percentile": null,
+            "use_discrete_percentile": false,
+            "use_approximate_percentile": false
+          },
+          "agg_time_dimension": "stock_date",
+          "non_additive_dimension": {
+            "name": "stock_date",
+            "window_choice": "max",
+            "window_groupings": [
+              "stock_position"
+            ]
+          }
+        },
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u671f\u5185\u672b\u6b21\u5e93\u5b58\u5408\u8ba1",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "reporting_sales",
+      "description": "",
+      "type": "simple",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": "sales",
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": {
+          "semantic_model": "daily_refund_reporting",
+          "agg": "sum",
+          "agg_params": {
+            "percentile": null,
+            "use_discrete_percentile": false,
+            "use_approximate_percentile": false
+          },
+          "agg_time_dimension": "date_day",
+          "non_additive_dimension": null
+        },
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u5bf9\u8d26\u6210\u4ea4\u989d",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "reporting_refunds",
+      "description": "",
+      "type": "simple",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": "observed_refunds",
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": {
+          "semantic_model": "daily_refund_reporting",
+          "agg": "sum",
+          "agg_params": {
+            "percentile": null,
+            "use_discrete_percentile": false,
+            "use_approximate_percentile": false
+          },
+          "agg_time_dimension": "date_day",
+          "non_additive_dimension": null
+        },
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u5df2\u89c2\u6d4b\u9000\u6b3e\u989d",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "unconfirmed_days",
+      "description": "",
+      "type": "simple",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": "unconfirmed",
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": {
+          "semantic_model": "daily_refund_reporting",
+          "agg": "sum",
+          "agg_params": {
+            "percentile": null,
+            "use_discrete_percentile": false,
+            "use_approximate_percentile": false
+          },
+          "agg_time_dimension": "date_day",
+          "non_additive_dimension": null
+        },
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u9000\u6b3e\u672a\u786e\u8ba4\u5929\u6570",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "product_view_events",
+      "description": "",
+      "type": "simple",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": "event_id",
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": {
+          "semantic_model": "product_views",
+          "agg": "count",
+          "agg_params": {
+            "percentile": null,
+            "use_discrete_percentile": false,
+            "use_approximate_percentile": false
+          },
+          "agg_time_dimension": "event_time",
+          "non_additive_dimension": null
+        },
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u9996\u6b21\u6d4f\u89c8\u7528\u6237\u5546\u54c1\u7ec4\u5408\u6570",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "product_purchase_events",
+      "description": "",
+      "type": "simple",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": "event_id",
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": {
+          "semantic_model": "product_purchases",
+          "agg": "count",
+          "agg_params": {
+            "percentile": null,
+            "use_discrete_percentile": false,
+            "use_approximate_percentile": false
+          },
+          "agg_time_dimension": "event_time",
+          "non_additive_dimension": null
+        },
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u6d4f\u89c8\u540e\u8d2d\u4e70\u7528\u6237\u5546\u54c1\u7ec4\u5408\u6570",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "purchase_event_count",
+      "description": "",
+      "type": "simple",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": "user_id",
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": {
+          "semantic_model": "completed_purchases",
+          "agg": "count",
+          "agg_params": {
+            "percentile": null,
+            "use_discrete_percentile": false,
+            "use_approximate_percentile": false
+          },
+          "agg_time_dimension": "created_at",
+          "non_additive_dimension": null
+        },
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u6ce8\u518c\u540e\u9996\u8d2d\u7528\u6237\u6570",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "high_value_vs_deep_discount_sales_gap",
+      "description": "500 \u5143\u53ca\u4ee5\u4e0a\u660e\u7ec6\u6210\u4ea4\u989d\u51cf\u53bb\u4f18\u60e0\u5360\u6bd4\u81f3\u5c11 20% \u7684\u660e\u7ec6\u6210\u4ea4\u989d\uff0c\u540c\u4e00\u660e\u7ec6\u53ef\u8fdb\u5165\u4e24\u4fa7\u3002\u4e24\u4fa7\u5747\u6709\u8bb0\u5f55\u65f6\u8ba1\u7b97\u5dee\u989d\u3002",
+      "type": "derived",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": "high_value_sales - deep_discount_sales",
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [
+          {
+            "name": "sales_amount",
+            "filter": {
+              "where_filters": [
+                {
+                  "where_sql_template": "{{ Dimension('order_item__item_value_band') }} = '500_plus'"
+                }
+              ]
+            },
+            "alias": "high_value_sales",
+            "offset_window": null,
+            "offset_to_grain": null
+          },
+          {
+            "name": "sales_amount",
+            "filter": {
+              "where_filters": [
+                {
+                  "where_sql_template": "{{ Dimension('order_item__item_discount_band') }} = '20pct_plus'"
+                }
+              ]
+            },
+            "alias": "deep_discount_sales",
+            "offset_window": null,
+            "offset_to_grain": null
+          }
+        ],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": null,
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u9ad8\u989d\u660e\u7ec6\u4e0e\u6df1\u6298\u660e\u7ec6\u6210\u4ea4\u989d\u5dee\u989d",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "sales_above_target",
+      "description": "\u5728\u6bcf\u4e2a\u67e5\u8be2\u5206\u7ec4\u5185\u5148\u6c47\u603b\u6210\u4ea4\u989d\uff0c\u518d\u8ba1\u7b97\u8d85\u51fa\u56fa\u5b9a\u76ee\u6807 10000 \u5143\u7684\u90e8\u5206\u3002\u6309\u5e97\u94fa\u548c\u6708\u5206\u7ec4\u5373\u4e3a\u5e97\u6708\u8d85\u989d\u3002",
+      "type": "derived",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": "case when sales_amount > 10000 then sales_amount - 10000 else 0 end",
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [
+          {
+            "name": "sales_amount",
+            "filter": null,
+            "alias": null,
+            "offset_window": null,
+            "offset_to_grain": null
+          }
+        ],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": null,
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u8d85\u76ee\u6807\u6210\u4ea4\u989d",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "high_value_discounted_order_share",
+      "description": "\u542b\u9ad8\u989d\u660e\u7ec6\u7684\u6210\u4ea4\u8ba2\u5355\u4e2d\uff0c\u81f3\u5c11\u4e00\u6761\u9ad8\u989d\u660e\u7ec6\u540c\u65f6\u4eab\u53d7\u6df1\u6298\u7684\u8ba2\u5355\u5360\u6bd4\u3002\u4e24\u4fa7\u5404\u81ea\u6309\u8ba2\u5355\u53bb\u91cd\u3002",
+      "type": "ratio",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": {
+          "name": "completed_order_count",
+          "filter": {
+            "where_filters": [
+              {
+                "where_sql_template": "{{ Dimension('order_item__item_discount_band') }} = '20pct_plus'"
+              }
+            ]
+          },
+          "alias": "deep_discount_order_count",
+          "offset_window": null,
+          "offset_to_grain": null
+        },
+        "denominator": {
+          "name": "completed_order_count",
+          "filter": null,
+          "alias": null,
+          "offset_window": null,
+          "offset_to_grain": null
+        },
+        "expr": null,
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": null,
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": {
+        "where_filters": [
+          {
+            "where_sql_template": "{{ Dimension('order_item__item_value_band') }} = '500_plus'"
+          }
+        ]
+      },
+      "metadata": null,
+      "label": "\u9ad8\u989d\u660e\u7ec6\u6210\u4ea4\u8ba2\u5355\u6df1\u6298\u5360\u6bd4",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "refund_to_sales_amount_ratio",
+      "description": "\u6210\u529f\u9000\u6b3e\u989d\u6309\u9000\u6b3e\u65e5\u6c47\u603b\uff0c\u6210\u4ea4\u5546\u54c1\u989d\u6309\u4e0b\u5355\u65e5\u6c47\u603b\uff0c\u518d\u6309\u5171\u540c\u671f\u95f4\u53ca\u5e97\u94fa\u7b49\u7ef4\u5ea6\u5bf9\u9f50\u76f8\u9664\u3002\u9000\u6b3e\u53ef\u6765\u81ea\u4ee5\u524d\u671f\u95f4\u3002",
+      "type": "ratio",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": {
+          "name": "successful_refund_amount",
+          "filter": null,
+          "alias": null,
+          "offset_window": null,
+          "offset_to_grain": null
+        },
+        "denominator": {
+          "name": "sales_amount",
+          "filter": null,
+          "alias": null,
+          "offset_window": null,
+          "offset_to_grain": null
+        },
+        "expr": null,
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": null,
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u53d1\u751f\u671f\u9000\u6b3e\u6210\u4ea4\u91d1\u989d\u6bd4",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "sales_mtd",
+      "description": "\u6309\u65e5\u67e5\u8be2\uff0c\u81ea\u5f53\u6708\u9996\u65e5\u81f3\u5f53\u65e5\u7d2f\u8ba1\u6210\u4ea4\u5546\u54c1\u91d1\u989d\uff0c\u6bcf\u6708\u91cd\u65b0\u5f00\u59cb\u3002",
+      "type": "cumulative",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": null,
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": {
+          "window": null,
+          "grain_to_date": "month",
+          "period_agg": "first",
+          "metric": {
+            "name": "sales_amount",
+            "filter": null,
+            "alias": null,
+            "offset_window": null,
+            "offset_to_grain": null
+          }
+        },
+        "input_measures": [],
+        "metric_aggregation_params": null,
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u6708\u521d\u81f3\u4eca\u6210\u4ea4\u989d",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "sales_wow_growth",
+      "description": "\u6309\u5468\u67e5\u8be2\uff0c\u672c\u5468\u4e0e\u524d\u4e00\u81ea\u7136\u5468\u6210\u4ea4\u989d\u4e4b\u5dee\u9664\u4ee5\u524d\u5468\u6210\u4ea4\u989d\u3002\u524d\u5468\u7f3a\u5931\u6216\u4e3a\u96f6\u65f6\u8fd4\u56de\u7a7a\u503c\u3002",
+      "type": "derived",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": "(sales_amount - prior_week_sales) * 1.0 / nullif(prior_week_sales, 0)",
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [
+          {
+            "name": "sales_amount",
+            "filter": null,
+            "alias": null,
+            "offset_window": null,
+            "offset_to_grain": null
+          },
+          {
+            "name": "sales_amount",
+            "filter": null,
+            "alias": "prior_week_sales",
+            "offset_window": {
+              "count": 1,
+              "granularity": "week"
+            },
+            "offset_to_grain": null
+          }
+        ],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": null,
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u6210\u4ea4\u989d\u5468\u73af\u6bd4\u589e\u957f\u7387",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "rolling_7d_buyers",
+      "description": "\u6309\u65e5\u67e5\u8be2\uff0c\u7edf\u8ba1\u5f53\u65e5\u53ca\u4e4b\u524d\u516d\u5929\u6210\u4ea4\u7684\u4e0d\u540c\u4e70\u5bb6\u3002",
+      "type": "cumulative",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": null,
+        "window": {
+          "count": 7,
+          "granularity": "day"
+        },
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": {
+          "window": {
+            "count": 7,
+            "granularity": "day"
+          },
+          "grain_to_date": null,
+          "period_agg": "first",
+          "metric": {
+            "name": "buyer_count",
+            "filter": null,
+            "alias": null,
+            "offset_window": null,
+            "offset_to_grain": null
+          }
+        },
+        "input_measures": [],
+        "metric_aggregation_params": null,
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u8fd1\u4e03\u65e5\u6210\u4ea4\u4e70\u5bb6\u6570",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "matched_registration_purchase_7d",
+      "description": "\u6309\u6ce8\u518c\u65f6\u95f4\u5f52\u5c5e\uff0c\u5339\u914d\u540c\u4e00\u4e70\u5bb6\u4e03\u65e5\u7a97\u53e3\u5185\u7684\u6210\u4ea4\u8ba2\u5355\u521b\u5efa\u4e8b\u4ef6\u3002",
+      "type": "conversion",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": null,
+        "window": {
+          "count": 7,
+          "granularity": "day"
+        },
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": {
+          "base_measure": null,
+          "base_metric": {
+            "name": "registration_events",
+            "filter": null,
+            "alias": null,
+            "offset_window": null,
+            "offset_to_grain": null
+          },
+          "conversion_measure": null,
+          "conversion_metric": {
+            "name": "purchase_event_count",
+            "filter": null,
+            "alias": null,
+            "offset_window": null,
+            "offset_to_grain": null
+          },
+          "entity": "user",
+          "calculation": "conversion_rate",
+          "window": {
+            "count": 7,
+            "granularity": "day"
+          },
+          "constant_properties": null
+        },
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": null,
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": true
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u6ce8\u518c\u4e03\u65e5\u6210\u4ea4\u5339\u914d\u6bd4\u7387",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "matched_same_product_purchase_7d",
+      "description": "\u6309\u7528\u6237\u5546\u54c1\u9996\u6b21\u6d4f\u89c8\u5f52\u5c5e\uff0c\u7edf\u8ba1\u5176\u540e\u4e03\u65e5\u5185\u81f3\u5c11\u8d2d\u4e70\u4e00\u6b21\u540c\u6b3e\u7684\u6bd4\u4f8b\u3002\u7a97\u53e3\u542b\u8d77\u70b9\u3001\u4e0d\u542b\u7b2c\u4e03\u65e5\u540c\u4e00\u65f6\u523b\u3002",
+      "type": "conversion",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": null,
+        "window": {
+          "count": 7,
+          "granularity": "day"
+        },
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": {
+          "base_measure": null,
+          "base_metric": {
+            "name": "product_view_events",
+            "filter": null,
+            "alias": null,
+            "offset_window": null,
+            "offset_to_grain": null
+          },
+          "conversion_measure": null,
+          "conversion_metric": {
+            "name": "product_purchase_events",
+            "filter": null,
+            "alias": null,
+            "offset_window": null,
+            "offset_to_grain": null
+          },
+          "entity": "user",
+          "calculation": "conversion_rate",
+          "window": {
+            "count": 7,
+            "granularity": "day"
+          },
+          "constant_properties": [
+            {
+              "base_property": "product",
+              "conversion_property": "product"
+            }
+          ]
+        },
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": null,
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": true
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u6d4f\u89c8\u540e\u4e03\u65e5\u540c\u5546\u54c1\u8d2d\u4e70\u5339\u914d\u6bd4\u7387",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "registration_purchase_7d",
+      "description": "\u6309\u6ce8\u518c\u6279\u6b21\u7edf\u8ba1\u4e03\u65e5\u5185\u9996\u8d2d\u4eba\u6570\u5360\u6bd4\uff0c\u6709\u6ce8\u518c\u4e14\u65e0\u4eba\u8f6c\u5316\u65f6\u4e3a\u96f6\u3002",
+      "type": "derived",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": "case when registration_events > 0 then coalesce(matched_registration_purchase_7d, 0) end",
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [
+          {
+            "name": "registration_events",
+            "filter": null,
+            "alias": null,
+            "offset_window": null,
+            "offset_to_grain": null
+          },
+          {
+            "name": "matched_registration_purchase_7d",
+            "filter": null,
+            "alias": null,
+            "offset_window": null,
+            "offset_to_grain": null
+          }
+        ],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": null,
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u6ce8\u518c\u4e03\u65e5\u6210\u4ea4\u8f6c\u5316\u7387",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "same_product_purchase_7d",
+      "description": "\u6309\u9996\u6b21\u6d4f\u89c8\u6279\u6b21\u7edf\u8ba1\u4e03\u65e5\u5185\u8d2d\u4e70\u540c\u6b3e\u7684\u7528\u6237\u5546\u54c1\u7ec4\u5408\u5360\u6bd4\uff0c\u6709\u6d4f\u89c8\u4e14\u65e0\u4eba\u8f6c\u5316\u65f6\u4e3a\u96f6\u3002",
+      "type": "derived",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": "case when product_view_events > 0 then coalesce(matched_same_product_purchase_7d, 0) end",
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [
+          {
+            "name": "product_view_events",
+            "filter": null,
+            "alias": null,
+            "offset_window": null,
+            "offset_to_grain": null
+          },
+          {
+            "name": "matched_same_product_purchase_7d",
+            "filter": null,
+            "alias": null,
+            "offset_window": null,
+            "offset_to_grain": null
+          }
+        ],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": null,
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u6d4f\u89c8\u540e\u4e03\u65e5\u540c\u5546\u54c1\u8d2d\u4e70\u8f6c\u5316\u7387",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "confirmed_refund_to_sales_ratio",
+      "description": "\u5168\u6e20\u9053\u6c47\u603b\uff1b\u5305\u542b\u672a\u786e\u8ba4\u65e5\u6216\u6210\u4ea4\u989d\u4e3a\u96f6\u65f6\u4e3a\u7a7a\uff0c\u5df2\u786e\u8ba4\u65e0\u9000\u6b3e\u4e14\u6709\u6210\u4ea4\u65f6\u4e3a\u96f6\u3002",
+      "type": "derived",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": "case when unconfirmed_days = 0 then reporting_refunds * 1.0 / nullif(reporting_sales, 0) end",
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [
+          {
+            "name": "unconfirmed_days",
+            "filter": null,
+            "alias": null,
+            "offset_window": null,
+            "offset_to_grain": null
+          },
+          {
+            "name": "reporting_sales",
+            "filter": null,
+            "alias": null,
+            "offset_window": null,
+            "offset_to_grain": null
+          },
+          {
+            "name": "reporting_refunds",
+            "filter": null,
+            "alias": null,
+            "offset_window": null,
+            "offset_to_grain": null
+          }
+        ],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": null,
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u5df2\u786e\u8ba4\u671f\u95f4\u9000\u6b3e\u6210\u4ea4\u91d1\u989d\u6bd4",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "successful_refund_amount",
+      "description": "SUCCESS \u6d41\u6c34\u7684\u9000\u6b3e\u91d1\u989d\u4e4b\u548c\uff0c\u6309\u9000\u6b3e\u53d1\u751f\u65e5\u5f52\u5c5e\u3002",
+      "type": "simple",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": "case when refund_status = 'SUCCESS' then refund_amount else 0 end",
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": {
+          "semantic_model": "refunds",
+          "agg": "sum",
+          "agg_params": {
+            "percentile": null,
+            "use_discrete_percentile": false,
+            "use_approximate_percentile": false
+          },
+          "agg_time_dimension": "refund_date",
+          "non_additive_dimension": null
+        },
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u6210\u529f\u9000\u6b3e\u91d1\u989d",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "order_count",
+      "description": "\u6240\u6709\u72b6\u6001\u7684\u8ba2\u5355 ID \u53bb\u91cd\u6570\uff1b\u8de8\u5546\u54c1\u6216\u65e5\u671f\u5206\u7ec4\u4e0d\u53ef\u76f4\u63a5\u7d2f\u52a0\u3002",
+      "type": "simple",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": "order_id",
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": {
+          "semantic_model": "orders",
+          "agg": "count_distinct",
+          "agg_params": {
+            "percentile": null,
+            "use_discrete_percentile": false,
+            "use_approximate_percentile": false
+          },
+          "agg_time_dimension": "order_date",
+          "non_additive_dimension": null
+        },
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u8ba2\u5355\u6570",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "completed_order_count",
+      "description": "COMPLETED \u8ba2\u5355 ID \u53bb\u91cd\u6570\uff1b\u5546\u54c1\u5206\u7ec4\u5185\u4ec5\u7edf\u8ba1\u5305\u542b\u8be5\u5546\u54c1\u7684\u8ba2\u5355\u3002",
+      "type": "simple",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": "case when is_completed = 1 then order_id else null end",
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": {
+          "semantic_model": "orders",
+          "agg": "count_distinct",
+          "agg_params": {
+            "percentile": null,
+            "use_discrete_percentile": false,
+            "use_approximate_percentile": false
+          },
+          "agg_time_dimension": "order_date",
+          "non_additive_dimension": null
+        },
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u6210\u4ea4\u8ba2\u5355\u6570",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "sales_amount",
+      "description": "COMPLETED \u660e\u7ec6\u6298\u540e\u5546\u54c1\u91d1\u989d\u4e4b\u548c\uff0c\u5355\u4f4d\u5143\uff0c\u4e0d\u542b\u8fd0\u8d39\uff0c\u6392\u9664\u5df2\u9000\u6b3e\u8ba2\u5355\uff1b\u4e0d\u662f\u652f\u4ed8\u6d41\u6c34\u51c0\u6536\u5165\u3002",
+      "type": "simple",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": "case when is_completed = 1 then item_paid_amount else 0 end",
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": {
+          "semantic_model": "orders",
+          "agg": "sum",
+          "agg_params": {
+            "percentile": null,
+            "use_discrete_percentile": false,
+            "use_approximate_percentile": false
+          },
+          "agg_time_dimension": "order_date",
+          "non_additive_dimension": null
+        },
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u6210\u4ea4\u5546\u54c1\u91d1\u989d",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "sales_quantity",
+      "description": "COMPLETED \u660e\u7ec6\u5546\u54c1\u4ef6\u6570\u4e4b\u548c\u3002",
+      "type": "simple",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": "case when is_completed = 1 then quantity else 0 end",
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": {
+          "semantic_model": "orders",
+          "agg": "sum",
+          "agg_params": {
+            "percentile": null,
+            "use_discrete_percentile": false,
+            "use_approximate_percentile": false
+          },
+          "agg_time_dimension": "order_date",
+          "non_additive_dimension": null
+        },
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u6210\u4ea4\u9500\u91cf",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "buyer_count",
+      "description": "COMPLETED \u8ba2\u5355\u7684\u8d2d\u4e70\u7528\u6237\u53bb\u91cd\u6570\uff0c\u8de8\u5206\u7ec4\u4e0d\u53ef\u76f4\u63a5\u76f8\u52a0\u3002",
+      "type": "simple",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": "case when is_completed = 1 then user_id else null end",
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": {
+          "semantic_model": "orders",
+          "agg": "count_distinct",
+          "agg_params": {
+            "percentile": null,
+            "use_discrete_percentile": false,
+            "use_approximate_percentile": false
+          },
+          "agg_time_dimension": "order_date",
+          "non_additive_dimension": null
+        },
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u6210\u4ea4\u8d2d\u4e70\u4eba\u6570",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "completed_gross_amount",
+      "description": "\u6210\u4ea4\u660e\u7ec6\u6298\u524d\u91d1\u989d\u4e4b\u548c\uff0c\u5355\u4f4d\u5143\uff0c\u4e0d\u542b\u8fd0\u8d39\u3002",
+      "type": "simple",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": "case when is_completed = 1 then item_gross_amount else 0 end",
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": {
+          "semantic_model": "orders",
+          "agg": "sum",
+          "agg_params": {
+            "percentile": null,
+            "use_discrete_percentile": false,
+            "use_approximate_percentile": false
+          },
+          "agg_time_dimension": "order_date",
+          "non_additive_dimension": null
+        },
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u6210\u4ea4\u6298\u524d\u5546\u54c1\u989d",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "completed_discount_amount",
+      "description": "\u6210\u4ea4\u660e\u7ec6\u4f18\u60e0\u91d1\u989d\u4e4b\u548c\uff0c\u5355\u4f4d\u5143\uff0c\u5f52\u5c5e\u4e8e\u4e0b\u5355\u65e5\u671f\u3002",
+      "type": "simple",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": "case when is_completed = 1 then item_discount_amount else 0 end",
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": {
+          "semantic_model": "orders",
+          "agg": "sum",
+          "agg_params": {
+            "percentile": null,
+            "use_discrete_percentile": false,
+            "use_approximate_percentile": false
+          },
+          "agg_time_dimension": "order_date",
+          "non_additive_dimension": null
+        },
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u6210\u4ea4\u5546\u54c1\u4f18\u60e0\u989d",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "selling_store_count",
+      "description": "\u6240\u9009\u671f\u95f4\u548c\u5546\u54c1\u8303\u56f4\u5185\u81f3\u5c11\u6709\u4e00\u7b14\u6210\u4ea4\u7684\u5e97\u94fa\u53bb\u91cd\u6570\u3002",
+      "type": "simple",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": "case when is_completed = 1 then store_id else null end",
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": {
+          "semantic_model": "orders",
+          "agg": "count_distinct",
+          "agg_params": {
+            "percentile": null,
+            "use_discrete_percentile": false,
+            "use_approximate_percentile": false
+          },
+          "agg_time_dimension": "order_date",
+          "non_additive_dimension": null
+        },
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u52a8\u9500\u5e97\u94fa\u6570",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "user_count",
+      "description": "\u5f53\u524d\u7528\u6237\u53bb\u91cd\u6570\uff1b\u65e0\u65f6\u95f4\u7b5b\u9009\u4e3a\u5168\u90e8\u7528\u6237\uff0c\u65f6\u95f4\u7b5b\u9009\u9650\u5b9a\u6ce8\u518c\u65e5\u671f\uff0c\u4e0d\u662f\u5386\u53f2\u5b58\u91cf\u3002",
+      "type": "simple",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": "user_id",
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": {
+          "semantic_model": "users",
+          "agg": "count_distinct",
+          "agg_params": {
+            "percentile": null,
+            "use_discrete_percentile": false,
+            "use_approximate_percentile": false
+          },
+          "agg_time_dimension": "register_date",
+          "non_additive_dimension": null
+        },
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u7528\u6237\u6570",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "new_user_count",
+      "description": "\u6309\u6ce8\u518c\u65e5\u671f\u7edf\u8ba1\u7528\u6237\u53bb\u91cd\u6570\uff1b\u65e0\u65e5\u671f\u9650\u5236\u65f6\u4e0e\u7528\u6237\u6570\u76f8\u540c\u3002",
+      "type": "simple",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": "user_id",
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": {
+          "semantic_model": "users",
+          "agg": "count_distinct",
+          "agg_params": {
+            "percentile": null,
+            "use_discrete_percentile": false,
+            "use_approximate_percentile": false
+          },
+          "agg_time_dimension": "register_date",
+          "non_additive_dimension": null
+        },
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u65b0\u589e\u6ce8\u518c\u7528\u6237\u6570",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "high_spend_user_count",
+      "description": "\u6309\u7528\u6237\u7d2f\u8ba1\u6210\u4ea4\u989d\u8d85\u8fc7 1000 \u5143\u7b5b\u9009\uff0c\u518d\u6309\u7528\u6237\u6ce8\u518c\u6279\u6b21\u8ba1\u6570\u3002",
+      "type": "simple",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": "user_id",
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": {
+          "semantic_model": "users",
+          "agg": "count_distinct",
+          "agg_params": {
+            "percentile": null,
+            "use_discrete_percentile": false,
+            "use_approximate_percentile": false
+          },
+          "agg_time_dimension": "register_date",
+          "non_additive_dimension": null
+        },
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": {
+        "where_filters": [
+          {
+            "where_sql_template": "{{ Metric('sales_amount', group_by=['user']) }} > 1000"
+          }
+        ]
+      },
+      "metadata": null,
+      "label": "\u5386\u53f2\u9ad8\u6d88\u8d39\u7528\u6237\u6570",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "registration_events",
+      "description": "",
+      "type": "simple",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": "user_id",
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": {
+          "semantic_model": "users",
+          "agg": "count",
+          "agg_params": {
+            "percentile": null,
+            "use_discrete_percentile": false,
+            "use_approximate_percentile": false
+          },
+          "agg_time_dimension": "registered_at",
+          "non_additive_dimension": null
+        },
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u6ce8\u518c\u4e8b\u4ef6\u6570",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "product_count",
+      "description": "\u5f53\u524d\u76ee\u5f55\u5546\u54c1\u53bb\u91cd\u6570\uff1b\u65f6\u95f4\u7b5b\u9009\u9650\u5b9a\u9996\u6b21\u4e0a\u67b6\u65e5\u671f\uff0c\u4e0d\u662f\u5386\u53f2\u5546\u54c1\u5b58\u91cf\u3002",
+      "type": "simple",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": "product_id",
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": {
+          "semantic_model": "products",
+          "agg": "count_distinct",
+          "agg_params": {
+            "percentile": null,
+            "use_discrete_percentile": false,
+            "use_approximate_percentile": false
+          },
+          "agg_time_dimension": "launched_date",
+          "non_additive_dimension": null
+        },
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u5546\u54c1\u6570",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "store_count",
+      "description": "\u5f53\u524d\u76ee\u5f55\u5e97\u94fa\u53bb\u91cd\u6570\uff1b\u65f6\u95f4\u7b5b\u9009\u9650\u5b9a\u5f00\u5e97\u65e5\u671f\uff0c\u4e0d\u662f\u5386\u53f2\u5e97\u94fa\u5b58\u91cf\u3002",
+      "type": "simple",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": "store_id",
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": {
+          "semantic_model": "stores",
+          "agg": "count_distinct",
+          "agg_params": {
+            "percentile": null,
+            "use_discrete_percentile": false,
+            "use_approximate_percentile": false
+          },
+          "agg_time_dimension": "opened_date",
+          "non_additive_dimension": null
+        },
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u5e97\u94fa\u6570",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "new_store_count",
+      "description": "\u6309\u5f00\u5e97\u65e5\u671f\u7edf\u8ba1\u5e97\u94fa\u53bb\u91cd\u6570\uff1b\u65e0\u65e5\u671f\u9650\u5236\u65f6\u4e0e\u5e97\u94fa\u6570\u76f8\u540c\u3002",
+      "type": "simple",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": null,
+        "denominator": null,
+        "expr": "store_id",
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": {
+          "semantic_model": "stores",
+          "agg": "count_distinct",
+          "agg_params": {
+            "percentile": null,
+            "use_discrete_percentile": false,
+            "use_approximate_percentile": false
+          },
+          "agg_time_dimension": "opened_date",
+          "non_additive_dimension": null
+        },
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": false
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u65b0\u5f00\u5e97\u94fa\u6570",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "average_order_value",
+      "description": "\u6210\u4ea4\u5546\u54c1\u91d1\u989d\u9664\u4ee5\u6210\u4ea4\u8ba2\u5355\u6570\uff0c\u5355\u4f4d\u5143/\u5355\uff1b\u4e0d\u542b\u8fd0\u8d39\uff0c\u5206\u6bcd\u4e3a\u96f6\u65f6\u4e3a NULL\u3002\u5546\u54c1\u5206\u7ec4\u4e0b\u8868\u793a\u8be5\u7ec4\u5546\u54c1\u8d21\u732e\u7684\u5355\u5747\u91d1\u989d\u3002",
+      "type": "ratio",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": {
+          "name": "sales_amount",
+          "filter": null,
+          "alias": null,
+          "offset_window": null,
+          "offset_to_grain": null
+        },
+        "denominator": {
+          "name": "completed_order_count",
+          "filter": null,
+          "alias": null,
+          "offset_window": null,
+          "offset_to_grain": null
+        },
+        "expr": null,
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": null,
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": null
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u6210\u4ea4\u5ba2\u5355\u4ef7",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "discount_rate",
+      "description": "\u6210\u4ea4\u4f18\u60e0\u989d\u9664\u4ee5\u6210\u4ea4\u6298\u524d\u5546\u54c1\u989d\uff0c0.1 \u8868\u793a\u4f18\u60e0 10%\u3002",
+      "type": "ratio",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": {
+          "name": "completed_discount_amount",
+          "filter": null,
+          "alias": null,
+          "offset_window": null,
+          "offset_to_grain": null
+        },
+        "denominator": {
+          "name": "completed_gross_amount",
+          "filter": null,
+          "alias": null,
+          "offset_window": null,
+          "offset_to_grain": null
+        },
+        "expr": null,
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": null,
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": null
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u6210\u4ea4\u6298\u6263\u7387\uff08\u4f18\u60e0\u5360\u6bd4\uff09",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "units_per_order",
+      "description": "\u5206\u7ec4\u5185\u6210\u4ea4\u4ef6\u6570\u9664\u4ee5\u542b\u8be5\u7ec4\u5546\u54c1\u7684\u6210\u4ea4\u8ba2\u5355\u6570\uff0c\u5355\u4f4d\u4ef6/\u5355\u3002",
+      "type": "ratio",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": {
+          "name": "sales_quantity",
+          "filter": null,
+          "alias": null,
+          "offset_window": null,
+          "offset_to_grain": null
+        },
+        "denominator": {
+          "name": "completed_order_count",
+          "filter": null,
+          "alias": null,
+          "offset_window": null,
+          "offset_to_grain": null
+        },
+        "expr": null,
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": null,
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": null
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u6210\u4ea4\u4ef6\u5355\u91cf",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    },
+    {
+      "name": "average_selling_price",
+      "description": "\u6210\u4ea4\u5546\u54c1\u91d1\u989d\u9664\u4ee5\u6210\u4ea4\u4ef6\u6570\uff0c\u5355\u4f4d\u5143/\u4ef6\uff0c\u4e0d\u542b\u8fd0\u8d39\u3002",
+      "type": "ratio",
+      "datatype": null,
+      "type_params": {
+        "measure": null,
+        "numerator": {
+          "name": "sales_amount",
+          "filter": null,
+          "alias": null,
+          "offset_window": null,
+          "offset_to_grain": null
+        },
+        "denominator": {
+          "name": "sales_quantity",
+          "filter": null,
+          "alias": null,
+          "offset_window": null,
+          "offset_to_grain": null
+        },
+        "expr": null,
+        "window": null,
+        "grain_to_date": null,
+        "metrics": [],
+        "conversion_type_params": null,
+        "cumulative_type_params": null,
+        "input_measures": [],
+        "metric_aggregation_params": null,
+        "join_to_timespine": false,
+        "fill_nulls_with": null,
+        "is_private": null
+      },
+      "filter": null,
+      "metadata": null,
+      "label": "\u4ef6\u5747\u6210\u4ea4\u4ef7",
+      "config": {
+        "meta": {}
+      },
+      "time_granularity": null
+    }
+  ],
+  "project_configuration": {
+    "time_spine_table_configurations": [],
+    "metadata": null,
+    "dsi_package_version": {
+      "major_version": "0",
+      "minor_version": "213",
+      "patch_version": "0"
+    },
+    "time_spines": [
+      {
+        "node_relation": {
+          "alias": "time_spine",
+          "schema_name": "env_prod",
+          "database": null,
+          "relation_name": "`env_prod`.`time_spine`"
+        },
+        "primary_column": {
+          "name": "date_day",
+          "time_granularity": "day"
+        },
+        "custom_granularities": []
+      }
+    ]
+  },
+  "saved_queries": []
+}

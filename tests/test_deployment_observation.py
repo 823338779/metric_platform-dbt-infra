@@ -7,7 +7,7 @@ import pytest
 from dbt_metricflow_service.application.deployments import DeploymentService
 from dbt_metricflow_service.models.deployments import DeploymentKey
 from dbt_metricflow_service.storage.deployments import DeploymentStore
-from dbt_metricflow_service.storage.entities import DeploymentTarget
+from dbt_metricflow_service.storage.entities import Build, DeploymentAttempt, DeploymentTarget
 
 
 @pytest.fixture
@@ -20,10 +20,7 @@ def observation_store(monkeypatch):
 
     class Session:
         def get(self, model, key, **kwargs):
-            return target if model is DeploymentTarget else attempt
-
-        def scalar(self, statement):
-            return build
+            return {DeploymentTarget: target, DeploymentAttempt: attempt, Build: build}[model]
 
         def scalars(self, statement):
             # No historical jobs in this observation-only fixture.

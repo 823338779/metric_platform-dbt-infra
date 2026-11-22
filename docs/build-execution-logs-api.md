@@ -2,7 +2,7 @@
 
 调用 `GET /builds/{buildId}/execution-logs` 查看 service 发起的 dbt parse/build 等命令产生的详细日志。数据来自 PostgreSQL `runtime_execution_log`，服务重启后仍可读取已提交内容。原 `GET /builds/{buildId}/logs` 已删除，返回 404；旧游标不可用于新接口。
 
-阶段、状态和错误码属于执行事实：前端通过 `GET /builds/{buildId}` 的 `phase`、`buildStatus`、`error.code` 和 `error.phase` 展示。服务从持久任务同步构建详情，不再将状态变更复制为阶段日志。日志页面中每条 dbt 事件仍携带 phase，作为定位该事件的上下文。
+前端通过 `GET /builds/{buildId}` 的 `phase`、`buildStatus`、`error.code` 和 `error.phase` 展示构建记录上的执行进度。每条 dbt 日志都携带事件发生时的 phase。新写入日志的 `jobId` 与 `buildId` 相同，已有日志保留历史任务 ID。
 
 ## 请求和返回
 

@@ -18,7 +18,6 @@ from ..models.contracts import Page
 from ..models.service import ErrorView
 from ..storage.deployments import DeploymentStore
 from ..storage.execution_logs import ExecutionLogStore
-from ..storage.jobs import StoreConflict
 from .deployments import attempt_view
 from .errors import ServiceError
 
@@ -31,24 +30,20 @@ class BuildService:
         # 具体 Store 和固定执行参数足够，不传入整个 Runtime。
         self.store = store
         self.toolchain = toolchain
-        # 实例只报告其可执行的版本；存量配置快照本身仍然保留。
         self.settings = settings
 
     def submit(self, request: BuildRequest, caller: str) -> BuildView:
         try:
             # 由存储层在确认是新请求后调用目标校验；这样即使实例配置后来被移除，重试仍可找回原构建。
             row = self.store.accept(
-                request, caller, self.toolchain, self.settings.config_version,
+                request, caller, self.toolchain,
                 validate_new=partial(validate_execution_target, settings=self.settings),
             )
         except ExecutionConfigurationError as error:
             raise ServiceError(error.code, "execution target is not verified") from error
-        except StoreConflict as error:
-            # 物理目标或配置版本冲突保留具体错误码；同一 idempotencyKey 对应不同输入时报告幂等冲突。
-            code = str(error) if str(error).startswith(strings.EXECUTION_) else strings.IDEMPOTENCY_CONFLICT
-            raise ServiceError(code, str(error), 409) from error
-        # 受理事务已提交。新提交和幂等重试都按 buildId 重读当前状态，并带回关联部署尝试的进度。
-        return self.get(row.build_id)
+        # 使用受理时取得的构建状态，补充关联部署尝试后返回。
+        initial = DeploymentStore(self.store.db).initial(row.build_id)
+        return self.view(row, initial)
 
     def get(self, build_id: UUID | str) -> BuildView:
         row = self.load(build_id)
@@ -98,7 +93,7 @@ class BuildService:
             build_id=row.build_id,
             repository=row.repository,
             branch_name=row.branch_name,
-            requested_commit_sha=row.requested_commit_sha,
+            requested_commit_sha=row.request_json.commit_sha,
             commit_sha=row.commit_sha,
             toolchain_version=row.toolchain_version,
             build_status=row.build_status,

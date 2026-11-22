@@ -1,7 +1,6 @@
-"""构建源码准备、目标租约、dbt 执行与 Manifest 持久化。"""
+"""构建源码准备、dbt 执行与 Manifest 持久化。"""
 from __future__ import annotations
 
-import asyncio
 from functools import partial
 from pathlib import Path
 from typing import Final, cast
@@ -10,13 +9,14 @@ import yaml
 
 from dbt_metricflow_service import constants as strings
 from dbt_metricflow_service.engines.dbt import DbtClient
+from dbt_metricflow_service.models.execution import SNAPSHOT_TARGET
 from dbt_metricflow_service.models.native import NativeProject
 from dbt_metricflow_service.platform.manifest_capture import ManifestCapture
 from dbt_metricflow_service.settings import Settings
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.execution_logs import ExecutionLogStore
 from dbt_metricflow_service.storage.jobs import JobStore
-from dbt_metricflow_service.storage.records import ArtifactMetadata, LeasedJob, StoredJob
+from dbt_metricflow_service.storage.records import ArtifactMetadata, LeasedBuild
 
 from .dbt import dbt_execution
 from .embedded import run_serialized
@@ -42,94 +42,74 @@ class BuildExecutor:
         self.jobs = jobs
         self.artifacts = artifacts
 
-    async def execute(self, job: LeasedJob) -> ExecutionResult:
+    async def execute(self, job: LeasedBuild) -> ExecutionResult:
         """还原固定输入，等待执行退出，再删除可重建的本地目录。"""
 
         # SDK 调用和文件操作均等待线程退出，之后才退出工作目录上下文。
-        with attempt_workspace(self.settings.temp_root, job.job_id, job.attempt_id) as attempt:
+        with attempt_workspace(self.settings.temp_root, job.build_id, job.attempt_id) as attempt:
             return await self._build(job, attempt)
 
-    async def _build(self, job: LeasedJob, attempt: Path) -> ExecutionResult:
-        if not job.request_json.build_id:
-            raise ExecutionError(strings.FIXED_COMMIT_INPUT_REQUIRED)
-        # 缺少快照时在 Git、产物恢复和目标占用之前拒绝旧任务。
-        raw = job.request_json.execution
-        if not raw:
-            raise ExecutionError(strings.EXECUTION_SNAPSHOT_REQUIRED)
+    async def _build(self, job: LeasedBuild, attempt: Path) -> ExecutionResult:
         job = await self._prepare_build_source(job, attempt)
         project = attempt / PROJECT_DIRECTORY
         await run_in_thread(self.artifacts.materialize, cast(str, job.input_set_id), project)
 
         from ..platform.execution_profile import materialized_profile
-        from ..storage.execution_targets import ExecutionTargetStore
-        targets = ExecutionTargetStore(self.jobs.db)
-        # 写入前申请物理目标的执行权；其他任务正在占用时保持本任务租约，待目标释放再继续。
-        while not await run_in_thread(targets.claim, job.job_id, job.lease_token):
-            if not await run_in_thread(self.jobs.heartbeat, job.job_id, job.lease_token):
-                raise ExecutionError(ERROR_LEASE_LOST)
-            await asyncio.sleep(0.25)
         # 按受理时固定的快照和凭据引用生成临时 dbt profile，限定本次构建实际连接的目标。
-        profile = materialized_profile(raw, attempt, self.settings, project)
+        profile = materialized_profile(job.execution, attempt, self.settings, project)
         with profile as profiles:
             return await execute_build(self, job, project, profiles=profiles)
 
-    async def _prepare_build_source(self, job: LeasedJob, attempt: Path) -> LeasedJob:
+    async def _prepare_build_source(self, job: LeasedBuild, attempt: Path) -> LeasedBuild:
         """受理之后获取固定源码；所有慢 I/O 均在短事务之外。"""
         import shutil
 
         from ..platform.bindings import ProjectBinding, resolve_commit
         from ..platform.source import remote_head
-        from ..storage.builds import BuildStore
 
-        body = job.request_json
         if job.input_set_id:
             # 准备阶段重试可直接恢复已经关联的源码快照，即使远端分支移动也使用同一份源码。
             return job
-        builds = BuildStore(self.jobs.db)
         try:
-            # 优先使用指定的提交；只给分支时先查远端 HEAD，并在拉取前把 SHA 固定到构建和任务记录。
-            sha = body.commit_sha
+            # 优先使用指定的提交；只给分支时先查远端 HEAD，并在拉取前把 SHA 固定到构建记录。
+            sha = job.commit_sha
             if not sha:
-                sha = await run_in_thread(remote_head, body.repository, body.branch_name, attempt)
+                sha = await run_in_thread(remote_head, job.repository, job.branch_name, attempt)
                 if sha is None:
                     raise ValueError(SOURCE_BRANCH_MISSING)
-            await run_in_thread(builds.pin_source, body.build_id, sha, job.lease_token)
-            await run_in_thread(self.jobs.phase, job.job_id, job.lease_token, strings.FETCHING_SOURCE)
-            binding = ProjectBinding(job.project_id, body.repository, ".", cast(str, job.profile_binding_id))
+            await run_in_thread(self.jobs.pin_source, job.build_id, sha, job.lease_token)
+            await run_in_thread(self.jobs.phase, job.build_id, job.lease_token, strings.FETCHING_SOURCE)
+            binding = ProjectBinding(job.project_id, job.repository, ".", SNAPSHOT_TARGET)
             directory, digest = await run_in_thread(resolve_commit, binding, sha, attempt)
             try:
                 source = await run_in_thread(
                     self.artifacts.capture, job.project_id, directory, metadata=ArtifactMetadata(
-                    source_commit_sha=sha, project_digest=digest, config_version=job.config_version,
+                    source_commit_sha=sha, project_digest=digest,
                     toolchain_version=job.toolchain_version))
             finally:
                 await run_in_thread(shutil.rmtree, directory)
-            # 在租约仍有效时关联源码产物及摘要，重新读取任务以取得后续还原工程所需的 input_set_id。
-            if not await run_in_thread(self.jobs.attach_input, job.job_id, job.lease_token, source,
+            # 在租约仍有效时固定源码产物及摘要，供本次执行和后续重试复用。
+            if not await run_in_thread(self.jobs.attach_input, job.build_id, job.lease_token, source,
                                      project_digest=digest):
                 raise ExecutionError(ERROR_LEASE_LOST, stopped=True)
-            return LeasedJob(
-                **cast(StoredJob, await run_in_thread(self.jobs.get, job.job_id)).model_dump(),
-                attempt_id=job.attempt_id, lease_token=job.lease_token,
-            )
+            return job.model_copy(update={"input_set_id": source, "commit_sha": sha, "project_digest": digest})
         except (ValueError, OSError) as error:
             raise ExecutionError(strings.SOURCE_UNAVAILABLE, stopped=True) from error
 
-    async def _authorize(self, job: LeasedJob, phase: str, *, external: bool) -> None:
+    async def _authorize(self, job: LeasedBuild, phase: str, *, external: bool) -> None:
         # 两类引擎都在取得共享串行锁后记录阶段并重新核对租约。
-        valid = await run_in_thread(self.jobs.phase, job.job_id, job.lease_token, phase, external=external)
+        valid = await run_in_thread(self.jobs.phase, job.build_id, job.lease_token, phase, external=external)
         if not valid:
             raise ExecutionError(ERROR_LEASE_LOST, stopped=False)
 
     @staticmethod
-    def _metadata(job: LeasedJob) -> ArtifactMetadata:
+    def _metadata(job: LeasedBuild) -> ArtifactMetadata:
         """发布元数据只引用持久集合与配置，不保存绝对路径。"""
         return ArtifactMetadata(
             source_set_id=job.input_set_id,
-            config_version=job.config_version,
             toolchain_version=job.toolchain_version,
-            source_commit_sha=job.request_json.commit_sha,
-            project_digest=job.request_json.project_digest,
+            source_commit_sha=job.commit_sha,
+            project_digest=job.project_digest,
         )
 
 
@@ -142,11 +122,11 @@ def _normalize_artifact_target(project: Path) -> None:
 
 
 async def execute_build(
-    executor: BuildExecutor, job: LeasedJob, project: Path, *, profiles: Path,
+    executor: BuildExecutor, job: LeasedBuild, project: Path, *, profiles: Path,
 ) -> ExecutionResult:
     settings = executor.settings
     environment = build_engine_environment(
-        project, profiles, cast(str, job.schema_name), cast(str, job.profile_binding_id),
+        project, profiles, job.execution.schema_name, SNAPSHOT_TARGET,
     )
     capture = ManifestCapture(settings.max_artifact_file_bytes)
     writer = ExecutionLogWriter(partial(
@@ -157,7 +137,7 @@ async def execute_build(
         with dbt_execution(job.project_id, environment, settings.max_output_bytes, writer.emit) as context:
             # 执行一次 dbt build，回调采集本次运行的事件；成功后捕获同一次调用生成的 Manifest。
             result = DbtClient().build(
-                project, profiles, target=cast(str, job.profile_binding_id),
+                project, profiles, target=SNAPSHOT_TARGET,
                 target_path=project / strings.TARGET_DIRECTORY, callbacks=[context.callback],
             )
             context.check(result)

@@ -20,11 +20,11 @@ def router(service: BuildService) -> APIRouter:
     def submit(request: BuildRequest) -> BuildView:
         """提交仓库、分支、可选提交 SHA 和执行环境快照，返回 HTTP 202 和可用于跟踪进度的 `buildId`。
 
-        同一调用方在同一仓库以相同 `idempotencyKey` 重试原请求时返回原构建，改用不同输入会返回 409。
+        每个新构建使用新的 UUID 作为 `idempotencyKey`。重复提交同一 UUID 返回首次受理的构建，即使参数有变化。
         默认仅构建。指定 `deploymentPolicy=ON_SUCCESS` 时，服务会在构建成功后尝试部署。
         """
-        # FastAPI 已用 BuildRequest 校验请求体。HTTP 入口统一使用服务身份，它与仓库、idempotencyKey 一起确定重试范围。
-        # BuildStore.accept 在同一事务内复用原构建或登记新任务。BuildService.submit 随后读取构建详情作为 202 响应。
+        # FastAPI 已用 BuildRequest 校验请求体及 UUID 格式。HTTP 入口以固定服务身份记录提交来源。
+        # BuildStore.accept 按幂等键复用原构建或写入一条排队中的构建。BuildService.submit 组装 202 响应。
         # Worker._slot 领取任务，BuildExecutor 执行 dbt；ON_SUCCESS 的部署由 DeploymentService.reconcile 处理。
         return service.submit(request, strings.AUTH_SERVICE_IDENTITY)
 

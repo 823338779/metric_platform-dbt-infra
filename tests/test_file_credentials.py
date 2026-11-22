@@ -23,7 +23,7 @@ def test_file_credentials_without_environment(tmp_path, monkeypatch, adapter, pa
     }), encoding="utf-8")
     settings = replace(Settings.from_file(config), temp_root=tmp_path)
     snapshot = ExecutionSnapshot.model_validate({
-        "environmentId": "00000000-0000-0000-0000-000000000001", "configVersion": 1,
+        "environmentId": "00000000-0000-0000-0000-000000000001",
         "connection": {"type": adapter, "instanceId": "local", "host": "localhost", "port": 9030},
         "credentialRef": "local", "catalog": "warehouse", "schema": "analytics",
     })

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from typing import Final, Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -33,7 +31,6 @@ class ConnectionTarget(Contract):
 
 class ExecutionSnapshot(Contract):
     environment_id: UUID = Field(description="外部环境稳定身份，与源码无关")
-    config_version: int = Field(ge=1, description="外部环境配置版本，不是 worker 运行版本")
     connection: ConnectionTarget = Field(description="完整非敏感物理连接目标")
     credential_ref: str = Field(min_length=1, max_length=128, description="运行基础设施允许的 secret 引用")
     catalog: str = Field(pattern=IDENTIFIER_PATTERN, description="目标 catalog 或适配器数据库")
@@ -49,9 +46,3 @@ class ExecutionSnapshot(Contract):
         except (ZoneInfoNotFoundError, ValueError) as error:
             raise ValueError(INVALID_BUSINESS_TIMEZONE_MESSAGE) from error
         return value
-
-
-def physical_target_key(snapshot: ExecutionSnapshot) -> str:
-    """地址别名在入口核验为相同 instanceId，凭据不参与物理隔离。"""
-    parts = [snapshot.connection.type, snapshot.connection.instance_id, snapshot.catalog, snapshot.schema_name]
-    return hashlib.sha256(json.dumps(parts, separators=(",", ":")).encode()).hexdigest()

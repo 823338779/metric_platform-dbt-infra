@@ -33,9 +33,7 @@ WORKER_CONCURRENCY: 2
 JOB_LEASE_SECONDS: 90
 JOB_HEARTBEAT_SECONDS: 15
 
-# 当前实例的运行配置标识和工具链标识。
 # 工具链标识为 null 时，根据安装版本和服务代码自动计算。
-SERVICE_CONFIG_VERSION: "local-debug"
 SERVICE_TOOLCHAIN_VERSION: "dbt-core 1.12.5 / metricflow 0.213.0"
 
 # 公开查询/维度/血缘响应、单产物文件、单产物集的字节上限。

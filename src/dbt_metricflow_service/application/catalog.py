@@ -132,10 +132,9 @@ class CatalogService:
 
         # 无源码证据时仍返回节点；已有快照读取失败则保留明确错误，不掩盖损坏。
         source = None
-        job = self.builds.jobs.get(build.run_id) if path else None
-        if job and job.input_set_id:
+        if path and build.input_set_id:
             try:
-                content = self.artifacts.read_file(job.input_set_id, path).decode(strings.UTF8)
+                content = self.artifacts.read_file(build.input_set_id, path).decode(strings.UTF8)
             except (ValueError, KeyError) as error:
                 raise ServiceError(strings.SOURCE_UNAVAILABLE, UNAVAILABLE_SOURCE_MESSAGE, 503) from error
             source = ResourceSourceView(path=path, content=content)

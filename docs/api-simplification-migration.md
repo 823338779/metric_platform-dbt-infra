@@ -7,7 +7,7 @@
 
 | 对象 | 删除或变化 | 调用方调整 |
 | --- | --- | --- |
-| 构建响应 | 删除顶层 configVersion | 从 execution.configVersion 读取外部配置版本；worker 的 SERVICE_CONFIG_VERSION 含义不变 |
+| 执行配置 | 移除外部和服务端配置版本 | 每次提交完整 execution 快照，worker 按工具链版本领取任务 |
 | 维度选项 | 删除 valueType | 不依赖未可靠推导的值类型；dimensionType、granularities、operators 保留 |
 | 查询响应 | 删除 boundaryPolicy | 时间边界继续由 MetricFlow 根据粒度解释，normalizedTimeRange 只表示业务时区归一化的输入 |
 | 查询响应 | 按 mode 区分字段 | 不再假设四种模式都有 sql、rows、columns 和时间字段 |

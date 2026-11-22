@@ -7,7 +7,7 @@
 | `entities.py` | 显式表映射与共享列类型；不负责创建或升级表 |
 | `postgres.py` | 连接池、Session 事务及 schema 级事实事务锁 |
 | `records.py`、`rows.py` | 对外记录类型，以及实体到记录的转换 |
-| `jobs.py` | 任务受理、执行租约、完成与回收 |
+| `jobs.py` | 任务领取、执行租约、完成与回收 |
 | `builds.py`、`deployments.py` | 构建事实与部署意图 |
 | `execution_logs.py` | 独立的 dbt 详细运行日志，后台分批追加 |
 | `artifacts.py` | 产物内容、封存、读取与引用保护 |
@@ -15,9 +15,11 @@
 
 普通读取直接使用 `Session.get/scalar/scalars`，新增实体使用 `add/flush`。需要数据库原子判断的租约、版本、抢占和批量写入使用显式条件 DML；这些条件不藏进通用 Repository。
 
+普通构建受理只写入一条 `engine_build`，worker 按工具链和可领取时间从该表领取。构建和产物通过相同的 `project_id` 校验归属。新库不创建 `runtime_project`；已有库升级时，在停服期间执行 `detach_runtime_project.sql` 解除旧外键，保留历史表和数据。
+
 每个独立操作进入 `Database.session()`；写入构建或部署事实时使用 `fact_session()`，先取得当前数据库及 schema 范围的事务 advisory lock，保留既有事实写入的串行约束。跨 Store 的原子操作传递同一个 Session，不在内部再开启事务。`transaction()` 保留给管理命令和新库初始化的 Connection 调用。
 
-阶段、状态和错误码直接保存在 `runtime_job`，`engine_sync_job` 继续同步 `engine_build` 供构建详情查询。已删除 `engine_change`、`engine_change_counter` 及生成阶段变化历史的触发器，不再将执行状态复制为日志。`runtime_attempt` 继续记录重试、租约及实际执行状态；dbt 事件中的 phase 仅作为该条真实日志的上下文。
+阶段、状态和错误码直接更新在同一条 `engine_build` 上。旧库停止全部服务和 worker，完成前置迁移后执行 `merge_build_queue.sql`。脚本将执行尝试关联到构建，保留历史日志的 jobId，删除旧队列表和同步触发器。有未关联构建的旧任务时整个事务回滚。已删除 `engine_change`、`engine_change_counter` 及生成阶段变化历史的触发器，不再将执行状态复制为日志。`runtime_attempt` 继续记录重试、租约及实际执行状态；dbt 事件中的 phase 仅作为该条真实日志的上下文。
 
 Session 关闭 autoflush，涉及锁顺序或外键依赖时显式 flush。数据库触发器更新了已加载实体后，需要刷新或使用带 `populate_existing` 的返回查询，避免把旧 identity map 当成当前事实。实体转换在 Session 内完成。
 

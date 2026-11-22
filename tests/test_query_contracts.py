@@ -62,6 +62,7 @@ def test_mode_results_only_contain_relevant_fields(mode, extra, absent):
     assert not absent.intersection(result.model_dump(by_alias=True))
 
 
-def test_build_view_has_one_config_version_location():
-    assert "config_version" not in BuildView.model_fields
-    assert "execution" in BuildView.model_fields
+def test_build_view_and_execution_schema_omit_config_version():
+    schema = BuildView.model_json_schema()
+    assert "configVersion" not in schema["properties"]
+    assert "configVersion" not in schema["$defs"]["ExecutionSnapshot"]["properties"]

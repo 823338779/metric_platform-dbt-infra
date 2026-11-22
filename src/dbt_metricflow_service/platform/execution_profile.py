@@ -40,7 +40,7 @@ class ExecutionConfigurationError(ValueError):
 
 
 def validate_execution_target(snapshot: ExecutionSnapshot, settings: Settings) -> None:
-    """可信部署清单归一物理实例，防止别名或伪造实例身份绕过目标冲突。"""
+    """核对执行快照中的实例类型、地址或文件路径与服务允许的实例配置。"""
     target = snapshot.connection
     allowed = settings.execution_instances.get(target.instance_id)
     if allowed is None or allowed.type != target.type:

@@ -22,4 +22,4 @@
 
 ## 提交构建与恢复
 
-使用 `submit_build` 传入仓库、分支、完整提交 SHA、执行快照、显式部署策略和幂等键。快照中的 `credentialRef` 是已配置的引用。选 `ON_SUCCESS` 会触发部署尝试。返回构建 ID 后用 `get_build` 读取 `buildStatus`、`error` 和 `initialDeployment.deploymentStatus`。若收到 `BUILD_ACCEPTANCE_UNKNOWN`，用完全相同的输入和原键恢复。构建成功、部署失败时同时报告两个事实。
+使用 `submit_build` 传入仓库、分支、完整提交 SHA、执行快照和显式部署策略。为每次新构建生成一个全局唯一的 UUID，填入 `idempotency_key`。快照中的 `credentialRef` 是已配置的引用。选 `ON_SUCCESS` 会触发部署尝试。返回构建 ID 后用 `get_build` 读取 `buildStatus`、`error` 和 `initialDeployment.deploymentStatus`。若收到 `BUILD_ACCEPTANCE_UNKNOWN`，用原 UUID 重试即可找回已受理的构建。构建成功、部署失败时同时报告两个事实。

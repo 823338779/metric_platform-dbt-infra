@@ -19,12 +19,13 @@ from dbt_metricflow_service.storage.builds import BuildStore
 from dbt_metricflow_service.storage.deployments import DeploymentStore, natural
 from dbt_metricflow_service.storage.entities import (
     ArtifactSet,
+    Build,
     DeploymentAttempt,
     DeploymentTarget,
     RuntimeAttempt,
-    RuntimeJob,
 )
 from dbt_metricflow_service.storage.execution_logs import ExecutionLogStore
+from dbt_metricflow_service.storage.jobs import JobStore
 from dbt_metricflow_service.storage.records import ArtifactMetadata
 
 
@@ -46,19 +47,19 @@ def test_environment_retention(database, settings, build_request, tmp_path, exis
         if other_environment:
             execution = execution.model_copy(update={"environment_id": uuid4(), "schema_name": "other"})
         request = build_request.model_copy(update={
-            "idempotency_key": branch, "branch_name": branch, "execution": execution,
+            "idempotency_key": uuid4(), "branch_name": branch, "execution": execution,
             "repository": f"https://example.invalid/{branch}.git", "deployment_policy": DeploymentPolicy.ON_SUCCESS,
         })
         build = builds.load(builds.submit(request, "service").build_id)
-        job = store.jobs.claim(uuid4(), toolchain_version="test-toolchain", job_id=build.run_id)
+        job = JobStore(database).claim(uuid4(), toolchain_version="test-toolchain", build_id=build.build_id)
         ExecutionLogStore(database).append(job, "BUILD", "dbt", [EngineLog(datetime.now(UTC), "info", branch)])
         source = shared_source or artifacts.capture(job.project_id, project)
         output = artifacts.capture(job.project_id, project, kind="EXECUTION", metadata=ArtifactMetadata(
             source_set_id=source), memory_files={"target/manifest.json": b'{}'})
         with database.fact_session() as session:
             session.get(RuntimeAttempt, job.attempt_id).state = "SUCCEEDED"
-            row = session.get(RuntimeJob, job.job_id)
-            row.status, row.input_set_id, row.output_set_id = "SUCCEEDED", source, output
+            row = session.get(Build, job.build_id)
+            row.build_status, row.input_set_id, row.output_set_id = "SUCCEEDED", source, output
         key = DeploymentKey(repository=request.repository, environment=str(execution.environment_id),
                             branch_name=branch)
         return key, build, source, output
@@ -87,13 +88,13 @@ def test_environment_retention(database, settings, build_request, tmp_path, exis
     # 外部执行已停止但部署意图尚未协调的失败构建也应释放输入。
     _, unknown_build, unknown_source, _ = stage("unknown")
     with database.fact_session() as session:
-        job = session.get(RuntimeJob, unknown_build.run_id)
-        job.status, job.error_code = "FAILED", "EXECUTION_OUTCOME_UNKNOWN"
+        job = session.get(Build, unknown_build.build_id)
+        job.build_status, job.error_code = "OUTCOME_UNKNOWN", "EXECUTION_OUTCOME_UNKNOWN"
         session.get(RuntimeAttempt, job.current_attempt_id).state = "STOPPED"
     _, unsafe, unsafe_source, _ = stage("unsafe")
     with database.fact_session() as session:
-        job = session.get(RuntimeJob, unsafe.run_id)
-        job.status, job.error_code = "FAILED", "EXECUTION_OUTCOME_UNKNOWN"
+        job = session.get(Build, unsafe.build_id)
+        job.build_status, job.error_code = "OUTCOME_UNKNOWN", "EXECUTION_OUTCOME_UNKNOWN"
         session.get(RuntimeAttempt, job.current_attempt_id).state = "EXPIRED_UNCONFIRMED"
     pending, pending_build, _, _ = stage("pending")
     new, current_build, _, _ = stage("new", shared_source=old_source)
@@ -136,7 +137,7 @@ def test_environment_retention(database, settings, build_request, tmp_path, exis
         assert session.get(ArtifactSet, unknown_source) is None
         assert session.get(ArtifactSet, old_output) is None
         assert session.get(ArtifactSet, old_source) is not None
-    assert store.jobs.get(old_build.run_id).input_set_id is None
+    assert store.get(old_build.build_id).input_set_id is None
 
     # 此前已成功读取的目录、维度与查询不能通过旧构建身份再次读取。
     retired = builds.load(old_build.build_id)

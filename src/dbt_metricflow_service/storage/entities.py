@@ -23,78 +23,13 @@ class Base(DeclarativeBase):
     type_annotation_map = {str: Text, datetime: DateTime(timezone=True)}
 
 
-class RuntimeProject(Base):
-    """runtime_project 的持久字段；对外由 Store 返回记录快照。"""
-
-    __tablename__ = strings.RUNTIME_PROJECT_TABLE
-
-    project_id: Mapped[str] = mapped_column(primary_key=True, comment="请求中的逻辑项目标识")
-    binding_config: Mapped[JsonDocument] = mapped_column(
-        server_default=text(strings.SQL_EMPTY_JSON), comment="受控绑定的非敏感配置"
-    )
-    config_version: Mapped[str] = mapped_column(
-        server_default=text(strings.SQL_VERSION_ONE), comment="连接和项目配置版本"
-    )
-    source_set_id: Mapped[StringUUID | None] = mapped_column(comment="当前项目源码快照")
-    busy_job_id: Mapped[StringUUID | None] = mapped_column(comment="尚未确认停止的通用写任务")
-    revision: Mapped[BigInt] = mapped_column(server_default=text(strings.SQL_ZERO), comment="项目指针的乐观并发版本")
-
-
-class RuntimeJob(Base):
-    """runtime_job 的持久字段；对外由 Store 返回记录快照。"""
-
-    __tablename__ = strings.RUNTIME_JOB_TABLE
-
-    job_id: Mapped[StringUUID] = mapped_column(primary_key=True, comment="内部任务标识")
-    physical_target_key: Mapped[str | None] = mapped_column(comment="本次执行的物理写入目标")
-    target_claimed: Mapped[bool] = mapped_column(
-        server_default=text(strings.SQL_FALSE), comment="目标写入权是否仍被占用"
-    )
-    project_id: Mapped[str] = mapped_column(comment="所属逻辑项目")
-    parent_run_id: Mapped[StringUUID | None] = mapped_column(comment="历史父任务引用")
-    idempotency_scope: Mapped[str | None] = mapped_column(comment="幂等键的接口命名空间")
-    idempotency_key: Mapped[str | None] = mapped_column(comment="调用方提供的幂等键")
-    request_fingerprint: Mapped[str] = mapped_column(comment="包含固定输入和配置版本的规范化请求摘要")
-    request_json: Mapped[JsonDocument] = mapped_column(
-        server_default=text(strings.SQL_EMPTY_JSON), comment="排除临时 resources 和凭据的可重放参数"
-    )
-    input_set_id: Mapped[StringUUID | None] = mapped_column(comment="受理时固定的输入集合")
-    output_set_id: Mapped[StringUUID | None] = mapped_column(comment="成功事务发布的输出集合")
-    config_version: Mapped[str] = mapped_column(comment="执行所需配置版本")
-    toolchain_version: Mapped[str] = mapped_column(comment="执行所需工具链与镜像版本")
-    schema_name: Mapped[str | None] = mapped_column(comment="构建请求指定的固定物理 schema，多次构建可共用")
-    profile_binding_id: Mapped[str | None] = mapped_column(comment="不含凭据的 profile 绑定引用")
-    status: Mapped[str] = mapped_column(
-        server_default=text(strings.SQL_QUEUED), comment="持久队列及公开状态的内部生命周期"
-    )
-    phase: Mapped[str] = mapped_column(server_default=text(strings.SQL_PREPARING), comment="构建准备、执行与验证阶段")
-    attempt_no: Mapped[int] = mapped_column(server_default=text(strings.SQL_ZERO), comment="已经领取执行的次数")
-    current_attempt_id: Mapped[StringUUID | None] = mapped_column(comment="唯一当前执行 attempt")
-    available_at: Mapped[datetime] = mapped_column(
-        server_default=text(strings.SQL_CLOCK_TIMESTAMP), comment="允许领取或重试的最早时间"
-    )
-    max_attempts: Mapped[int] = mapped_column(
-        server_default=text(strings.SQL_THREE), comment="包含首次执行的受控最大尝试数"
-    )
-    retry_policy: Mapped[str] = mapped_column(
-        server_default=text(strings.SQL_PREPARATION_ONLY), comment="由受控绑定决定的安全重试类别"
-    )
-    error_code: Mapped[str | None] = mapped_column(comment="稳定错误诊断码")
-    error_detail: Mapped[JsonDocument | None] = mapped_column(comment="有界且已脱敏的错误诊断")
-    created_at: Mapped[datetime] = mapped_column(
-        server_default=text(strings.SQL_CLOCK_TIMESTAMP), comment="受理记录创建时间"
-    )
-    started_at: Mapped[datetime | None] = mapped_column(comment="首次实际领取时间")
-    finished_at: Mapped[datetime | None] = mapped_column(comment="任务最终结束时间")
-
-
 class RuntimeAttempt(Base):
     """runtime_attempt 的持久字段；对外由 Store 返回记录快照。"""
 
     __tablename__ = strings.RUNTIME_ATTEMPT_TABLE
 
     attempt_id: Mapped[StringUUID] = mapped_column(primary_key=True, comment="一次实际执行的标识")
-    job_id: Mapped[StringUUID] = mapped_column(comment="执行所属任务")
+    build_id: Mapped[StringUUID] = mapped_column(comment="所属构建")
     attempt_no: Mapped[int] = mapped_column(comment="任务内的执行序号")
     worker_id: Mapped[StringUUID] = mapped_column(comment="领取该执行的进程实例")
     lease_token: Mapped[StringUUID] = mapped_column(comment="该次执行唯一的状态写入凭证")
@@ -127,8 +62,8 @@ class RuntimeExecutionLog(Base):
         primary_key=True, server_default=text("nextval('runtime_execution_log_log_id_seq'::regclass)"),
         comment="日志递增标识；同一次命令按采集顺序写入",
     )
-    build_id: Mapped[StringUUID | None] = mapped_column(comment="关联构建，非构建任务为空")
-    job_id: Mapped[StringUUID] = mapped_column(comment="所属持久任务")
+    build_id: Mapped[StringUUID] = mapped_column(comment="日志所属构建")
+    job_id: Mapped[StringUUID] = mapped_column(comment="日志 API 的任务标识；旧日志保留历史值")
     attempt_id: Mapped[StringUUID] = mapped_column(comment="所属执行尝试，区分重试")
     phase: Mapped[str] = mapped_column(comment="采集时的任务阶段")
     command: Mapped[str] = mapped_column(comment="dbt 子命令，不保存命令参数")
@@ -160,7 +95,6 @@ class ArtifactSet(Base):
     source_commit_sha: Mapped[str | None] = mapped_column(comment="固定 Git 提交标识")
     project_digest: Mapped[str | None] = mapped_column(comment="原有项目内容摘要")
     source_set_id: Mapped[StringUUID | None] = mapped_column(comment="执行集合对应的不可变源码")
-    config_version: Mapped[str | None] = mapped_column(comment="恢复所需配置版本")
     toolchain_version: Mapped[str | None] = mapped_column(comment="恢复所需工具链版本")
     format_version: Mapped[str] = mapped_column(
         server_default=text(strings.SQL_VERSION_ONE), comment="持久产物格式版本"
@@ -198,20 +132,30 @@ class Build(Base):
     __tablename__ = strings.ENGINE_BUILD_TABLE
 
     build_id: Mapped[StringUUID] = mapped_column(primary_key=True, comment="一次构建身份")
-    run_id: Mapped[StringUUID] = mapped_column(comment="内部执行记录关联，不公开为构建身份")
+    project_id: Mapped[str] = mapped_column(comment="源码与输出集合的归属标识")
+    input_set_id: Mapped[StringUUID | None] = mapped_column(comment="固定源码集合")
+    project_digest: Mapped[str | None] = mapped_column(comment="固定源码摘要")
+    started_at: Mapped[datetime | None] = mapped_column(comment="首次领取时间")
+    error_detail: Mapped[JsonDocument | None] = mapped_column(comment="脱敏执行诊断")
+    attempt_no: Mapped[int] = mapped_column(server_default=text(strings.SQL_ZERO), comment="已经领取执行的次数")
+    current_attempt_id: Mapped[StringUUID | None] = mapped_column(comment="唯一当前执行 attempt")
+    available_at: Mapped[datetime] = mapped_column(
+        server_default=text(strings.SQL_CLOCK_TIMESTAMP), comment="允许领取或重试的最早时间"
+    )
+    max_attempts: Mapped[int] = mapped_column(
+        server_default=text(strings.SQL_THREE), comment="包含首次执行的受控最大尝试数"
+    )
+    retry_policy: Mapped[str] = mapped_column(
+        server_default=text(strings.SQL_PREPARATION_ONLY), comment="由受控绑定决定的安全重试类别"
+    )
     repository: Mapped[str] = mapped_column(comment="受控规范仓库地址")
     branch_name: Mapped[str | None] = mapped_column(comment="Git 短分支名")
     environment: Mapped[str] = mapped_column(comment="物理执行环境")
     environment_id: Mapped[StringUUID] = mapped_column(comment="外部环境稳定身份")
-    physical_target_key: Mapped[str] = mapped_column(comment="完整物理写入目标摘要")
-    config_version: Mapped[str] = mapped_column(comment="不可变执行配置版本")
     toolchain_version: Mapped[str] = mapped_column(comment="固定工具链版本")
     caller: Mapped[str] = mapped_column(comment="可信服务调用来源")
-    idempotency_key: Mapped[str] = mapped_column(comment="调用方稳定请求键")
-    request_digest: Mapped[str] = mapped_column(comment="规范化输入摘要")
+    idempotency_key: Mapped[StringUUID] = mapped_column(unique=True, comment="调用方分配的全局唯一构建 UUID")
     request_json: Mapped[JsonDocument] = mapped_column(comment="原始规范化请求")
-    config_snapshot: Mapped[JsonDocument] = mapped_column(comment="受理时固定的执行语义配置")
-    requested_commit_sha: Mapped[str | None] = mapped_column(comment="请求显式指定的提交")
     commit_sha: Mapped[str | None] = mapped_column(comment="实际固定源码提交")
     build_status: Mapped[str] = mapped_column(
         server_default=text(strings.SQL_QUEUED), comment="构建终态，不代表部署成功"
@@ -219,10 +163,13 @@ class Build(Base):
     phase: Mapped[str] = mapped_column(server_default=text(strings.SQL_RESOLVING_SOURCE), comment="执行进度阶段")
     output_set_id: Mapped[StringUUID | None] = mapped_column(comment="可靠封存产物引用")
     error_code: Mapped[str | None] = mapped_column(comment="脱敏稳定错误码")
-    version: Mapped[BigInt] = mapped_column(server_default=text(strings.SQL_ONE), comment="对象递增版本")
+    version: Mapped[BigInt] = mapped_column(
+        server_default=text(strings.SQL_ONE), onupdate=text("version + 1"), comment="对象递增版本"
+    )
     created_at: Mapped[datetime] = mapped_column(server_default=text(strings.SQL_CLOCK_TIMESTAMP), comment="受理时间")
     updated_at: Mapped[datetime] = mapped_column(
-        server_default=text(strings.SQL_CLOCK_TIMESTAMP), comment="最近事实变更时间"
+        server_default=text(strings.SQL_CLOCK_TIMESTAMP), onupdate=text(strings.SQL_CLOCK_TIMESTAMP),
+        comment="最近事实变更时间",
     )
     finished_at: Mapped[datetime | None] = mapped_column(comment="执行终态时间")
 
@@ -259,7 +206,6 @@ class DeploymentAttempt(Base):
     build_id: Mapped[StringUUID] = mapped_column(comment="一次构建身份")
     caller: Mapped[str] = mapped_column(comment="可信服务调用来源")
     idempotency_key: Mapped[str] = mapped_column(comment="调用方稳定请求键")
-    request_digest: Mapped[str] = mapped_column(comment="规范化输入摘要")
     operation: Mapped[str] = mapped_column(
         server_default=text(strings.SQL_BUILD), comment="历史部署来源；新意图固定为构建自动部署 BUILD"
     )

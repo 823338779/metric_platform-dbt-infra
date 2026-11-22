@@ -31,7 +31,7 @@ from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.builds import BuildStore
 from dbt_metricflow_service.storage.deployments import DeploymentStore
 from dbt_metricflow_service.storage.jobs import JobStore
-from dbt_metricflow_service.storage.records import ArtifactMetadata, LeasedJob
+from dbt_metricflow_service.storage.records import ArtifactMetadata
 
 
 @contextmanager
@@ -98,17 +98,16 @@ async def test_stdio_sales_on_oversized_catalog(database, settings, build_reques
             assert (await call("submit_build", args))["buildId"] == build_id
             async def finish(build_id):
                 build = builds.get(build_id)
-                leased = jobs.claim(uuid4(), toolchain_version="test", job_id=build.run_id)
+                leased = jobs.claim(uuid4(), toolchain_version="test", build_id=build.build_id)
                 source = artifacts.capture(leased.project_id, project, metadata=ArtifactMetadata(
                     project_digest="mcp-test", source_commit_sha=build.commit_sha))
-                assert jobs.attach_input(leased.job_id, leased.lease_token, source, project_digest="mcp-test")
-                leased = LeasedJob(**jobs.get(leased.job_id).model_dump(),
-                                   attempt_id=leased.attempt_id, lease_token=leased.lease_token)
+                assert jobs.attach_input(leased.build_id, leased.lease_token, source, project_digest="mcp-test")
+                leased = leased.model_copy(update={"input_set_id": source, "project_digest": "mcp-test"})
                 try:
                     built = await BuildExecutor(settings, jobs, artifacts).execute(leased)
                 except ExecutionError as exc:
                     pytest.fail(str(exc.payload))
-                assert jobs.finish(leased.job_id, leased.lease_token,
+                assert jobs.finish(leased.build_id, leased.lease_token,
                                    output_set_id=built.output_set_id, seal=artifacts.seal)
 
             await finish(build_id)
@@ -164,11 +163,15 @@ async def test_stdio_sales_on_oversized_catalog(database, settings, build_reques
             invalid = await session.call_tool("query_metrics", {**selection, "group_by": [{"optionId": "invalid"}]})
             assert invalid.isError and invalid.structuredContent["error"]["buildId"] == build_id
 
-            second = {**args, "idempotency_key": "second",
-                      "execution": {**args["execution"], "schema_name": "next", "config_version": 2}}
+            second = {**args, "idempotency_key": str(uuid4()),
+                      "execution": {**args["execution"], "schema_name": "next"}}
             second_id = (await call("submit_build", second))["buildId"]
             await finish(second_id)
             assert deployments.reconcile(key, 2).deployment_status == "DEPLOYED"
             assert (await call("get_current_deployment", deploy_args))["activeBuildId"] == second_id
-            assert (await call("query_metrics", {**selection, **bounds, "group_by": group,
-                                                 "order_by": ordering})) == result
+            # 同一环境切换部署后，原构建的查询资产已回收。
+            retired = await session.call_tool("query_metrics", {**selection, **bounds, "group_by": group,
+                                                                "order_by": ordering})
+            assert retired.isError
+            assert retired.structuredContent["error"]["code"] == "ARTIFACT_UNAVAILABLE"
+            assert retired.structuredContent["error"]["buildId"] == build_id

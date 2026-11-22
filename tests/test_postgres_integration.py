@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
@@ -11,26 +12,110 @@ from dbt_metricflow_service.models.deployments import DeploymentKey
 from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.builds import BuildStore
 from dbt_metricflow_service.storage.deployments import DeploymentStore
-from dbt_metricflow_service.storage.entities import Build, RuntimeJob
+from dbt_metricflow_service.storage.entities import Build, RuntimeAttempt
+from dbt_metricflow_service.storage.jobs import JobStore
+from dbt_metricflow_service.storage.schema import SCHEMA_FILE
+
+
+def test_detach_runtime_project_preserves_existing_builds(database, settings, build_request):
+    builds = BuildStore(database)
+    service = BuildService(builds, "test-toolchain", settings)
+    original = service.submit(build_request, "service")
+    with database.transaction() as connection:
+        connection.exec_driver_sql("""
+            CREATE TABLE runtime_job AS SELECT build_id AS job_id, project_id FROM engine_build;
+            ALTER TABLE runtime_job ADD PRIMARY KEY (job_id);
+            CREATE TABLE runtime_project (project_id text PRIMARY KEY,
+                busy_job_id uuid CONSTRAINT runtime_project_busy_fk REFERENCES runtime_job,
+                source_set_id uuid CONSTRAINT runtime_project_source_fk REFERENCES runtime_artifact_set);
+            INSERT INTO runtime_project (project_id, busy_job_id) SELECT project_id, job_id FROM runtime_job;
+            ALTER TABLE runtime_job ADD CONSTRAINT runtime_job_project_id_fkey
+                FOREIGN KEY (project_id) REFERENCES runtime_project;
+            ALTER TABLE runtime_artifact_set ADD CONSTRAINT runtime_artifact_set_project_id_fkey
+                FOREIGN KEY (project_id) REFERENCES runtime_project;
+        """)
+    with pytest.raises(RuntimeError, match="detach_runtime_project"):
+        database.check()
+    with database.transaction() as connection:
+        connection.exec_driver_sql(SCHEMA_FILE.with_name("detach_runtime_project.sql").read_text(encoding="utf-8"))
+        connection.exec_driver_sql("DROP TABLE runtime_job")
+    database.check()
+    assert service.submit(build_request, "service").build_id == original.build_id
+    new = service.submit(build_request.model_copy(update={"idempotency_key": uuid4()}), "service")
+    assert new.build_id != original.build_id
+    with database.transaction() as connection:
+        assert connection.exec_driver_sql("SELECT busy_job_id FROM runtime_project").scalars().all() == [
+            str(original.build_id)
+        ]
 
 
 def test_transactional_idempotency_after_config_removal(database, settings, build_request):
     store = BuildStore(database)
     service = BuildService(store, "test-toolchain", settings)
+    other = build_request.model_copy(update={"repository": "https://other.invalid/repo", "commit_sha": "c" * 40})
     with ThreadPoolExecutor(max_workers=2) as pool:
-        ids = list(pool.map(lambda _: service.submit(build_request, "service").build_id, range(2)))
+        first = pool.submit(service.submit, build_request, "service")
+        second = pool.submit(service.submit, other, "another-caller")
+        ids = [first.result().build_id, second.result().build_id]
     assert ids[0] == ids[1]
     revoked = BuildService(store, "different-toolchain", replace(settings, execution_instances={}))
     assert revoked.submit(build_request, "service").build_id == ids[0]
-    with pytest.raises(ServiceError) as conflict:
-        revoked.submit(build_request.model_copy(update={"commit_sha": "c" * 40}), "service")
-    assert conflict.value.status == 409
+    assert revoked.submit(other, "another-caller").build_id == ids[0]
+    new_request = build_request.model_copy(update={"idempotency_key": uuid4()})
     with pytest.raises(ServiceError) as invalid:
-        revoked.submit(build_request.model_copy(update={"idempotency_key": "new"}), "service")
+        revoked.submit(new_request, "service")
     assert invalid.value.error.code == "EXECUTION_TARGET_UNVERIFIED"
     with database.session() as session:
         assert session.scalar(select(func.count()).select_from(Build)) == 1
-        assert session.scalar(select(func.count()).select_from(RuntimeJob)) == 1
+    assert service.submit(new_request, "service").build_id != ids[0]
+
+
+def test_two_environments_can_enqueue_builds_for_the_same_schema(database, settings, build_request):
+    service = BuildService(BuildStore(database), "test-toolchain", settings)
+    first = service.submit(build_request, "service")
+    other = build_request.model_copy(update={
+        "idempotency_key": uuid4(),
+        "execution": build_request.execution.model_copy(update={"environment_id": uuid4()}),
+    })
+    second = service.submit(other, "service")
+    assert first.build_id != second.build_id
+    with database.session() as session:
+        assert session.scalar(select(func.count()).select_from(Build)) == 2
+
+
+def test_expired_preparation_requeues_same_build_and_fences_old_lease(database, settings, build_request):
+    builds = BuildStore(database)
+    view = BuildService(builds, "test", settings).submit(build_request, "caller")
+    queue = JobStore(database)
+    first = queue.claim(uuid4(), toolchain_version="test")
+    assert first.build_id == str(view.build_id)
+    with database.session() as session:
+        session.get(RuntimeAttempt, first.attempt_id).lease_expires_at = func.clock_timestamp()
+    assert queue.recover() == 1
+    assert builds.get(view.build_id).build_status == "QUEUED"
+    with database.session() as session:
+        session.get(Build, first.build_id).available_at = func.clock_timestamp()
+    second = queue.claim(uuid4(), toolchain_version="test")
+    assert second.build_id == first.build_id and second.attempt_id != first.attempt_id
+    assert not queue.fail(first.build_id, first.lease_token, "CANCELLED")
+    assert queue.fail(second.build_id, second.lease_token, "CANCELLED")
+    assert builds.get(view.build_id).build_status == "CANCELLED"
+
+
+def test_builds_in_one_environment_keep_independent_snapshots(database, settings, build_request):
+    store = BuildStore(database)
+    service = BuildService(store, "test-toolchain", settings)
+    first = service.submit(build_request, "service")
+    request = build_request.model_copy(update={
+        "idempotency_key": uuid4(), "execution": build_request.execution.model_copy(update={"threads": 2}),
+    })
+    second = service.submit(request, "service")
+    for view in (first, second):
+        build = store.get(view.build_id)
+        task = JobStore(database).claim(uuid4(), build_id=build.build_id, toolchain_version="test-toolchain")
+        assert task.execution == view.execution
+        assert task.build_id == build.build_id
+    assert first.execution.threads != second.execution.threads
 
 
 @pytest.mark.parametrize("old_head,head,state,status,reason", [
@@ -46,11 +131,10 @@ def test_postgres_observation_interleaving(database, settings, build_request, tm
     builds = BuildStore(database)
     view = BuildService(builds, "test-toolchain", settings).submit(request, "service")
     build = builds.get(view.build_id)
-    job = builds.jobs.get(build.run_id)
     source = tmp_path / "source"
     source.mkdir()
     (source / "dbt_project.yml").write_text("name: test\nversion: '1'\n", encoding="utf-8")
-    output = ArtifactStore(database).capture(job.project_id, source)
+    output = ArtifactStore(database).capture(build.project_id, source)
     # Seed a valid referenced artifact and completed build; SDK/finish behavior is covered separately.
     with database.fact_session() as session:
         row = session.get(Build, build.build_id)

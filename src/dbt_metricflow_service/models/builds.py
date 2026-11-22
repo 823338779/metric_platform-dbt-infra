@@ -47,7 +47,7 @@ class BuildRequest(Contract):
     commit_sha: str | None = Field(default=None, pattern=SHA_PATTERN, description="可选固定提交")
     execution: ExecutionSnapshot = Field(description="受理时固定的完整执行配置")
     deployment_policy: DeploymentPolicy = Field(default=DeploymentPolicy.NONE, description="成功部署意图")
-    idempotency_key: str = Field(min_length=1, max_length=256, description="一次提交的稳定请求键")
+    idempotency_key: UUID = Field(description="调用方为每个新构建生成的全局唯一 UUID，重试时复用")
     origin: Origin | None = Field(default=None, description="调用方追溯标签")
 
     _branch = field_validator(strings.BRANCH_NAME_FIELD)(validate_branch)

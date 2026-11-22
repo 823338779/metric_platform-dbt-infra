@@ -10,7 +10,7 @@ from dbt_metricflow_service.execution.logs import EngineLog
 from .entities import RuntimeExecutionLog
 from .paging import read_cursor, write_cursor
 from .postgres import Database
-from .records import LeasedJob, StoredExecutionLog
+from .records import LeasedBuild, StoredExecutionLog
 from .rows import entity_record
 
 EXECUTION_LOG_CURSOR_SCOPE = "build-execution-logs"
@@ -24,14 +24,14 @@ class ExecutionLogStore:
     def __init__(self, db: Database) -> None:
         self.db = db
 
-    def append(self, job: LeasedJob, phase: str, command: str, entries: Sequence[EngineLog]) -> None:
+    def append(self, job: LeasedBuild, phase: str, command: str, entries: Sequence[EngineLog]) -> None:
         with self.db.session() as session:
             # 在序列分配前串行化同一构建的日志事务，避免迟提交批次被前端游标越过。
             # 只锁日志命名空间，既不持有构建行锁，也不获取业务事实计数器锁。
-            scope = EXECUTION_LOG_LOCK_PREFIX + (job.request_json.build_id or job.job_id)
+            scope = EXECUTION_LOG_LOCK_PREFIX + job.build_id
             session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(scope, 0))))
             session.add_all(RuntimeExecutionLog(
-                build_id=job.request_json.build_id, job_id=job.job_id, attempt_id=job.attempt_id,
+                build_id=job.build_id, job_id=job.build_id, attempt_id=job.attempt_id,
                 phase=phase, command=command, event_time=entry.event_time, level=entry.level,
                 message=entry.message, event_name=entry.event_name, event_code=entry.event_code,
                 invocation_id=entry.invocation_id, node_id=entry.node_id, thread_name=entry.thread_name,

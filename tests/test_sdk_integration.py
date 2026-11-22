@@ -15,7 +15,7 @@ from dbt_metricflow_service.storage.artifacts import ArtifactStore
 from dbt_metricflow_service.storage.builds import BuildStore
 from dbt_metricflow_service.storage.deployments import DeploymentStore
 from dbt_metricflow_service.storage.jobs import JobStore
-from dbt_metricflow_service.storage.records import ArtifactMetadata, LeasedJob
+from dbt_metricflow_service.storage.records import ArtifactMetadata
 
 
 def write_project(directory):
@@ -82,21 +82,20 @@ def test_real_build_and_all_http_operations(database, settings, build_request, t
     assert "configVersion" not in accepted.json()
     builds = BuildStore(database)
     build = builds.get(build_id)
-    leased = jobs.claim(uuid4(), toolchain_version="test-toolchain", job_id=build.run_id)
+    leased = jobs.claim(uuid4(), toolchain_version="test-toolchain", build_id=build.build_id)
     assert leased is not None
     project = tmp_path / "input"
     write_project(project)
     source_id = artifacts.capture(leased.project_id, project, metadata=ArtifactMetadata(
         project_digest="test-project-digest", source_commit_sha=build.commit_sha,
     ))
-    assert jobs.attach_input(leased.job_id, leased.lease_token, source_id, project_digest="test-project-digest")
-    leased = LeasedJob(**jobs.get(leased.job_id).model_dump(),
-                       attempt_id=leased.attempt_id, lease_token=leased.lease_token)
+    assert jobs.attach_input(leased.build_id, leased.lease_token, source_id, project_digest="test-project-digest")
+    leased = leased.model_copy(update={"input_set_id": source_id, "project_digest": "test-project-digest"})
     result = asyncio.run(BuildExecutor(settings, jobs, artifacts).execute(leased))
-    assert not (settings.temp_root / str(leased.job_id)).exists()
+    assert not (settings.temp_root / str(leased.build_id)).exists()
     # A stale lease cannot publish; the proper lease seals and publishes the same output.
-    assert not jobs.finish(leased.job_id, uuid4(), output_set_id=result.output_set_id, seal=artifacts.seal)
-    assert jobs.finish(leased.job_id, leased.lease_token, output_set_id=result.output_set_id, seal=artifacts.seal)
+    assert not jobs.finish(leased.build_id, uuid4(), output_set_id=result.output_set_id, seal=artifacts.seal)
+    assert jobs.finish(leased.build_id, leased.lease_token, output_set_id=result.output_set_id, seal=artifacts.seal)
     view = client.get(f"/builds/{build_id}").json()
     assert view["buildStatus"] == "SUCCEEDED"
     assert view["catalogAvailable"] is True
