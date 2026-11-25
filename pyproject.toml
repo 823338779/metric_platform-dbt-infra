@@ -32,15 +32,8 @@ dev = [
 ]
 
 [project.scripts]
-dbt-metricflow-mcp = "dbt_metricflow_service.mcp_server:run"
 dbt-metricflow-service = "dbt_metricflow_service.main:run"
 dbt-service-admin = "dbt_metricflow_service.admin:main"
-
-[project.optional-dependencies]
-mcp = [
-    "httpx==0.28.1",
-    "mcp>=1.20,<2",
-]
 
 [build-system]
 requires = ["hatchling==1.27.0"]
